@@ -4,7 +4,18 @@
 # hand-back, Block, and the action log.
 param([Parameter(Mandatory = $true)][string]$Version, [string]$Remote = ".\target\release\rigdesk-remote.exe")
 $ErrorActionPreference = "Stop"
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class Win {
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+}
+"@
 
 $out = Join-Path $env:RUNNER_TEMP "stock-smoke"
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -55,7 +66,7 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $config "RustDesk.toml"), "password = '$password'`nsalt = 'stocksmoke1'`n", $utf8)
 [IO.File]::WriteAllText((Join-Path $config "RustDesk2.toml"), "[options]`ndirect-server = 'Y'`nverification-method = 'use-permanent-password'`napprove-mode = 'password'`n", $utf8)
 
-$notepad = Start-Process notepad -PassThru
+$null = Start-Process notepad -PassThru
 $null = Start-Process $exe -ArgumentList "--server" -PassThru
 $listening = $false
 foreach ($i in 1..90) {
@@ -70,7 +81,7 @@ $secrets = Join-Path $env:RUNNER_TEMP "stock-secrets"
 New-Item -ItemType Directory -Force $secrets | Out-Null
 [IO.File]::WriteAllText((Join-Path $secrets "password"), $password, $utf8)
 [IO.File]::WriteAllText((Join-Path $secrets "token"), $token, $utf8)
-$remote = Start-Process $Remote -PassThru -RedirectStandardError (Join-Path $out "remote.err.log") -RedirectStandardOutput (Join-Path $out "remote.out.log") `
+$remote = Start-Process $Remote -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $out "remote.err.log") -RedirectStandardOutput (Join-Path $out "remote.out.log") `
   -ArgumentList @("--peer", "127.0.0.1", "--password-file", (Join-Path $secrets "password"), "--token-file", (Join-Path $secrets "token"),
                   "--port", "21120", "--journal", (Join-Path $out "actions.jsonl"))
 try {
@@ -92,15 +103,17 @@ try {
   $ox = [int]$Matches[4]; $oy = [int]$Matches[5]
 
   # Where Notepad's text area is, found by the test itself: a stock PC has no UI tree for the agent.
-  $root = [Windows.Automation.AutomationElement]::RootElement
-  $byPid = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ProcessIdProperty, $notepad.Id)
-  $window = $root.FindFirst([Windows.Automation.TreeScope]::Children, $byPid)
-  $isEdit = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Edit)
-  $isDoc = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Document)
-  $edit = $window.FindFirst([Windows.Automation.TreeScope]::Descendants, (New-Object Windows.Automation.OrCondition($isEdit, $isDoc)))
-  if (-not $edit) { Fail "the test could not find Notepad's text area" }
-  $r = $edit.Current.BoundingRectangle
-  $x = [int]($r.X + $r.Width / 2) - $ox; $y = [int]($r.Y + $r.Height / 2) - $oy
+  $window = [IntPtr]::Zero
+  foreach ($i in 1..20) { $window = [Win]::FindWindow("Notepad", $null); if ($window -ne [IntPtr]::Zero) { break }; Start-Sleep -Milliseconds 500 }
+  if ($window -eq [IntPtr]::Zero) { Fail "the test could not find Notepad's window" }
+  # Topmost, so no console window the runner opens covers it.
+  $null = [Win]::SetWindowPos($window, [IntPtr](-1), 200, 150, 600, 400, 0x40)
+  Start-Sleep -Milliseconds 500
+  $edit = [Win]::FindWindowEx($window, [IntPtr]::Zero, "Edit", $null)
+  if ($edit -eq [IntPtr]::Zero) { Fail "the test could not find Notepad's text area" }
+  $r = New-Object Win+RECT
+  $null = [Win]::GetWindowRect($edit, [ref]$r)
+  $x = [int](($r.Left + $r.Right) / 2) - $ox; $y = [int](($r.Top + $r.Bottom) / 2) - $oy
   Write-Host "Notepad's text area centre: $x,$y in screenshot pixels"
 
   $clicked = Tool "click" @{ x = $x; y = $y }
@@ -156,7 +169,6 @@ try {
   if ((Get-Content -Raw (Join-Path $out "remote.err.log")) -match [regex]::Escape($password)) { Fail "the password reached rigdesk-remote's log" }
   Write-Host "stock $Version smoke passed"
 } finally {
-  Stop-Process -Id $remote.Id -Force -ErrorAction SilentlyContinue
-  Get-Process rustdesk -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Stop-Process -Id $notepad.Id -Force -ErrorAction SilentlyContinue
+  if ($remote) { Stop-Process -Id $remote.Id -Force -ErrorAction SilentlyContinue }
+  Get-Process rustdesk, notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
