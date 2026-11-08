@@ -103,12 +103,12 @@ jobs:
           architecture: x64
       # https://github.com/flutter/flutter/issues/155685: upstream builds Windows on its own engine build.
       - name: Replace the Flutter engine with RustDesk's
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           flutter precache --windows
-          foreach ($try in 1..8) {
-            try { Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip; break }
-            catch { if ($try -eq 8) { throw }; Write-Host "engine download failed ($_); retrying"; Start-Sleep -Seconds (15 * $try) }
-          }
+          python .github/ci/fetch_asset.py https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip windows-x64-release.zip
+          if ($LASTEXITCODE -ne 0) { throw 'engine download failed' }
           Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
           mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
       - name: Patch Flutter
@@ -125,42 +125,29 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: windows-2022
-      - name: Keep the image's vcpkg tool
-        shell: bash
-        run: cp /c/vcpkg/vcpkg.exe "$RUNNER_TEMP/vcpkg-image.exe"
-      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
-        id: vcpkg
-        continue-on-error: true
-        with:
-          vcpkgDirectory: C:\vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
-      # Its vcpkg-tool download comes from GitHub releases, which sometimes answer 504 for minutes.
-      - name: Wait before retrying vcpkg
-        if: steps.vcpkg.outcome == 'failure'
-        run: Start-Sleep -Seconds 90
-      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
-        id: vcpkg2
-        if: steps.vcpkg.outcome == 'failure'
-        continue-on-error: true
-        with:
-          vcpkgDirectory: C:\vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
-      # When that download keeps failing, build the pinned ports with the vcpkg tool the runner image ships.
-      - name: Fall back to the image's vcpkg tool
-        if: steps.vcpkg.outcome == 'failure' && steps.vcpkg2.outcome == 'failure'
+      # GitHub's release download pages sometimes answer 504 for hours while its API serves the same assets, so the
+      # vcpkg tool and every download vcpkg makes go through .github/ci/fetch_asset.py.
+      - name: vcpkg at the pinned commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           cd /c/vcpkg
           git rev-parse -q --verify "$VCPKG_COMMIT_ID^{commit}" >/dev/null || git fetch -q origin "$VCPKG_COMMIT_ID"
           git checkout -q -f "$VCPKG_COMMIT_ID"
-          cp "$RUNNER_TEMP/vcpkg-image.exe" vcpkg.exe
+          tag=$(sed -n 's/^VCPKG_TOOL_RELEASE_TAG=//p' scripts/vcpkg-tool-metadata.txt | tr -d '\r')
+          if python "$GITHUB_WORKSPACE/.github/ci/fetch_asset.py" "https://github.com/microsoft/vcpkg-tool/releases/download/$tag/vcpkg.exe" vcpkg.new.exe; then
+            mv -f vcpkg.new.exe vcpkg.exe
+          else
+            echo "::warning::vcpkg tool $tag unavailable; using the runner image's"
+          fi
           ./vcpkg.exe version | head -1
           echo 'VCPKG_ROOT=C:\vcpkg' >> "$GITHUB_ENV"
       - name: Install vcpkg dependencies
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
+          X_VCPKG_ASSET_SOURCES: clear;x-script,python ${{ github.workspace }}/.github/ci/fetch_asset.py {url} {dst}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           # Tool and source downloads come from GitHub releases, which sometimes answer 504 for minutes; finished
