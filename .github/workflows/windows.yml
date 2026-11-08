@@ -163,10 +163,16 @@ jobs:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
         shell: bash
         run: |
-          if ! $VCPKG_ROOT/vcpkg install --triplet $VCPKG_TRIPLET --x-install-root="$VCPKG_ROOT/installed"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r log; do echo "$log:"; cat "$log"; done
-            exit 1
-          fi
+          # Tool and source downloads come from GitHub releases, which sometimes answer 504 for minutes; finished
+          # downloads stay in vcpkg's download cache, so each attempt picks up where the last one stopped.
+          for try in 1 2 3 4 5; do
+            if $VCPKG_ROOT/vcpkg install --triplet $VCPKG_TRIPLET --x-install-root="$VCPKG_ROOT/installed"; then
+              exit 0
+            fi
+            [ $try -lt 5 ] && { echo "vcpkg install failed (attempt $try); retrying"; sleep $((60 * try)); }
+          done
+          find "${VCPKG_ROOT}/" -name "*.log" | while read -r log; do echo "$log:"; cat "$log"; done
+          exit 1
       - name: Build
         run: |
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
