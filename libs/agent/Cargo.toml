@@ -1,0 +1,25 @@
+[package]
+name = "rigdesk-agent"
+version = "0.1.0"
+edition = "2021"
+description = "RigDesk's agent API: one desktop shared by a human and the agent they shared it with, over MCP"
+license = "AGPL-3.0"
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+log = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
