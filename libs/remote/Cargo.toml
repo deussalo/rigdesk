@@ -1,0 +1,11 @@
+[package]
+name = "rigdesk-remote"
+version = "0.1.0"
+edition = "2021"
+description = "Drives a stock RustDesk PC for a Rig agent: a headless RustDesk client on the Rig host that serves RigDesk's agent API"
+license = "AGPL-3.0"
+
+[dependencies]
+base = { path = "../base" }
+hbb_common = { path = "../hbb_common" }
+rigdesk-agent = { path = "../agent" }

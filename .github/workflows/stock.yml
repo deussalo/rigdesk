@@ -1,0 +1,74 @@
+# RigDesk's agent on stock RustDesk PCs (plan S9): rigdesk-remote, the headless client that runs on the Rig host, built
+# for Linux, and driven end to end on a Windows runner against unmodified RustDesk, the oldest release it supports and
+# the newest.
+name: stock
+
+on:
+  push:
+    branches: [master, "s*"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.75"
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang pkg-config libx11-dev
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: stock-linux
+      - name: Unit tests
+        run: cargo test -p rigdesk-remote -p rigdesk-agent --locked
+      - name: Build
+        run: |
+          cargo build --release -p rigdesk-remote --locked
+          ldd target/release/rigdesk-remote
+          ./target/release/rigdesk-remote 2>&1 | grep -q -- "--peer is required"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rigdesk-remote-linux-x64
+          path: target/release/rigdesk-remote
+
+  windows:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        stock: ["1.4.0", "1.5.1"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: stock-windows
+      - name: Build
+        run: cargo build --release -p rigdesk-remote --locked
+      - name: Stock RustDesk ${{ matrix.stock }}, driven by rigdesk-remote
+        timeout-minutes: 10
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .\.github\smoke\stock.ps1 -Version ${{ matrix.stock }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: stock-smoke-${{ matrix.stock }}
+          path: ${{ runner.temp }}/stock-smoke
+          if-no-files-found: ignore

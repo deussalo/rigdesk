@@ -10,6 +10,8 @@
 //!   POST /attachments/<id>/ack - mark messages delivered up to the message that image belongs to
 //!   POST /leave            - the owning agent ends its session
 //!   POST /debug/mint, /debug/viewer/<hand|human|block|unblock> - only with RIGDESK_AGENT_DEBUG_MINT set, for CI
+//!   POST /viewer/mint, /viewer/<hand|human|block|unblock|revoke> - only from `Api::hosted`, where no RigDesk viewer
+//!        carries the human's buttons (a stock RustDesk PC driven from the Rig host), so the bearer's holder presses them
 //!   GET  /health           - liveness, this process's boot id and the current standing
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 
@@ -44,6 +46,7 @@ pub struct Api {
     bearer: [u8; 32],
     /// Fresh each start: event ids and sessions do not outlive the process, so a client that sees a new boot starts over.
     boot: String,
+    viewer_routes: bool,
 }
 
 fn full(bytes: impl Into<Bytes>) -> Body {
@@ -66,7 +69,14 @@ impl Api {
     pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false })
+    }
+
+    /// As `new`, plus the `/viewer/*` routes: the human's share and holder buttons, for a host with no RigDesk viewer.
+    pub fn hosted(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
+        let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
+        let boot = format!("{:016x}", rand::random::<u64>());
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true })
     }
 
     fn bearer_ok(&self, request: &Request<Incoming>) -> bool {
@@ -128,6 +138,21 @@ impl Api {
                     "human" => self.shared.human_input("debug"),
                     "block" => self.shared.block(),
                     "unblock" => self.shared.unblock(),
+                    _ => return text(StatusCode::NOT_FOUND, "no such viewer verb"),
+                };
+                json_response(StatusCode::OK, &json!({"changed": done, "standing": self.shared.standing()}))
+            }
+            ("POST", "/viewer/mint") if self.viewer_routes => {
+                let minted = self.shared.mint();
+                json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
+            }
+            ("POST", p) if p.starts_with("/viewer/") && self.viewer_routes => {
+                let done = match p.trim_start_matches("/viewer/") {
+                    "hand" => self.shared.hand_to_agent(),
+                    "human" => self.shared.human_input("the operator"),
+                    "block" => self.shared.block(),
+                    "unblock" => self.shared.unblock(),
+                    "revoke" => self.shared.revoke("the operator revoked the share"),
                     _ => return text(StatusCode::NOT_FOUND, "no such viewer verb"),
                 };
                 json_response(StatusCode::OK, &json!({"changed": done, "standing": self.shared.standing()}))
