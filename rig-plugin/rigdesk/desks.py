@@ -33,7 +33,7 @@ SETTINGS_EVERY_S = 5.0
 CALL_LIMIT_S = 120.0
 FILES_KEPT = 300
 REMOTE_LOG_BYTES = 4 * 1024 * 1024
-VIEWER_VERBS = frozenset({"mint", "hand", "human", "block", "unblock", "revoke"})
+VIEWER_VERBS = frozenset({"mint", "hand", "human", "stop", "block", "unblock", "revoke"})
 LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
@@ -133,6 +133,9 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
         holder, by = event.get("holder"), event.get("by", "")
         if by == "share":
             return None
+        if by == "stop":
+            return (f"RigDesk {pc}: the human pressed Stop at {at}. Stop what you are doing there and wait for them; "
+                    "your actions there are refused until they hand input back.")
         if holder == "human" and by == "unblock":
             return f"RigDesk {pc}: the human unblocked you at {at}. Input stays with them until they hand it to you; reads work again."
         if holder == "human":

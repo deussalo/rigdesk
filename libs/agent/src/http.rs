@@ -10,8 +10,10 @@
 //!   POST /attachments/<id>/ack - mark messages delivered up to the message that image belongs to
 //!   POST /leave            - the owning agent ends its session
 //!   POST /debug/mint, /debug/viewer/<hand|human|block|unblock> - only with RIGDESK_AGENT_DEBUG_MINT set, for CI
-//!   POST /viewer/mint, /viewer/<hand|human|block|unblock|revoke> - only from `Api::hosted`, where no RigDesk viewer
+//!   POST /viewer/mint, /viewer/<hand|human|stop|block|unblock|revoke> - only from `Api::hosted`, where no RigDesk viewer
 //!        carries the human's buttons (a stock RustDesk PC driven from the Rig host), so the bearer's holder presses them
+//!   POST /viewer/note {text, pngs: [base64]} - from `Api::hosted`: the human's message to the owning agent
+//!   GET  /viewer/frame     - from `Api::hosted`: a PNG of the PC's screen now, for the human to clip and draw on
 //!   GET  /health           - liveness, this process's boot id and the current standing
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 
@@ -146,10 +148,13 @@ impl Api {
                 let minted = self.shared.mint();
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
             }
+            ("POST", "/viewer/note") if self.viewer_routes => self.note(request).await,
+            ("GET", "/viewer/frame") if self.viewer_routes => self.frame(request).await,
             ("POST", p) if p.starts_with("/viewer/") && self.viewer_routes => {
                 let done = match p.trim_start_matches("/viewer/") {
                     "hand" => self.shared.hand_to_agent(),
                     "human" => self.shared.human_input("the operator"),
+                    "stop" => self.shared.stop(),
                     "block" => self.shared.block(),
                     "unblock" => self.shared.unblock(),
                     "revoke" => self.shared.revoke("the operator revoked the share"),
@@ -165,6 +170,52 @@ impl Api {
 
     fn session_token<'a>(&self, request: &'a Request<Incoming>) -> Option<&'a str> {
         request.headers().get("x-desk-session").and_then(|v| v.to_str().ok())
+    }
+
+    async fn note(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+        use base64::Engine;
+        let Some(body) = Self::body_json(request).await else {
+            return text(StatusCode::BAD_REQUEST, "note wants a JSON body");
+        };
+        if self.shared.standing().owner.is_none() {
+            return text(StatusCode::CONFLICT, "no agent has joined: share the PC with one first");
+        }
+        let text_said = body.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+        let mut pngs = Vec::new();
+        for png in body.get("pngs").and_then(Value::as_array).into_iter().flatten() {
+            match png.as_str().map(|b| base64::engine::general_purpose::STANDARD.decode(b)) {
+                Some(Ok(bytes)) => pngs.push(bytes),
+                _ => return text(StatusCode::BAD_REQUEST, "pngs holds base64 PNG strings"),
+            }
+        }
+        if text_said.trim().is_empty() && pngs.is_empty() {
+            return text(StatusCode::BAD_REQUEST, "an empty note");
+        }
+        let id = self.shared.events.message(text_said, pngs);
+        json_response(StatusCode::OK, &json!({"event": id}))
+    }
+
+    async fn frame(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+        let display = query_number(request.uri().query(), "display");
+        let args = display.map_or(json!({}), |d| json!({"display": d}));
+        let desk = self.mcp.desk.clone();
+        let shot = tokio::task::spawn_blocking(move || desk.call("screenshot", &args)).await;
+        let png = match shot {
+            Ok(Ok(content)) => content.into_iter().find_map(|c| match c {
+                crate::desk::Content::Png(png) => Some(png),
+                _ => None,
+            }),
+            Ok(Err(why)) => return text(StatusCode::SERVICE_UNAVAILABLE, &why),
+            Err(_) => None,
+        };
+        match png {
+            Some(png) => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "image/png")
+                .body(full(png))
+                .unwrap_or_else(|_| Response::new(full(""))),
+            None => text(StatusCode::SERVICE_UNAVAILABLE, "the screenshot gave no image"),
+        }
     }
 
     async fn body_json(request: Request<Incoming>) -> Option<Value> {
@@ -404,5 +455,27 @@ mod tests {
         let refused = post(port, "/mcp", &token, &call).await;
         assert_eq!(refused["result"]["isError"], json!(true));
         assert!(shared.standing().owner.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_viewer_stops_the_agent_and_sends_it_a_note() {
+        let shared = Arc::new(Shared::new(Events::new(64)));
+        let api = Api::hosted(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::memory()), "b");
+        let port = api.serve(0).await.unwrap();
+        let minted = post(port, "/viewer/mint", "", &json!({})).await;
+        let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
+        post(port, "/claim", "", &json!({"grant": minted["grant"], "secret": minted["secret"], "agent": agent})).await;
+        let mut events = shared.events.subscribe();
+        assert_eq!(post(port, "/viewer/stop", "", &json!({})).await["standing"]["holder"], json!("human"));
+        let stopped = events.recv().await.unwrap();
+        assert!(matches!(stopped.kind, EventKind::Holder { ref by, .. } if by == "stop"), "{stopped:?}");
+        post(port, "/viewer/stop", "", &json!({})).await;
+        let again = events.recv().await.unwrap();
+        assert!(matches!(again.kind, EventKind::Holder { ref by, .. } if by == "stop"), "a second Stop still reaches the agent: {again:?}");
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD.encode([0x89u8, b'P', b'N', b'G']);
+        post(port, "/viewer/note", "", &json!({"text": "look here", "pngs": [png]})).await;
+        let note = events.recv().await.unwrap();
+        assert!(matches!(note.kind, EventKind::Message { ref text, ref attachments } if text == "look here" && attachments.len() == 1), "{note:?}");
     }
 }

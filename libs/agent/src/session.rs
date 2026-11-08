@@ -180,6 +180,18 @@ impl Shared {
         self.set(Holder::Human, by, |now| now == Holder::Agent)
     }
 
+    /// The human's Stop: input is theirs at once, and the owning agent is told to stop even if it held none, so the
+    /// bridge can cut its turn short. False with no agent joined.
+    pub fn stop(&self) -> bool {
+        if self.set(Holder::Human, "stop", |now| now == Holder::Agent) {
+            return true;
+        }
+        let state = self.state.lock().unwrap();
+        let Some(session) = state.session.as_ref() else { return false };
+        self.events.push(EventKind::Holder { holder: session.holder, by: "stop".into() });
+        true
+    }
+
     pub fn hand_to_agent(&self) -> bool {
         self.set(Holder::Agent, "hand to agent", |now| now == Holder::Human)
     }

@@ -16,6 +16,7 @@ def test_the_agent_hears_of_takeover_and_block_but_not_of_its_own_join_or_leave(
     assert "took input back" in str(words_of("deus", {"type": "holder", "holder": "human", "by": "viewer input", "at_ms": 0}))
     assert "blocked you" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "block", "at_ms": 0}))
     assert words_of("deus", {"type": "holder", "holder": "agent", "by": "share", "at_ms": 0}) is None
+    assert "pressed Stop" in str(words_of("deus", {"type": "holder", "holder": "human", "by": "stop", "at_ms": 0}))
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
 
 

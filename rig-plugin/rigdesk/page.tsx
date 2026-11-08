@@ -46,7 +46,7 @@ function OwnerOf({ owner }: { readonly owner: Owner }): ReactNode {
   return owner.graph !== null && owner.id !== null ? <Link href={href('agent', { graph: owner.graph, agent: owner.id })}>{title}</Link> : <>{title}</>
 }
 
-type Verb = 'mint' | 'hand' | 'human' | 'block' | 'unblock' | 'revoke'
+type Verb = 'mint' | 'hand' | 'human' | 'stop' | 'block' | 'unblock' | 'revoke'
 
 /** A stock RustDesk PC has no RigDesk viewer, so its human's buttons are here: share it with an agent, hand or take back input, block, end the share. */
 function StockButtons({ pc, minted }: { readonly pc: PcRow; readonly minted: (link: string) => void }): ReactNode {
@@ -65,7 +65,7 @@ function StockButtons({ pc, minted }: { readonly pc: PcRow; readonly minted: (li
     <>
       <Action label="share with agent" tone="primary" pending="minting…" disabled={pc.state !== 'up'} onInvoke={act('mint')} />
       {owned && pc.holder === 'human' ? <Action label="hand to agent" onInvoke={act('hand')} /> : null}
-      {owned && pc.holder === 'agent' ? <Action label="take back" onInvoke={act('human')} /> : null}
+      {owned ? <Action label="stop" tone="danger" onInvoke={act('stop')} /> : null}
       {owned && pc.holder !== 'blocked' ? <Action label="block" tone="danger" onInvoke={act('block')} /> : null}
       {owned && pc.holder === 'blocked' ? <Action label="unblock" onInvoke={act('unblock')} /> : null}
       {owned ? <Action label="end share" tone="danger" onInvoke={act('revoke')} /> : null}

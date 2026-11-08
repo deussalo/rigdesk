@@ -204,7 +204,7 @@ async def get_session(request: Request[SessionParams]) -> SessionView:
     return SessionView(session=request.host().live(Desks).session_of(request.params.graph, request.params.agent))
 
 
-type ViewerVerb = Literal["mint", "hand", "human", "block", "unblock", "revoke"]
+type ViewerVerb = Literal["mint", "hand", "human", "stop", "block", "unblock", "revoke"]
 
 
 class ViewerBody(BaseModel):
@@ -224,7 +224,7 @@ class ViewerDone(View):
 
 @endpoint(ViewerParams, OPERATOR)
 async def post_viewer(request: Request[ViewerParams]) -> ViewerDone | RefusedOutcome:
-    """A stock PC's viewer buttons: mint a share link, hand input to the agent, take it back (human), block, unblock or revoke the share."""
+    """A stock PC's viewer buttons: mint a share link, hand input to the agent, take it back (human), stop the agent, block, unblock or revoke the share."""
     body = request.params.body
     try:
         return ViewerDone(**await request.host().live(Desks).viewer(body.pc, body.verb))
