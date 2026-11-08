@@ -100,9 +100,17 @@ pub fn shortcut(spec: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Each key event names the modifiers that must be down with it: the injection path releases any modifier the event
+/// does not list before pressing its key, as it does for the viewer's own events.
+fn with_modifiers(modifiers: &[ControlKey]) -> KeyEvent {
+    let mut evt = legacy();
+    evt.modifiers = modifiers.iter().map(|m| EnumOrUnknown::new(*m)).collect();
+    evt
+}
+
 fn tap(ck: ControlKey, modifiers: &[ControlKey]) {
     hold(modifiers, true);
-    let mut evt = legacy();
+    let mut evt = with_modifiers(modifiers);
     evt.set_control_key(ck);
     evt.down = true;
     handle_key(&evt);
@@ -113,7 +121,7 @@ fn tap(ck: ControlKey, modifiers: &[ControlKey]) {
 
 fn tap_unicode(c: char, modifiers: &[ControlKey]) {
     hold(modifiers, true);
-    let mut evt = legacy();
+    let mut evt = with_modifiers(modifiers);
     evt.set_chr(c as u32);
     evt.down = true;
     handle_key(&evt);
@@ -123,8 +131,8 @@ fn tap_unicode(c: char, modifiers: &[ControlKey]) {
 }
 
 fn hold(modifiers: &[ControlKey], down: bool) {
-    for m in modifiers {
-        let mut evt = legacy();
+    for (i, m) in modifiers.iter().enumerate() {
+        let mut evt = with_modifiers(&modifiers[..i]);
         evt.set_control_key(*m);
         evt.down = down;
         handle_key(&evt);

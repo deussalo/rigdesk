@@ -21,6 +21,18 @@ function Tool($name, $arguments = @{}) {
   if ($null -eq $reply.result) { Fail "$name gave no result: $($reply | ConvertTo-Json -Depth 8 -Compress)" }
   return $reply.result
 }
+# What the desktop looked like when a check failed, kept as a CI artifact.
+function Evidence($why) {
+  $out = Join-Path $env:RUNNER_TEMP "agent-smoke"
+  New-Item -ItemType Directory -Force $out | Out-Null
+  try {
+    $shot = Tool "screenshot"
+    $png = $shot.content | Where-Object { $_.type -eq "image" } | Select-Object -First 1
+    if ($png) { [IO.File]::WriteAllBytes((Join-Path $out "screen.png"), [Convert]::FromBase64String($png.data)) }
+    Set-Content -Path (Join-Path $out "snapshot.txt") -Value (Text (Tool "snapshot"))
+  } catch { Write-Host "no evidence: $_" }
+  Fail $why
+}
 function Text($result) { ($result.content | Where-Object { $_.type -eq "text" } | ForEach-Object { $_.text }) -join "`n" }
 
 $notepad = Start-Process notepad -PassThru
@@ -59,7 +71,7 @@ try {
   $null = Tool "shortcut" @{ keys = "ctrl+c" }
   $null = Tool "wait" @{ ms = 500 }
   $clip = Text (Tool "clipboard")
-  if ($clip.Trim() -ne $words) { Fail "Notepad holds '$clip', not the typed '$words'" }
+  if ($clip.Trim() -ne $words) { Evidence "Notepad holds '$clip', not the typed '$words'" }
   Write-Host "typed into Notepad: $clip"
 
   $null = Post "/debug/viewer/human" @{}
