@@ -309,7 +309,27 @@ impl RendezvousMediator {
         log::info!("server restart");
     }
 
+    /// RigDesk is reached over the tailnet alone: no rendezvous, relay, NAT test, LAN discovery, server sync or updater; the direct server only.
     pub async fn start_all() {
+        if config::is_outgoing_only() {
+            loop {
+                sleep(1.).await;
+            }
+        }
+        check_zombie();
+        let server = new_server();
+        tokio::spawn(direct_server(server.clone()));
+        scrap::codec::test_av1();
+        loop {
+            if option2bool("stop-service", &Config::get_option("stop-service")) {
+                server.write().unwrap().close_connections();
+            }
+            sleep(1.).await;
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn start_all_upstream() {
         crate::test_nat_type();
         if config::is_outgoing_only() {
             loop {
@@ -1390,6 +1410,23 @@ impl RendezvousMediator {
     }
 }
 
+/// Tailscale's address ranges: CGNAT 100.64.0.0/10 and its ULA fd7a:115c:a1e0::/48.
+fn is_tailnet(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xc0) == 64
+        }
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_tailnet(&std::net::IpAddr::V4(v4)),
+            None => {
+                let s = v6.segments();
+                s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+            }
+        },
+    }
+}
+
 fn get_direct_port() -> i32 {
     let mut port = Config::get_option("direct-access-port")
         .parse::<i32>()
@@ -1441,6 +1478,10 @@ async fn direct_server(server: ServerPtr) {
                 continue;
             }
             if let Ok(Ok((stream, addr))) = hbb_common::timeout(1000, l.accept()).await {
+                if !is_tailnet(&addr.ip()) {
+                    log::warn!("direct access refused from {}: not a tailnet address", addr);
+                    continue;
+                }
                 stream.set_nodelay(true).ok();
                 log::info!("direct access from {}", addr);
                 let local_addr = stream

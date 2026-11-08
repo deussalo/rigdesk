@@ -137,6 +137,16 @@ jobs:
           $v = (& ".\rigdesk\rustdesk.exe" --version | Out-String).Trim()
           if ($LASTEXITCODE -ne 0) { throw "--version exited with $LASTEXITCODE" }
           Write-Host "version: $v"
+      - name: No public RustDesk servers or keys in the build
+        shell: bash
+        run: |
+          found=0
+          for needle in rs-ny.rustdesk.com api.rustdesk.com admin.rustdesk.com relay.rustdesk.com \
+                        OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw= 5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=; do
+            hits=$(grep -rlaF "$needle" rigdesk || true)
+            if [ -n "$hits" ]; then echo "::error::$needle found in: $hits"; found=1; fi
+          done
+          exit $found
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rigdesk-windows-x64

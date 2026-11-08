@@ -465,7 +465,20 @@ impl Client {
                 false,
             ));
         }
+        // RigDesk has no rendezvous server: every peer is a tailnet host, as a name or an address, on the direct port unless given.
+        return Ok((
+            (
+                connect_tcp_local(check_port(peer, RELAY_PORT + 1), None, CONNECT_TIMEOUT).await?,
+                true,
+                None,
+                None,
+                "TCP",
+            ),
+            (0, "".to_owned()),
+            false,
+        ));
 
+        #[allow(unreachable_code)]
         let other_server = interface.get_lch().read().unwrap().other_server.clone();
         let (peer, other_server, key, token) = if let Some((a, b, c)) = other_server.as_ref() {
             (a.as_ref(), b.as_ref(), c.as_ref(), "")

@@ -1,0 +1,18 @@
+{
+  "app-name": "RigDesk",
+  "override-settings": {
+    "direct-server": "Y",
+    "direct-access-port": "21118",
+    "enable-check-update": "N",
+    "allow-auto-update": "N",
+    "enable-lan-discovery": "N",
+    "allow-remote-config-modification": "N",
+    "verification-method": "use-permanent-password",
+    "approve-mode": "password",
+    "hide-server-settings": "Y",
+    "hide-network-settings": "Y",
+    "hide-proxy-settings": "Y",
+    "hide-security-settings": "Y",
+    "disable-change-permanent-password": "Y"
+  }
+}

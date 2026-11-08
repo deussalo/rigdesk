@@ -48,11 +48,8 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
         *config::APP_DIR.write().unwrap() = app_dir.to_owned();
     }
     // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c
-    if custom_client_config.is_empty() {
-        crate::load_custom_client();
-    } else {
-        crate::read_custom_client(custom_client_config);
-    }
+    let _ = custom_client_config;
+    crate::load_custom_client();
     #[cfg(target_os = "android")]
     {
         // flexi_logger can't work when android_logger initialized.
@@ -3096,12 +3093,8 @@ pub mod server_side {
         }
         #[cfg(not(debug_assertions))]
         crate::platform::android_log::initialize();
-        if let Ok(custom_client_config) = env.get_string(&custom_client_config) {
-            if !custom_client_config.is_empty() {
-                let custom_client_config: String = custom_client_config.into();
-                crate::read_custom_client(&custom_client_config);
-            }
-        }
+        let _ = custom_client_config;
+        crate::load_custom_client();
         std::thread::spawn(move || start_server(true));
     }
 
