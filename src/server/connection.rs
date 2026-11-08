@@ -1246,6 +1246,8 @@ impl Connection {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             try_stop_record_cursor_pos();
         }
+        #[cfg(target_os = "windows")]
+        crate::agent::viewer::leave(id);
         conn.on_close("End", true).await;
         log::info!("#{} connection loop exited", id);
     }
@@ -2290,6 +2292,11 @@ impl Connection {
                 s.try_add_monitor_service(self.display_idx);
                 s.add_monitor_connection(self.inner.clone(), &noperms, self.display_idx);
             }
+            #[cfg(target_os = "windows")]
+            crate::agent::viewer::join(self.inner.id(), {
+                let mut inner = self.inner.clone();
+                Box::new(move |msg| inner.send(msg))
+            });
         }
     }
 
@@ -4131,6 +4138,12 @@ impl Connection {
                     allow_err!(self.handle_terminal_action(action).await);
                     #[cfg(any(target_os = "android", target_os = "ios"))]
                     log::warn!("Terminal action received but not supported on this platform");
+                }
+                #[cfg(target_os = "windows")]
+                Some(message::Union::AgentRequest(request)) => {
+                    if self.peer_keyboard_enabled() {
+                        crate::agent::viewer::request(self.inner.id(), request);
+                    }
                 }
                 _ => {}
             }

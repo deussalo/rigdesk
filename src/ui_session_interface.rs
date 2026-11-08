@@ -1767,6 +1767,8 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn printer_request(&self, id: i32, path: String);
     fn handle_screenshot_resp(&self, sid: String, msg: String);
     fn handle_terminal_response(&self, response: TerminalResponse);
+    /// The PC's agent share changed (RigDesk); only the Flutter UI shows it.
+    fn agent_state(&self, _state: String) {}
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {

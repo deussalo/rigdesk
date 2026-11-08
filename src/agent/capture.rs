@@ -11,7 +11,19 @@ use scrap::{Capturer, Display, Frame, TraitCapturer, TraitPixelBuffer};
 
 /// The primary display's current frame as a PNG, with its pixel width and height.
 pub fn primary_png() -> ResultType<(Vec<u8>, u32, u32)> {
-    let display = primary_display()?;
+    grab(primary_display()?)
+}
+
+/// Display `index`, in the order the session's displays are listed to the viewer, as a PNG.
+pub fn display_png(index: usize) -> ResultType<(Vec<u8>, u32, u32)> {
+    let mut all = Display::all()?;
+    if index >= all.len() {
+        bail!("no display {index}");
+    }
+    grab(all.remove(index))
+}
+
+fn grab(display: Display) -> ResultType<(Vec<u8>, u32, u32)> {
     let mut capturer = Capturer::new(display)?;
     let (w, h) = (capturer.width(), capturer.height());
     // DXGI yields nothing until the desktop next composites a frame; a handful of tries covers a quiet screen.

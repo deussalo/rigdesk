@@ -706,6 +706,18 @@ pub fn session_input_string(session_id: SessionID, value: String) {
 }
 
 // chat_client_mode
+pub fn session_agent_request(
+    session_id: SessionID,
+    verb: String,
+    text: String,
+    png: Vec<u8>,
+    display: i32,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        crate::client::agent::send(&*session, &verb, text, png, display);
+    }
+}
+
 pub fn session_send_chat(session_id: SessionID, text: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.send_chat(text);

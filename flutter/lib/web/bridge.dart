@@ -1977,6 +1977,17 @@ class RustdeskImpl {
     throw UnimplementedError("sessionTakeScreenshot");
   }
 
+  // RigDesk's agent share runs only in the native Windows build; the web client has no counterpart.
+  Future<void> sessionAgentRequest(
+      {required UuidValue sessionId,
+      required String verb,
+      required String text,
+      required Uint8List png,
+      required int display,
+      dynamic hint}) {
+    return Future.value();
+  }
+
   Future<void> sessionOpenTerminal(
       {required UuidValue sessionId,
       required int terminalId,

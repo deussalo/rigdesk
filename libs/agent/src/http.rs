@@ -11,6 +11,7 @@
 //!   POST /leave            - the owning agent ends its session
 //!   POST /debug/mint, /debug/viewer/<hand|human|block|unblock> - only with RIGDESK_AGENT_DEBUG_MINT set, for CI
 //!   GET  /health           - liveness, this process's boot id and the current standing
+//!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -83,6 +84,7 @@ impl Api {
     pub async fn serve(self: Arc<Self>, port: u16) -> std::io::Result<u16> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         let bound = listener.local_addr()?.port();
+        tokio::spawn(journal_holder_changes(self.shared.events.subscribe(), self.journal.clone()));
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else { continue };
@@ -110,6 +112,10 @@ impl Api {
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
             ("POST", "/leave") => self.leave(&request),
+            ("GET", "/log") => {
+                let n = query_number(request.uri().query(), "n").unwrap_or(200).min(5000);
+                json_response(StatusCode::OK, &json!({"entries": self.journal.tail(n)}))
+            }
             ("GET", "/events") => self.events(request),
             ("POST", "/debug/mint") if std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
                 let minted = self.shared.mint();
@@ -282,6 +288,29 @@ fn tokio_stream_from(rx: mpsc::Receiver<Result<hyper::body::Frame<Bytes>, Infall
     StreamBody::new(ReceiverStream::new(rx)).boxed()
 }
 
+fn query_number(query: Option<&str>, key: &str) -> Option<usize> {
+    query?.split('&').find_map(|pair| pair.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+}
+
+/// Every holder change and revoke goes to the action log, whoever caused it: the viewer, the PC's own input or the API.
+async fn journal_holder_changes(mut rx: tokio::sync::broadcast::Receiver<Event>, journal: Arc<Journal>) {
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+        match rx.recv().await {
+            Ok(event) => match event.kind {
+                EventKind::Holder { holder, by } => {
+                    let holder = serde_json::to_value(holder).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+                    journal.record(&Entry::new(by, format!("holder {holder}"), "ok", Value::Null));
+                }
+                EventKind::Revoked { agent_id, reason } => journal.record(&Entry::new(reason, "revoke", "ok", json!({"agent_id": agent_id}))),
+                _ => {}
+            },
+            Err(RecvError::Lagged(missed)) => journal.record(&Entry::new("rigdesk", "journal", format!("missed {missed} events"), Value::Null)),
+            Err(RecvError::Closed) => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +340,29 @@ mod tests {
         stream.read_to_string(&mut answer).await.unwrap();
         let (_, json) = answer.split_once("\r\n\r\n").unwrap();
         serde_json::from_str(json).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_block_from_the_viewer_is_readable_in_the_log() {
+        let dir = std::env::temp_dir().join(format!("rigdesk-http-{}", rand::random::<u32>()));
+        let shared = Arc::new(Shared::new(Events::new(64)));
+        let api = Api::new(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::open(dir.join("a.jsonl"), 1 << 20)), "b");
+        let port = api.serve(0).await.unwrap();
+        let minted = shared.mint();
+        let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
+        post(port, "/claim", "", &json!({"grant": minted.grant, "secret": minted.secret, "agent": agent})).await;
+        assert!(shared.block());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream.write_all(b"GET /log?n=10 HTTP/1.1\r\nhost: x\r\nauthorization: Bearer b\r\nconnection: close\r\n\r\n").await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        let (_, body) = answer.split_once("\r\n\r\n").unwrap();
+        let log: Value = serde_json::from_str(body).unwrap();
+        let whats: Vec<&str> = log["entries"].as_array().unwrap().iter().map(|e| e["what"].as_str().unwrap()).collect();
+        assert!(whats.contains(&"claim"), "{whats:?}");
+        assert!(whats.contains(&"holder blocked"), "{whats:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]

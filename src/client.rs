@@ -102,6 +102,7 @@ mod audio_playback_recovery;
 #[cfg(all(test, not(target_os = "linux")))]
 #[path = "client/tests/audio_state_tests.rs"]
 mod audio_state_tests;
+pub mod agent;
 pub mod file_trait;
 pub mod helper;
 pub mod io_loop;

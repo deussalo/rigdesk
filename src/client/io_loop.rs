@@ -2574,6 +2574,9 @@ impl<T: InvokeUiSession> Remote<T> {
                     self.handler
                         .handle_screenshot_resp(response.sid, response.msg);
                 }
+                Some(message::Union::AgentState(state)) => {
+                    self.handler.agent_state(crate::client::agent::state_json(&state));
+                }
                 Some(message::Union::TerminalResponse(response)) => {
                     use base::message_proto::terminal_response::Union;
                     if let Some(Union::Opened(opened)) = &response.union {

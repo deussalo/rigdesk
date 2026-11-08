@@ -1002,6 +1002,51 @@ message PortForwardChannel {
   }
 }
 
+// RigDesk: the viewer's controls for sharing the session with a Rig agent.
+message AgentNote {
+  string text = 1;
+  bytes png = 2;
+}
+
+message AgentRequest {
+  oneof union {
+    bool share = 1;
+    bool hand = 2;
+    bool take_back = 3;
+    bool block = 4;
+    bool unblock = 5;
+    bool revoke = 6;
+    AgentNote note = 7;
+    // A still of this display index, for the message box.
+    int32 frame = 8;
+  }
+}
+
+message AgentAction {
+  string agent_title = 1;
+  string tool = 2;
+  string summary = 3;
+  bool ok = 4;
+  bool has_point = 5;
+  int32 x = 6;
+  int32 y = 7;
+}
+
+// RigDesk: the share as the PC sees it, pushed to every viewer on each change.
+// grant/secret and frame go only to the viewer that asked for them.
+message AgentState {
+  string holder = 1;
+  string owner_title = 2;
+  string owner_graph = 3;
+  bool link_open = 4;
+  string host = 5;
+  string grant = 6;
+  string secret = 7;
+  AgentAction action = 8;
+  string note = 9;
+  bytes frame = 10;
+}
+
 message Message {
   oneof union {
     SignedId signed_id = 3;
@@ -1037,5 +1082,7 @@ message Message {
     PortForwardChannel port_forward_channel = 33;
     // Auto Login: the peer types the password only if it is at its logon or lock screen.
     OSLogin os_login = 34;
+    AgentRequest agent_request = 40;
+    AgentState agent_state = 41;
   }
 }

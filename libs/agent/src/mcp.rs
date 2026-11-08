@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::desk::{Content, Desk};
 use crate::events::EventKind;
 use crate::journal::{Entry, Journal};
-use crate::session::Shared;
+use crate::session::{Holder, Shared};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -81,6 +81,14 @@ impl Mcp {
             return reply(id, tool_error(&crate::session::Refusal::NoSession.words()));
         };
         let read_only = self.desk.tools().iter().find(|t| t.name == name).map_or(false, |t| t.read_only);
+        if !read_only {
+            let standing = self.shared.standing();
+            if let (Some(Holder::Agent), Some(since)) = (standing.holder, standing.since_ms) {
+                if self.desk.local_input_after(since) {
+                    self.shared.human_input("local input");
+                }
+            }
+        }
         let owner = match self.shared.admit(token, read_only) {
             Ok(owner) => owner,
             Err(refusal) => {
@@ -118,7 +126,7 @@ fn summarize(name: &str, args: &Value) -> String {
             let y = args.get("y").and_then(Value::as_i64).unwrap_or_default();
             format!("{name} {x},{y}")
         }
-        "key" | "shortcut" => args.get("keys").and_then(Value::as_str).map(|k| format!("{name} {k}")).unwrap_or_else(|| name.into()),
+        "key" | "shortcut" => args.get("keys").or_else(|| args.get("key")).and_then(Value::as_str).map(|k| format!("{name} {k}")).unwrap_or_else(|| name.into()),
         "app" => args.get("name").and_then(Value::as_str).map(|a| format!("app {a}")).unwrap_or_else(|| name.into()),
         _ => name.to_string(),
     }
@@ -146,6 +154,29 @@ mod tests {
                 other => Err(format!("no such tool: {other}")),
             }
         }
+    }
+
+    struct TouchedDesk;
+    impl Desk for TouchedDesk {
+        fn tools(&self) -> Vec<ToolSpec> {
+            FakeDesk.tools()
+        }
+        fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
+            FakeDesk.call(tool, args)
+        }
+        fn local_input_after(&self, _since_ms: u64) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn local_input_takes_input_back_before_the_agents_next_action() {
+        let mcp = Mcp { shared: Arc::new(Shared::new(Events::new(64))), desk: Arc::new(TouchedDesk), journal: Arc::new(Journal::memory()) };
+        let link = mcp.shared.mint();
+        let token = mcp.shared.claim(&link.grant, &link.secret, Owner { agent_id: "a1".into(), title: "t".into(), graph: "g".into() }).unwrap();
+        let typed = mcp.handle(&call("type", json!({"text": "hi"})), Some(&token)).unwrap();
+        assert!(typed["result"]["content"][0]["text"].as_str().unwrap().contains("took over"));
+        assert_eq!(mcp.shared.standing().holder, Some(Holder::Human));
     }
 
     fn mcp() -> Mcp {

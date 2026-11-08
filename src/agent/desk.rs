@@ -4,15 +4,33 @@
 
 use rigdesk_agent::{Content, Desk, ToolSpec};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{capture, input, shell, uia};
 
-pub struct WinDesk;
+pub struct WinDesk {
+    /// When this desk last finished injecting input for the agent (wall-clock ms).
+    injected_ms: AtomicU64,
+}
 
 impl WinDesk {
     pub fn new() -> Self {
-        WinDesk
+        WinDesk { injected_ms: AtomicU64::new(0) }
     }
+}
+
+/// Input this soon after the agent's own is taken as the tail of it, not a person at the PC.
+const OWN_INPUT_SLACK_MS: u64 = 500;
+
+/// The wall-clock ms of the session's last mouse or keyboard input, injected or not.
+fn last_input_ms() -> Option<u64> {
+    use winapi::um::winuser::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    if unsafe { GetLastInputInfo(&mut info) } == 0 {
+        return None;
+    }
+    let idle = unsafe { windows::Win32::System::SystemInformation::GetTickCount() }.wrapping_sub(info.dwTime);
+    Some(rigdesk_agent::now_ms().saturating_sub(idle as u64))
 }
 
 fn int(args: &Value, key: &str) -> Result<i32, String> {
@@ -61,7 +79,22 @@ impl Desk for WinDesk {
         ]
     }
 
+    fn local_input_after(&self, since_ms: u64) -> bool {
+        let quiet_from = since_ms.max(self.injected_ms.load(Ordering::SeqCst)) + OWN_INPUT_SLACK_MS;
+        last_input_ms().map_or(false, |at| at > quiet_from)
+    }
+
     fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
+        let result = self.run(tool, args);
+        if !matches!(tool, "screenshot" | "snapshot" | "wait") {
+            self.injected_ms.store(rigdesk_agent::now_ms(), Ordering::SeqCst);
+        }
+        result
+    }
+}
+
+impl WinDesk {
+    fn run(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
         match tool {
             "screenshot" => {
                 let (png, w, h) = capture::primary_png().map_err(|e| e.to_string())?;

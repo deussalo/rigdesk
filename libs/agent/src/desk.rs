@@ -20,4 +20,9 @@ pub enum Content {
 pub trait Desk: Send + Sync + 'static {
     fn tools(&self) -> Vec<ToolSpec>;
     fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String>;
+    /// Whether someone at the PC itself used mouse or keyboard after `since_ms` (wall clock), not counting the input
+    /// this desk injected for the agent. Asked before each action while the agent holds input.
+    fn local_input_after(&self, _since_ms: u64) -> bool {
+        false
+    }
 }

@@ -154,3 +154,8 @@ jobs:
         with:
           name: rigdesk-windows-x64
           path: rigdesk
+      - name: Agent unit tests (API crate, viewer share link and note baking)
+        shell: bash
+        run: |
+          cargo test -p rigdesk-agent --locked
+          cd flutter && flutter test test/agent_share_test.dart

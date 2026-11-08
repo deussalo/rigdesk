@@ -18,6 +18,7 @@ mod desk;
 mod input;
 mod shell;
 mod uia;
+pub mod viewer;
 
 /// The agent conn id. handle_mouse/handle_key key their per-connection state by it; it is distinct from any real
 /// peer's so agent input and a viewer's never share tracking state.

@@ -1133,6 +1133,10 @@ impl InvokeUiSession for FlutterHandler {
         );
     }
 
+    fn agent_state(&self, state: String) {
+        self.push_event("agent_state", &[("state", state)], &[]);
+    }
+
     fn handle_screenshot_resp(&self, sid: String, msg: String) {
         match SessionID::from_str(&sid) {
             Ok(sid) => self.push_event_to("screenshot", &[("msg", json!(msg))], &[&sid]),
