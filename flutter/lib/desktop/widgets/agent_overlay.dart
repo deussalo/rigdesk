@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart' hide Dialog;
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/models/agent_bridge.dart';
 import 'package:flutter_hbb/models/agent_model.dart';
 import 'package:flutter_hbb/models/agent_note.dart';
 import 'package:flutter_hbb/models/model.dart';
@@ -26,21 +27,88 @@ void onAgentStateEvent(SessionID sessionId, String stateJson) {
   if (update.note.isNotEmpty) showToast(update.note);
 }
 
-Future<void> _ask(FFI ffi, String verb,
-        {String text = '', Uint8List? png, int display = 0}) =>
-    bind.sessionAgentRequest(
-        sessionId: ffi.sessionId,
-        verb: verb,
-        text: text,
-        png: png ?? Uint8List(0),
-        display: display);
+/// The agent host each open session's panel talks to, once set up for that PC.
+final Map<String, AgentBridge> _bridges = {};
 
-/// The agent controls over the remote image: Share with agent, the owner badge, Hand to agent / Take back, Block
-/// agent, the message box, plus the agent's labelled cursor and its action strip.
-class AgentOverlay extends StatelessWidget {
+String _hostOptionKey(FFI ffi) => 'rigdesk-agent-host-${ffi.id}';
+
+Future<void> _ask(FFI ffi, String verb,
+    {String text = '', Uint8List? png, int display = 0}) async {
+  final bridge = _bridges['${ffi.sessionId}'];
+  if (bridge == null) {
+    showToast('Set up the agent host for this PC first.');
+    return;
+  }
+  await bridge.ask(verb, text: text, png: png, display: display);
+}
+
+/// The agent controls over the remote image: Share with agent, the owner badge, Hand to agent / Take back, Stop,
+/// Block agent, the message box, plus the agent's labelled cursor and its action strip. The agent itself runs in
+/// Rig; its session to this PC is the agent host's (rigdesk-remote on the Rig host), which this panel drives.
+class AgentOverlay extends StatefulWidget {
   final FFI ffi;
 
   const AgentOverlay({Key? key, required this.ffi}) : super(key: key);
+
+  @override
+  State<AgentOverlay> createState() => _AgentOverlayState();
+}
+
+class _AgentOverlayState extends State<AgentOverlay> {
+  FFI get ffi => widget.ffi;
+
+  @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_onKey);
+    final saved = AgentHost.fromJson(bind.mainGetLocalOption(key: _hostOptionKey(ffi)));
+    if (saved != null) _connect(saved);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    _bridges.remove('${ffi.sessionId}')?.close();
+    super.dispose();
+  }
+
+  void _connect(AgentHost host) {
+    _bridges.remove('${ffi.sessionId}')?.close();
+    final bridge = AgentBridge(host,
+        onState: (state) => onAgentStateEvent(ffi.sessionId, state),
+        onTrouble: showToast);
+    _bridges['${ffi.sessionId}'] = bridge;
+    bridge.start();
+    if (mounted) setState(() {});
+  }
+
+  bool get _hasHost => _bridges.containsKey('${ffi.sessionId}');
+
+  /// Ctrl+Alt+Esc stops the agent and never reaches the PC. Any other key while the agent holds input takes it back.
+  bool _onKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    final agent = AgentModel.of(ffi.sessionId);
+    final keys = HardwareKeyboard.instance;
+    if (event.logicalKey == LogicalKeyboardKey.escape &&
+        keys.isControlPressed &&
+        keys.isAltPressed &&
+        agent.isShared) {
+      _ask(ffi, 'stop');
+      return true;
+    }
+    final onTop = mounted && (ModalRoute.of(context)?.isCurrent ?? true);
+    if (agent.agentHolds && onTop) _ask(ffi, 'take_back');
+    return false;
+  }
+
+  Future<void> _setUp(BuildContext context) async {
+    final saved = AgentHost.fromJson(bind.mainGetLocalOption(key: _hostOptionKey(ffi)));
+    final host = await showDialog<AgentHost>(
+        context: context, builder: (_) => AgentHostDialog(initial: saved, peer: ffi.id));
+    if (host == null) return;
+    await bind.mainSetLocalOption(key: _hostOptionKey(ffi), value: host.toJson());
+    _connect(host);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -48,7 +116,16 @@ class AgentOverlay extends StatelessWidget {
     return AnimatedBuilder(
       animation: Listenable.merge([agent, ffi.canvasModel]),
       builder: (context, _) {
-        final children = <Widget>[];
+        final children = <Widget>[
+          Positioned.fill(
+            child: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: (_) {
+                if (agent.agentHolds) _ask(ffi, 'take_back');
+              },
+            ),
+          ),
+        ];
         final cursor = _cursor(agent);
         if (cursor != null) children.add(cursor);
         if (agent.isShared && agent.actions.isNotEmpty) {
@@ -129,6 +206,17 @@ class AgentOverlay extends StatelessWidget {
   }
 
   Widget _bar(BuildContext context, AgentModel agent) {
+    if (!_hasHost) {
+      return Material(
+        elevation: 4,
+        borderRadius: BorderRadius.circular(8),
+        child: TextButton.icon(
+          onPressed: () => _setUp(context),
+          icon: const Icon(Icons.smart_toy, size: 18),
+          label: const Text('Set up agent host'),
+        ),
+      );
+    }
     final items = <Widget>[
       Tooltip(
         message: 'Copy a one-time link that hands this session to a Rig agent',
@@ -181,18 +269,34 @@ class AgentOverlay extends StatelessWidget {
           icon: const Icon(Icons.link_off),
         ),
       ));
-      items.add(const SizedBox(width: 6));
-      items.add(ElevatedButton(
-        style: ElevatedButton.styleFrom(
-          backgroundColor: agent.isBlocked ? _agentGreen : _blockRed,
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
-          textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-        ),
+      items.add(TextButton(
         onPressed: () => _ask(ffi, agent.isBlocked ? 'unblock' : 'block'),
-        child: Text(agent.isBlocked ? 'Unblock agent' : 'Block agent'),
+        child: Text(agent.isBlocked ? 'Unblock' : 'Block'),
+      ));
+      items.add(const SizedBox(width: 6));
+      items.add(Tooltip(
+        message: 'Take input back and stop the agent now (Ctrl+Alt+Esc)',
+        child: ElevatedButton.icon(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _blockRed,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
+            textStyle:
+                const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          onPressed: () => _ask(ffi, 'stop'),
+          icon: const Icon(Icons.stop_circle),
+          label: const Text('Stop'),
+        ),
       ));
     }
+    items.add(Tooltip(
+      message: 'Agent host settings for this PC',
+      child: IconButton(
+        onPressed: () => _setUp(context),
+        icon: const Icon(Icons.settings, size: 18),
+      ),
+    ));
     return Material(
       elevation: 4,
       borderRadius: BorderRadius.circular(8),
@@ -200,6 +304,75 @@ class AgentOverlay extends StatelessWidget {
         padding: const EdgeInsets.all(6),
         child: Row(mainAxisSize: MainAxisSize.min, children: items),
       ),
+    );
+  }
+}
+
+/// Where this PC's agent host is: the rigdesk-remote Rig runs for it, its token, and the PC's name in Rig.
+class AgentHostDialog extends StatefulWidget {
+  final AgentHost? initial;
+  final String peer;
+
+  const AgentHostDialog({Key? key, this.initial, required this.peer}) : super(key: key);
+
+  @override
+  State<AgentHostDialog> createState() => _AgentHostDialogState();
+}
+
+class _AgentHostDialogState extends State<AgentHostDialog> {
+  late final _url = TextEditingController(text: widget.initial?.url ?? 'http://127.0.0.1:21120');
+  late final _token = TextEditingController(text: widget.initial?.token ?? '');
+  late final _name = TextEditingController(text: widget.initial?.name ?? '');
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _token.dispose();
+    _name.dispose();
+    super.dispose();
+  }
+
+  AgentHost get _host => AgentHost(
+      url: _url.text.trim().replaceAll(RegExp(r'/+$'), ''),
+      token: _token.text.trim(),
+      name: _name.text.trim());
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Agent host for ${widget.peer}'),
+      content: SizedBox(
+        width: 460,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+                controller: _url,
+                decoration: const InputDecoration(
+                    labelText: 'Agent host URL',
+                    helperText: 'The rigdesk-remote Rig runs for this PC')),
+            TextField(
+                controller: _token,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Token')),
+            TextField(
+                controller: _name,
+                decoration: const InputDecoration(
+                    labelText: 'PC name in Rig',
+                    helperText: 'As named in plugins.rigdesk.pcs')),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel')),
+        ElevatedButton(
+            onPressed: () {
+              if (_host.isComplete) Navigator.of(context).pop(_host);
+            },
+            child: const Text('Save')),
+      ],
     );
   }
 }
