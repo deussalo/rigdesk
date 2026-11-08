@@ -45,8 +45,24 @@ writes its output to `remote-<pc>.log` in the plugin's state directory. It conne
 acts and leaves after ten idle minutes, so the PC shows a RustDesk session only while the agent works.
 
 The **RigDesk** tab stands in for the viewer: **share with agent** mints a one-use link (copied to the clipboard)
-to give an agent for `desk/join`, and **hand to agent**, **take back**, **block**, **unblock** and **end share**
+to give an agent for `desk/join`, and **hand to agent**, **stop**, **block**, **unblock** and **end share**
 act as the viewer's buttons do.
+
+### The RigDesk GUI's agent panel
+
+The RigDesk viewer (Linux build: the `rigdesk-linux-x64` artifact of the `linux` workflow) connects straight to the
+stock PC as ordinary RustDesk does, so the human watches the agent work live. Its agent panel talks HTTP to the PC's
+`rigdesk-remote` on the Rig host, not to the PC: in a remote tab, **Set up agent host** takes that PC's `url`, its
+token and the PC's name in Rig, kept per peer ID on that machine. The panel then shares, hands input over, blocks,
+ends the share, shows the owning agent and its actions, and sends a note (text plus an annotated still of the screen
+from `/viewer/frame`) to the agent. A click or key in the viewer while the agent holds input takes it back.
+
+**Stop** (the panel's button, or Ctrl+Alt+Esc in the viewer) takes input back at once
+and interrupts the owning agent's current Rig turn, as the operator's interrupt does; the agent is then told why.
+
+The GUI runs on the Rig host for now, where `127.0.0.1:<port>` reaches the agent host. Running it elsewhere (bridge
+mode: a laptop or phone viewer while the agent's session stays on the Rig host) needs the agent host published to
+that device, e.g. with `tailscale serve`; that is not set up yet.
 
 Known limits against a RigDesk PC:
 
@@ -68,7 +84,7 @@ Known limits against a RigDesk PC:
 * `desk/leave` — ends the session.
 
 What the human does reaches the owning agent as Rig messages (steered into its turn): taking input
-back, handing it over, block and unblock, the session ending, and messages typed in the viewer with
+back, Stop (which also interrupts its turn), handing it over, block and unblock, the session ending, and messages typed in the viewer with
 their screenshots and clips. Each is keyed by the PC's boot and event id, so a reconnect never
 delivers one twice; an image is copied before the PC is told it arrived.
 

@@ -32,6 +32,7 @@ RETRY_S = (1.0, 2.0, 5.0, 10.0, 30.0)
 SETTINGS_EVERY_S = 5.0
 CALL_LIMIT_S = 120.0
 FILES_KEPT = 300
+STOP_FRESH_MS = 60_000  # a Stop replayed after Rig was away is told, not acted on: the turn it meant is long gone
 REMOTE_LOG_BYTES = 4 * 1024 * 1024
 VIEWER_VERBS = frozenset({"mint", "hand", "human", "stop", "block", "unblock", "revoke"})
 LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
@@ -395,6 +396,8 @@ class Desks:
             if kind == "message":
                 await self._message(link, held, event, key)
             elif (said := words_of(pc, event)) is not None:
+                if kind == "holder" and event.get("by") == "stop" and now_ms() - int(event.get("at_ms") or 0) < STOP_FRESH_MS:
+                    await self._interrupt(held)
                 await self._tell(held, said, key)
         if event_id:
             self._last[pc] = max(self._last.get(pc, 0), event_id)
@@ -412,10 +415,27 @@ class Desks:
             async with self._client().post(ack, headers=self._headers(link, held.session), timeout=aiohttp.ClientTimeout(total=15)):
                 pass
 
-    async def _tell(self, held: Held, words: str, key: str) -> bool:
+    async def _seat(self, held: Held) -> SeatId:
         seat = await self.host.seat_of(AgentId(held.agent), GraphName(held.graph), "rigdesk")
-        if isinstance(seat, RefusedOutcome):
-            seat = SeatId(GraphName(held.graph), held.node)  # type: ignore[arg-type]
+        return SeatId(GraphName(held.graph), held.node) if isinstance(seat, RefusedOutcome) else seat  # type: ignore[arg-type]
+
+    async def _interrupt(self, held: Held) -> None:
+        """Stop ends the owning agent's turn at once, as the operator's interrupt does; an agent between turns has none to end."""
+        seat = await self._seat(held)
+        kernel = self.host.kernel(seat)
+        if kernel is None:
+            _LOG.warning("rigdesk_stop_unseated", f"RigDesk {held.pc}: Stop found no running agent at {held.graph}/{held.node} to interrupt", pc=held.pc)
+            return
+        try:
+            done = await kernel.inject(seat, "interrupt", None, None, None, "interrupt")
+        except Exception as failed:  # noqa: BLE001
+            _LOG.warning("rigdesk_stop_failed", f"RigDesk {held.pc}: interrupting {held.graph}/{held.node} failed: {type(failed).__name__}: {failed}", pc=held.pc)
+            return
+        if isinstance(done, RefusedOutcome):
+            _LOG.warning("rigdesk_stop_refused", f"RigDesk {held.pc}: {held.graph}/{held.node} was not interrupted: {done.rendered}", pc=held.pc)
+
+    async def _tell(self, held: Held, words: str, key: str) -> bool:
+        seat = await self._seat(held)
         try:
             verdict = await self.host.admit(seat, PluginWords(words, f"rigdesk:{held.pc}", key=f"{held.pc}:{key}", timing="steer", headline=f"RigDesk {held.pc}"))
         except Exception as failed:  # noqa: BLE001
