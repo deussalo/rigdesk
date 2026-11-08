@@ -6994,7 +6994,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rigdesk-remote"
+name = "rigdesk-bridge"
 version = "0.1.0"
 dependencies = [
  "base",

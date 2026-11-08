@@ -22,7 +22,7 @@ in such a file (`~/.rig/rigdesk/<pc>.token`) and answers its path. With `for_fle
 ## Stock RustDesk PCs
 
 A PC running unmodified RustDesk (1.4.0 or later) can be handed to an agent too, with no RigDesk on it. Rig runs
-`rigdesk-remote` for it on this host: a headless RustDesk client that logs in to the PC by direct IP over the tailnet
+`rigdesk-bridge` for it on this host: a headless RustDesk client that logs in to the PC by direct IP over the tailnet
 with the PC's permanent password and serves the same agent API on loopback.
 
 On the PC, in RustDesk's settings:
@@ -30,8 +30,8 @@ On the PC, in RustDesk's settings:
 * Security → **Enable direct IP access** (port 21118), and **Use permanent password** with a password set;
 * the PC on your tailnet (Tailscale installed and signed in). No public RustDesk server is used.
 
-On the Rig host, put `rigdesk-remote` on `PATH` (or name it as `remote_bin`): CI builds it as the
-`rigdesk-remote-linux-x64` artifact of the `stock` workflow. Keep the PC's password in a 0600 file, and a token of
+On the Rig host, put `rigdesk-bridge` on `PATH` (or name it as `bridge_bin`): CI builds it as the
+`rigdesk-bridge-linux-x64` artifact of the `stock` workflow. Keep the PC's password in a 0600 file, and a token of
 your choosing for the local API in another (`POST /x/rigdesk/token` keeps one), then name the PC:
 
     {"pcs": {"front": {"url": "http://127.0.0.1:21120",
@@ -40,35 +40,48 @@ your choosing for the local API in another (`POST /x/rigdesk/token` keeps one), 
                        "stock": {"peer": "front.<tailnet>.ts.net",
                                  "password_file": "~/.rig/rigdesk/front.password"}}}}
 
-Each stock PC needs its own loopback port. Rig starts `rigdesk-remote` with the plugin, restarts it if it exits, and
-writes its output to `remote-<pc>.log` in the plugin's state directory. It connects to the PC when the agent first
+Each stock PC needs its own loopback port. Rig starts `rigdesk-bridge` with the plugin, restarts it if it exits, and
+writes its output to `bridge-<pc>.log` in the plugin's state directory. It connects to the PC when the agent first
 acts and leaves after ten idle minutes, so the PC shows a RustDesk session only while the agent works.
 
 The **RigDesk** tab stands in for the viewer: **share with agent** mints a one-use link (copied to the clipboard)
 to give an agent for `desk/join`, and **hand to agent**, **stop**, **block**, **unblock** and **end share**
 act as the viewer's buttons do.
 
-### The RigDesk GUI's agent panel
+### Three parts: the PC, the bridge, the GUI
 
-The RigDesk viewer (Linux build: the `rigdesk-linux-x64` artifact of the `linux` workflow) connects straight to the
-stock PC as ordinary RustDesk does, so the human watches the agent work live. Its agent panel talks HTTP to the PC's
-`rigdesk-remote` on the Rig host, not to the PC: in a remote tab, **Set up agent host** takes that PC's `url`, its
-token and the PC's name in Rig, kept per peer ID on that machine. The panel then shares, hands input over, blocks,
-ends the share, shows the owning agent and its actions, and sends a note (text plus an annotated still of the screen
-from `/viewer/frame`) to the agent. A click or key in the viewer while the agent holds input takes it back.
+* **The PC** runs stock RustDesk, as above.
+* **The bridge** (`rigdesk-bridge`) holds the one RustDesk session to the PC. It serves the agent its tools and, with a
+  viewer port, relays the same session to people watching. It is headless; Rig runs it beside itself for each stock
+  PC, and it can as well run on another machine, which Rig then reaches by its tailnet URL.
+* **The GUI** (the RigDesk app: Linux build `rigdesk-linux-x64` of the `linux` workflow; Android to come) dials the
+  bridge, never the PC, so it needs neither a route to the PC nor the PC's password.
 
-**Stop** (the panel's button, or Ctrl+Alt+Esc in the viewer) takes input back at once
-and interrupts the owning agent's current Rig turn, as the operator's interrupt does; the agent is then told why.
+To let GUIs attach, give the stock PC a viewer port and a password file of its own, then publish both of the bridge's
+loopback ports on the tailnet from the bridge's machine:
 
-The GUI runs on the Rig host for now, where `127.0.0.1:<port>` reaches the agent host. Running it elsewhere (bridge
-mode: a laptop or phone viewer while the agent's session stays on the Rig host) needs the agent host published to
-that device, e.g. with `tailscale serve`; that is not set up yet.
+    "stock": {"peer": "front.<tailnet>.ts.net", "password_file": "~/.rig/rigdesk/front.password",
+              "viewer_port": 21128, "viewer_password_file": "~/.rig/rigdesk/front.viewer"}
+
+    tailscale serve --bg --tcp 21128 tcp://127.0.0.1:21128      # the picture, for the GUI's connection
+    tailscale serve --bg --https 8460 http://127.0.0.1:21120    # the agent API, for the GUI's agent panel
+
+In the GUI, connect to `<bridge machine>.<tailnet>.ts.net:21128` with the viewer password. In the remote tab,
+**Set up agent host** takes `https://<bridge machine>.<tailnet>.ts.net:8460`, the PC's token and its name in Rig, kept
+per peer on that device. The panel shares the desktop with an agent, hands input over, blocks, ends the share, shows
+the owning agent and its actions, and sends a note (text plus an annotated still from `/viewer/frame`) to the agent.
+
+Every click, wheel turn and key from a GUI passes the bridge: while the agent holds input, the first one takes it
+back before it reaches the PC, and the pointer merely crossing the picture is kept from the PC, so watching never
+disturbs the agent. **Stop** (the panel's button, or Ctrl+Alt+Esc in the GUI) takes input back at once and interrupts
+the owning agent's current Rig turn, as the operator's interrupt does; the agent is then told why. While a GUI watches,
+the bridge asks the PC for a watchable picture (balanced quality, 30 fps), and for a lean one (5 fps) otherwise.
 
 Known limits against a RigDesk PC:
 
 * tools: screenshot, move, click, drag, scroll, type, key, shortcut, wait and clipboard only; no UI tree
   (snapshot), app or powershell;
-* the human takes input back by moving the PC's mouse (or with **take back**); keyboard use at the PC is not seen;
+* someone at the PC itself takes input back by moving its mouse; their keyboard use is not seen (a GUI's is);
 * direct IP access has no RustDesk-layer encryption; the tailnet's WireGuard is what protects the session;
 * screenshots come from the PC's own screenshot feature, so each costs a round trip of a full PNG.
 

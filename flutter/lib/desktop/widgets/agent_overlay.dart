@@ -49,7 +49,7 @@ Future<void> _ask(FFI ffi, String verb,
 
 /// The agent controls over the remote image: Share with agent, the owner badge, Hand to agent / Take back, Stop,
 /// Block agent, the message box, plus the agent's labelled cursor and its action strip. The agent itself runs in
-/// Rig; its session to this PC is the agent host's (rigdesk-remote on the Rig host), which this panel drives.
+/// Rig; its session to this PC is the agent host's (rigdesk-bridge on the Rig host), which this panel drives.
 class AgentOverlay extends StatefulWidget {
   final FFI ffi;
 
@@ -312,7 +312,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
   }
 }
 
-/// Where this PC's agent host is: the rigdesk-remote Rig runs for it, its token, and the PC's name in Rig.
+/// Where this PC's agent host is: the rigdesk-bridge Rig runs for it, its token, and the PC's name in Rig.
 class AgentHostDialog extends StatefulWidget {
   final AgentHost? initial;
   final String peer;
@@ -354,7 +354,7 @@ class _AgentHostDialogState extends State<AgentHostDialog> {
                 controller: _url,
                 decoration: const InputDecoration(
                     labelText: 'Agent host URL',
-                    helperText: 'The rigdesk-remote Rig runs for this PC')),
+                    helperText: 'The rigdesk-bridge Rig runs for this PC')),
             TextField(
                 controller: _token,
                 obscureText: true,

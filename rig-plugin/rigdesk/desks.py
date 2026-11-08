@@ -53,14 +53,22 @@ type WebAddress = Annotated[str, AfterValidator(_web_address)]
 
 
 class StockRemote(Shape):
-    model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A PC running stock RustDesk with direct IP access on: Rig runs rigdesk-remote for it, which logs in with the PC's permanent password."})
+    model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A PC running stock RustDesk with direct IP access on: Rig runs rigdesk-bridge for it, which logs in with the PC's permanent password."})
     peer: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$"), Field(description="The PC on the tailnet: its MagicDNS name or 100.x address, with :port if not 21118.")]
     password_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's RustDesk permanent password.")]
+    viewer_port: Annotated[int | None, Field(ge=1, le=65535, description="Where the bridge relays its session to RigDesk GUIs, on loopback (publish it with tailscale serve --tcp); unset, no GUI can attach.")] = None
+    viewer_password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the password GUIs log in to the bridge with.")] = None
+
+    @model_validator(mode="after")
+    def _viewer_whole(self) -> StockRemote:
+        if (self.viewer_port is None) != (self.viewer_password_file is None):
+            raise ValueError("viewer_port and viewer_password_file go together")
+        return self
 
 
 class DeskPc(Shape):
     model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A PC running RigDesk: where its agent API is and the file holding its bearer token."})
-    url: Annotated[WebAddress, Field(description="Its agent API, published by tailscale serve: https://<pc>.<tailnet>.ts.net; for a stock PC, http://127.0.0.1:<port> where Rig runs rigdesk-remote.")]
+    url: Annotated[WebAddress, Field(description="Its agent API, published by tailscale serve: https://<pc>.<tailnet>.ts.net; for a stock PC, http://127.0.0.1:<port> where Rig runs rigdesk-bridge.")]
     token_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's agent-API token.")]
     client: Annotated[str, Field(description="The client this PC belongs to.")] = ""
     stock: Annotated[StockRemote | None, Field(description="Set for a PC running stock RustDesk instead of RigDesk.")] = None
@@ -70,7 +78,7 @@ class DeskPc(Shape):
         if self.stock is not None:
             parts = urlsplit(self.url)
             if parts.scheme != "http" or parts.hostname not in ("127.0.0.1", "localhost") or parts.port is None:
-                raise ValueError("a stock PC's url is http://127.0.0.1:<port>, the port Rig runs its rigdesk-remote on")
+                raise ValueError("a stock PC's url is http://127.0.0.1:<port>, the port Rig runs its rigdesk-bridge on")
         return self
 
 
@@ -78,7 +86,7 @@ class RigdeskSettings(Shape):
     model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "RigDesk PCs Rig agents may be handed with a share link."})
     pcs: Annotated[dict[PcName, DeskPc], Field(default_factory=dict[str, DeskPc], description='Each by name: {"deus": {"url": "https://deus.tail1234.ts.net", "token_file": "~/.rig/rigdesk/deus.token", "client": "acme"}}.')]
     for_fleet: Annotated[bool, Field(description="desk/* is open to every agent, so any agent given a link can join; off, only graphs and agents whose mcp_servers name desk.")] = True
-    remote_bin: Annotated[str, Field(description="The rigdesk-remote program run for each stock PC: a path, or a name on PATH.")] = "rigdesk-remote"
+    bridge_bin: Annotated[str, Field(description="The rigdesk-bridge program run for each stock PC: a path, or a name on PATH.")] = "rigdesk-bridge"
 
 
 @dataclass
@@ -169,7 +177,7 @@ class Desks:
         self._dir: Path = host.state_dir
         self._pcs: dict[str, PcLink] = {}
         self._for_fleet = True
-        self._remote_bin = "rigdesk-remote"
+        self._bridge_bin = "rigdesk-bridge"
         self._catalog: dict[str, dict[str, Any]] = {}
         self._tools: tuple[Any, ...] = ()
         self._tools_of: object = None
@@ -226,8 +234,8 @@ class Desks:
 
     def _reconcile(self, settings: RigdeskSettings) -> None:
         self._for_fleet = settings.for_fleet
-        moved = settings.remote_bin != self._remote_bin
-        self._remote_bin = settings.remote_bin
+        moved = settings.bridge_bin != self._bridge_bin
+        self._bridge_bin = settings.bridge_bin
         for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
             link = self._pcs.pop(name)
             for task in (link.task, link.remote):
@@ -237,24 +245,26 @@ class Desks:
             if name not in self._pcs:
                 link = self._pcs[name] = PcLink(name, spec)
                 if spec.stock is not None:
-                    link.remote = TASKS.spawn(f"rigdesk-remote-{name}", self._remote(link, spec.stock))
+                    link.remote = TASKS.spawn(f"rigdesk-bridge-{name}", self._remote(link, spec.stock))
                 link.task = TASKS.spawn(f"rigdesk-{name}", self._held(link))
 
-    # --- rigdesk-remote, for a stock PC ---
+    # --- rigdesk-bridge, for a stock PC ---
 
     def _remote_log(self, name: str) -> Any:
-        path = self._dir / f"remote-{name}.log"
+        path = self._dir / f"bridge-{name}.log"
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > REMOTE_LOG_BYTES:
             path.replace(path.with_suffix(".log.1"))
         return open(path, "ab")  # noqa: SIM115
 
     async def _remote(self, link: PcLink, stock: StockRemote) -> None:
-        """Keeps one rigdesk-remote running for a stock PC, restarting it when it exits; its output goes to remote-<pc>.log here."""
-        argv = [str(Path(self._remote_bin).expanduser()) if "/" in self._remote_bin else self._remote_bin,
+        """Keeps one rigdesk-bridge running for a stock PC, restarting it when it exits; its output goes to bridge-<pc>.log here."""
+        argv = [str(Path(self._bridge_bin).expanduser()) if "/" in self._bridge_bin else self._bridge_bin,
                 "--peer", stock.peer, "--password-file", str(Path(stock.password_file).expanduser()),
                 "--token-file", str(Path(link.spec.token_file).expanduser()), "--port", str(urlsplit(link.spec.url).port),
-                "--journal", str(self._dir / f"remote-{link.name}.journal")]
+                "--journal", str(self._dir / f"bridge-{link.name}.journal")]
+        if stock.viewer_port is not None and stock.viewer_password_file is not None:
+            argv += ["--viewer-port", str(stock.viewer_port), "--viewer-password-file", str(Path(stock.viewer_password_file).expanduser())]
         tries = 0
         while True:
             started = time.monotonic()
@@ -263,8 +273,8 @@ class Desks:
                 process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             except OSError as failed:
                 log.close()
-                link.remote_why = f"rigdesk-remote could not start ({argv[0]}): {failed}"
-                _LOG.warning("rigdesk_remote_unstarted", f"RigDesk {link.name}: {link.remote_why}", pc=link.name)
+                link.remote_why = f"rigdesk-bridge could not start ({argv[0]}): {failed}"
+                _LOG.warning("rigdesk_bridge_unstarted", f"RigDesk {link.name}: {link.remote_why}", pc=link.name)
             else:
                 log.close()
                 link.remote_why = None
@@ -273,8 +283,8 @@ class Desks:
                 except asyncio.CancelledError:
                     await self._stopped(process)
                     raise
-                link.remote_why = f"rigdesk-remote exited with code {code}; see remote-{link.name}.log in the plugin's state directory"
-                _LOG.warning("rigdesk_remote_exited", f"RigDesk {link.name}: {link.remote_why}", pc=link.name)
+                link.remote_why = f"rigdesk-bridge exited with code {code}; see bridge-{link.name}.log in the plugin's state directory"
+                _LOG.warning("rigdesk_bridge_exited", f"RigDesk {link.name}: {link.remote_why}", pc=link.name)
             tries = 0 if time.monotonic() - started > 60 else tries + 1
             await asyncio.sleep(RETRY_S[min(tries, len(RETRY_S) - 1)])
 
@@ -561,7 +571,7 @@ class Desks:
             raise DeskRefused(f"no viewer verb {verb!r}")
         async with self._client().post(f"{link.spec.url}/viewer/{verb}", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             if answer.status != 200:
-                raise DeskRefused(f"{pc}'s rigdesk-remote answered HTTP {answer.status}")
+                raise DeskRefused(f"{pc}'s rigdesk-bridge answered HTTP {answer.status}")
             said = await answer.json(content_type=None)
         if verb == "mint":
             return {"link": f"rigdesk://{pc}/{said['grant']}#{said['secret']}"}

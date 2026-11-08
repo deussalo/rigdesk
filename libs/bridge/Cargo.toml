@@ -1,5 +1,5 @@
 [package]
-name = "rigdesk-remote"
+name = "rigdesk-bridge"
 version = "0.1.0"
 edition = "2021"
 description = "Drives a stock RustDesk PC for a Rig agent: a headless RustDesk client on the Rig host that serves RigDesk's agent API"
