@@ -33,11 +33,11 @@ You need:
 - a permanent password (8-64 characters), an admin PIN (4-32) and an agent API token (32-128 of `A-Za-z0-9_-`) for
   this PC. Generate them, and give the token to Rig through the plugin's token route (see below).
 
-Then run this once in an **administrator** PowerShell on the PC. The release notes give the exact line, pinned to
-that release's `install.ps1`:
+Then run this once in an **administrator** PowerShell on the PC. Each release's notes give the exact line, with
+`<tag>` and the SHA-256 of that release's `install.ps1` filled in; `install.ps1` in turn checks the package's SHA-256:
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/deussalo/rigdesk/releases/download/<tag>/install.ps1))) -Client <slug> -TailscaleAuthKey <tskey-auth-...> -Password <password> -Pin <pin> -AgentToken <token>
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\rigdesk-install.ps1"; iwr -UseBasicParsing https://github.com/deussalo/rigdesk/releases/download/<tag>/install.ps1 -OutFile $f; if ((Get-FileHash $f -Algorithm SHA256).Hash -ne '<INSTALL_PS1_SHA256>') { throw 'install.ps1 checksum mismatch' }; & ([scriptblock]::Create((Get-Content -Raw $f))) -Client <slug> -TailscaleAuthKey <tskey-auth-...> -Password <password> -Pin <pin> -AgentToken <token>; Remove-Item $f
 ```
 
 The script ([install/install.ps1](install/install.ps1)):
@@ -110,3 +110,6 @@ Input goes through the same injection path as viewer input, so viewers see it li
 GitHub Actions (`.github/workflows/windows.yml`) builds the Windows x64 package. It then runs the binary grep, an
 agent API smoke test against Notepad, the installer smoke test and the unit tests. The pure agent logic lives in
 `libs/agent` (`cargo test -p rigdesk-agent`), and runs and tests on any OS.
+
+A tag `v*` publishes a release: the zip, `install.ps1` pinned to the tag and the zip's SHA-256, `SHA256SUMS`, and
+notes carrying the install line. Taking a new RustDesk release is described in [docs/UPSTREAM.md](docs/UPSTREAM.md).
