@@ -12,7 +12,7 @@ use hbb_common::{
     config::{self, Config},
     log,
 };
-use serde::Deserialize;
+use serde_derive::Deserialize;
 
 #[derive(Deserialize)]
 struct Enrollment {

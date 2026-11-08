@@ -2295,7 +2295,7 @@ impl Connection {
             #[cfg(target_os = "windows")]
             crate::agent::viewer::join(self.inner.id(), {
                 let mut inner = self.inner.clone();
-                Box::new(move |msg| inner.send(msg))
+                Box::new(move |msg: Arc<Message>| inner.send(msg))
             });
         }
     }
