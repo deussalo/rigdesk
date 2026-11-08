@@ -21,8 +21,8 @@ README is kept at [docs/README-upstream.md](docs/README-upstream.md).
   call also needs the session token that `/claim` returns for a share link.
 - **Locked settings.** Server, network, proxy and security settings are hidden. The permanent password can be changed
   only by running the install line again, and the admin settings PIN guards the rest.
-- **Trimmed.** Windows x64 only, English only, Flutter UI only (the Sciter UI, mobile targets and Linux packaging
-  are gone). Port forwarding, the remote terminal and the remote printer are switched off in the embedded settings.
+- **Trimmed.** English only, Flutter UI only (the Sciter UI, iOS and Linux packaging are gone). Port forwarding,
+  the remote terminal and the remote printer are switched off in the embedded settings.
 
 ## Enrolling a PC
 
@@ -82,6 +82,10 @@ In the remote window, the agent bar (bottom right) offers:
 - The agent's pointer shows as a green dot labelled with its name and last action, and an action strip lists its
   recent calls.
 
+On Android (the arm64 APK, which installs as RigDesk beside RustDesk) the agent badge at the top left opens these
+controls as a sheet, set up per PC as on the desktop; the red Stop stays on screen while an agent holds the share,
+and a touch on the remote image takes input back.
+
 Each claim, holder change, block and tool call is appended to the PC's action log, readable at `GET /log`.
 
 ## The Rig plugin
@@ -110,6 +114,9 @@ Input goes through the same injection path as viewer input, so viewers see it li
 GitHub Actions (`.github/workflows/windows.yml`) builds the Windows x64 package. It then runs the binary grep, an
 agent API smoke test against Notepad, the installer smoke test and the unit tests. The pure agent logic lives in
 `libs/agent` (`cargo test -p rigdesk-agent`), and runs and tests on any OS.
+
+`.github/workflows/android.yml` builds the Android arm64 APK (artifact `rigdesk-android-arm64`, debug-signed), with
+the same grep for public hosts and keys.
 
 A tag `v*` publishes a release: the zip, `install.ps1` pinned to the tag and the zip's SHA-256, `SHA256SUMS`, and
 notes carrying the install line. Taking a new RustDesk release is described in [docs/UPSTREAM.md](docs/UPSTREAM.md).

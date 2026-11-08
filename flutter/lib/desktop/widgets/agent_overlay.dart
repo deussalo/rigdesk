@@ -35,6 +35,9 @@ void onAgentStopKey(FFI ffi) {
 /// The agent host each open session's panel talks to, once set up for that PC.
 final Map<String, AgentBridge> _bridges = {};
 
+/// The same map for the phone's panel (mobile/widgets/agent_panel.dart), so Stop from the session's key path finds it.
+Map<String, AgentBridge> get agentBridges => _bridges;
+
 String _hostOptionKey(FFI ffi) => 'rigdesk-agent-host-${ffi.id}';
 
 Future<void> _ask(FFI ffi, String verb,
