@@ -64,7 +64,7 @@ impl Mcp {
                     .desk
                     .tools()
                     .into_iter()
-                    .map(|t| json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema}))
+                    .map(|t| json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema, "annotations": {"readOnlyHint": t.read_only}}))
                     .collect();
                 reply(&id, json!({"tools": tools}))
             }

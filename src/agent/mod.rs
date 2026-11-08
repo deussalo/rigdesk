@@ -8,10 +8,9 @@
 
 #![cfg(target_os = "windows")]
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use hbb_common::log;
+use hbb_common::{log, tokio};
 use rigdesk_agent::{Events, Journal, Minted, Shared, Standing};
 
 mod capture;

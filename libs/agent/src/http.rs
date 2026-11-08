@@ -8,6 +8,7 @@
 //!   GET  /events           - SSE, resumable with Last-Event-ID
 //!   GET  /attachments/<id> - an image from a human message, owner session only
 //!   POST /attachments/<id>/ack - mark messages delivered up to the message that image belongs to
+//!   POST /leave            - the owning agent ends its session
 //!   GET  /health           - liveness and the current standing
 
 use std::convert::Infallible;
@@ -106,6 +107,7 @@ impl Api {
         match (method.as_str(), path.as_str()) {
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
+            ("POST", "/leave") => self.leave(&request),
             ("GET", "/events") => self.events(request),
             ("POST", "/debug/mint") if std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
                 let minted = self.shared.mint();
@@ -233,6 +235,15 @@ impl Api {
         }
     }
 
+    fn leave(&self, request: &Request<Incoming>) -> Response<Body> {
+        let Some(owner) = self.owner_from(request) else {
+            return text(StatusCode::FORBIDDEN, "leave needs the owner's session token");
+        };
+        let left = self.shared.revoke("the agent left");
+        self.journal.record(&Entry::new(owner.who(), "leave", if left { "ok" } else { "no session" }, json!({})));
+        json_response(StatusCode::OK, &json!({"left": left}))
+    }
+
     fn ack(&self, request: &Request<Incoming>, _path: &str) -> Response<Body> {
         if self.owner_from(request).is_none() {
             return text(StatusCode::FORBIDDEN, "ack needs the owner's session token");
@@ -256,4 +267,52 @@ fn tokio_stream_from(rx: mpsc::Receiver<Result<hyper::body::Frame<Bytes>, Infall
     use http_body_util::StreamBody;
     use tokio_stream::wrappers::ReceiverStream;
     StreamBody::new(ReceiverStream::new(rx)).boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desk::{Content, ToolSpec};
+    use crate::events::Events;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct NoDesk;
+    impl Desk for NoDesk {
+        fn tools(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec { name: "type", description: "types text", input_schema: json!({"type": "object"}), read_only: false }]
+        }
+        fn call(&self, _tool: &str, _args: &Value) -> Result<Vec<Content>, String> {
+            Ok(vec![Content::Text("typed".into())])
+        }
+    }
+
+    async fn post(port: u16, path: &str, session: &str, body: &Value) -> Value {
+        let body = body.to_string();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nhost: x\r\nauthorization: Bearer b\r\nx-desk-session: {session}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        let (_, json) = answer.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn after_leave_the_session_token_is_refused() {
+        let shared = Arc::new(Shared::new(Events::new(64)));
+        let api = Api::new(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::memory()), "b");
+        let port = api.serve(0).await.unwrap();
+        let minted = shared.mint();
+        let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
+        let claimed = post(port, "/claim", "", &json!({"grant": minted.grant, "secret": minted.secret, "agent": agent})).await;
+        let token = claimed["session"].as_str().unwrap().to_string();
+        assert_eq!(post(port, "/leave", &token, &json!({})).await["left"], json!(true));
+        let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "type", "arguments": {}}});
+        let refused = post(port, "/mcp", &token, &call).await;
+        assert_eq!(refused["result"]["isError"], json!(true));
+        assert!(shared.standing().owner.is_none());
+    }
 }
