@@ -125,6 +125,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: windows-2022
+      - name: Keep the image's vcpkg tool
+        shell: bash
+        run: cp /c/vcpkg/vcpkg.exe "$RUNNER_TEMP/vcpkg-image.exe"
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         id: vcpkg
         continue-on-error: true
@@ -137,11 +140,24 @@ jobs:
         if: steps.vcpkg.outcome == 'failure'
         run: Start-Sleep -Seconds 90
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        id: vcpkg2
         if: steps.vcpkg.outcome == 'failure'
+        continue-on-error: true
         with:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           doNotCache: false
+      # When that download keeps failing, build the pinned ports with the vcpkg tool the runner image ships.
+      - name: Fall back to the image's vcpkg tool
+        if: steps.vcpkg.outcome == 'failure' && steps.vcpkg2.outcome == 'failure'
+        shell: bash
+        run: |
+          cd /c/vcpkg
+          git rev-parse -q --verify "$VCPKG_COMMIT_ID^{commit}" >/dev/null || git fetch -q origin "$VCPKG_COMMIT_ID"
+          git checkout -q -f "$VCPKG_COMMIT_ID"
+          cp "$RUNNER_TEMP/vcpkg-image.exe" vcpkg.exe
+          ./vcpkg.exe version | head -1
+          echo 'VCPKG_ROOT=C:\vcpkg' >> "$GITHUB_ENV"
       - name: Install vcpkg dependencies
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
