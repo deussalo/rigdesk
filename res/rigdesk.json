@@ -13,6 +13,9 @@
     "hide-network-settings": "Y",
     "hide-proxy-settings": "Y",
     "hide-security-settings": "Y",
-    "disable-change-permanent-password": "Y"
+    "disable-change-permanent-password": "Y",
+    "enable-tunnel": "N",
+    "enable-terminal": "N",
+    "enable-remote-printer": "N"
   }
 }

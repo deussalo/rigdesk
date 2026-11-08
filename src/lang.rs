@@ -1,115 +1,9 @@
 use hbb_common::regex::Regex;
 use std::ops::Deref;
 
-mod ar;
-mod az;
-mod be;
-mod bg;
-mod ca;
-mod cn;
-mod cs;
-mod da;
-mod de;
-mod el;
 mod en;
-mod eo;
-mod es;
-mod et;
-mod eu;
-mod fa;
-mod gu;
-mod fr;
-mod he;
-mod hi;
-mod hr;
-mod hu;
-mod id;
-mod it;
-mod ja;
-mod ko;
-mod kz;
-mod lt;
-mod lv;
-mod nb;
-mod nl;
-mod pl;
-mod pt_BR;
-mod pt_PT;
-mod ro;
-mod ru;
-mod sc;
-mod sk;
-mod sl;
-mod sq;
-mod sr;
-mod sv;
-mod th;
-mod tr;
-mod tw;
-mod uk;
-mod ur;
-mod vi;
-mod ta;
-mod ge;
-mod fi;
-mod ml;
-mod gl;
 
-pub const LANGS: &[(&str, &str)] = &[
-    ("en", "English"),
-    ("it", "Italiano"),
-    ("fr", "Français"),
-    ("de", "Deutsch"),
-    ("nl", "Nederlands"),
-    ("nb", "Norsk bokmål"),
-    ("zh-cn", "简体中文"),
-    ("zh-tw", "繁體中文"),
-    ("pt-pt", "Português (Portugal)"),
-    ("pt-br", "Português (Brasil)"),
-    ("es", "Español"),
-    ("et", "Eesti keel"),
-    ("eu", "Euskara"),
-    ("hu", "Magyar"),
-    ("bg", "Български"),
-    ("be", "Беларуская"),
-    ("ru", "Русский"),
-    ("sk", "Slovenčina"),
-    ("id", "Indonesia"),
-    ("cs", "Čeština"),
-    ("da", "Dansk"),
-    ("eo", "Esperanto"),
-    ("tr", "Türkçe"),
-    ("vi", "Tiếng Việt"),
-    ("pl", "Polski"),
-    ("ja", "日本語"),
-    ("ko", "한국어"),
-    ("kz", "Қазақ"),
-    ("uk", "Українська"),
-    ("ur", "اردو"),
-    ("fa", "فارسی"),
-    ("ca", "Català"),
-    ("gl", "Galego"),
-    ("el", "Ελληνικά"),
-    ("sv", "Svenska"),
-    ("sq", "Shqip"),
-    ("sr", "Srpski"),
-    ("th", "ภาษาไทย"),
-    ("sl", "Slovenščina"),
-    ("ro", "Română"),
-    ("lt", "Lietuvių"),
-    ("lv", "Latviešu"),
-    ("ar", "العربية"),
-    ("he", "עברית"),
-    ("hr", "Hrvatski"),
-    ("sc", "Sardu"),
-    ("ta", "தமிழ்"),
-    ("ge", "ქართული"),
-    ("fi", "Suomi"),
-    ("ml", "മലയാളം"),
-    ("hi", "हिंदी"),
-    ("gu", "ગુજરાતી"),
-    ("az", "Azərbaycan dili"),
-];
+pub const LANGS: &[(&str, &str)] = &[("en", "English")];
 
 pub(crate) fn cjk_ui_unavailable() -> bool {
     cfg!(all(
@@ -203,63 +97,7 @@ pub fn translate_locale(name: String, locale: &str) -> String {
         locale,
         cjk_ui_unavailable(),
     );
-    let m = match lang.as_str() {
-        "fr" => fr::T.deref(),
-        "zh-cn" => cn::T.deref(),
-        "it" => it::T.deref(),
-        "zh-tw" => tw::T.deref(),
-        "de" => de::T.deref(),
-        "nb" => nb::T.deref(),
-        "nl" => nl::T.deref(),
-        "es" => es::T.deref(),
-        "et" => et::T.deref(),
-        "eu" => eu::T.deref(),
-        "hu" => hu::T.deref(),
-        "ru" => ru::T.deref(),
-        "eo" => eo::T.deref(),
-        "id" => id::T.deref(),
-        "br" => pt_BR::T.deref(),
-        "pt" => pt_BR::T.deref(),
-        "pt-br" => pt_BR::T.deref(),
-        "pt-pt" => pt_PT::T.deref(),
-        "tr" => tr::T.deref(),
-        "cs" => cs::T.deref(),
-        "da" => da::T.deref(),
-        "sk" => sk::T.deref(),
-        "vi" => vi::T.deref(),
-        "pl" => pl::T.deref(),
-        "ja" => ja::T.deref(),
-        "ko" => ko::T.deref(),
-        "kz" => kz::T.deref(),
-        "uk" => uk::T.deref(),
-        "fa" => fa::T.deref(),
-        "fi" => fi::T.deref(),
-        "ca" => ca::T.deref(),
-        "el" => el::T.deref(),
-        "sv" => sv::T.deref(),
-        "sq" => sq::T.deref(),
-        "sr" => sr::T.deref(),
-        "th" => th::T.deref(),
-        "sl" => sl::T.deref(),
-        "ro" => ro::T.deref(),
-        "lt" => lt::T.deref(),
-        "lv" => lv::T.deref(),
-        "ar" => ar::T.deref(),
-        "bg" => bg::T.deref(),
-        "be" => be::T.deref(),
-        "he" => he::T.deref(),
-        "hr" => hr::T.deref(),
-        "ur" => ur::T.deref(),
-        "sc" => sc::T.deref(),
-        "ta" => ta::T.deref(),
-        "ge" => ge::T.deref(),
-        "ml" => ml::T.deref(),
-        "hi" => hi::T.deref(),
-        "gu" => gu::T.deref(),
-        "gl" => gl::T.deref(),
-        "az" => az::T.deref(),
-        _ => en::T.deref(),
-    };
+    let m = en::T.deref();
     let (name, placeholder_value) = extract_placeholder(&name);
     let replace = |s: &&str| {
         let mut s = s.to_string();
@@ -418,7 +256,7 @@ mod test {
         use super::*;
 
         // translate() puts the caller's value where `{}` is, so a translation without `{}` drops it.
-        for table in [&*ru::T, &*sc::T, &*vi::T] {
+        for table in [&*en::T] {
             for (key, value) in table.iter() {
                 if key.contains("{}") && !value.is_empty() {
                     assert!(value.contains("{}"), "{key:?} => {value:?}");

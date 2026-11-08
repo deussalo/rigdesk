@@ -25,12 +25,8 @@ pub use self::rendezvous_mediator::*;
 pub mod common;
 #[cfg(not(any(target_os = "ios")))]
 pub mod ipc;
-#[cfg(not(any(
-    target_os = "android",
-    target_os = "ios",
-    feature = "flutter"
-)))]
-pub mod ui;
+#[cfg(not(any(target_os = "android", target_os = "ios", feature = "flutter")))]
+compile_error!("RigDesk builds with the flutter feature only: the Sciter UI was removed");
 pub(crate) mod update_metadata;
 pub(crate) mod update_hash;
 #[cfg(target_os = "macos")]

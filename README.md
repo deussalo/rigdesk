@@ -21,6 +21,8 @@ README is kept at [docs/README-upstream.md](docs/README-upstream.md).
   call also needs the session token that `/claim` returns for a share link.
 - **Locked settings.** Server, network, proxy and security settings are hidden. The permanent password can be changed
   only by running the install line again, and the admin settings PIN guards the rest.
+- **Trimmed.** Windows x64 only, English only, Flutter UI only (the Sciter UI, mobile targets and Linux packaging
+  are gone). Port forwarding, the remote terminal and the remote printer are switched off in the embedded settings.
 
 ## Enrolling a PC
 
