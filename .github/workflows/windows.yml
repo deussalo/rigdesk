@@ -147,6 +147,9 @@ jobs:
             if [ -n "$hits" ]; then echo "::error::$needle found in: $hits"; found=1; fi
           done
           exit $found
+      - name: Agent API smoke test against Notepad
+        shell: powershell
+        run: .\.github\smoke\agent.ps1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rigdesk-windows-x64

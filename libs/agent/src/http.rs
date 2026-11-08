@@ -9,6 +9,7 @@
 //!   GET  /attachments/<id> - an image from a human message, owner session only
 //!   POST /attachments/<id>/ack - mark messages delivered up to the message that image belongs to
 //!   POST /leave            - the owning agent ends its session
+//!   POST /debug/mint, /debug/viewer/<hand|human|block|unblock> - only with RIGDESK_AGENT_DEBUG_MINT set, for CI
 //!   GET  /health           - liveness, this process's boot id and the current standing
 
 use std::convert::Infallible;
@@ -113,6 +114,17 @@ impl Api {
             ("POST", "/debug/mint") if std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
                 let minted = self.shared.mint();
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
+            }
+            ("POST", p) if p.starts_with("/debug/viewer/") && std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
+                // The viewer's buttons, for the CI smoke test only: the same calls the viewer makes over the peer protocol.
+                let done = match p.trim_start_matches("/debug/viewer/") {
+                    "hand" => self.shared.hand_to_agent(),
+                    "human" => self.shared.human_input("debug"),
+                    "block" => self.shared.block(),
+                    "unblock" => self.shared.unblock(),
+                    _ => return text(StatusCode::NOT_FOUND, "no such viewer verb"),
+                };
+                json_response(StatusCode::OK, &json!({"changed": done, "standing": self.shared.standing()}))
             }
             ("GET", p) if p.starts_with("/attachments/") => self.attachment(&request, p),
             ("POST", p) if p.starts_with("/attachments/") && p.ends_with("/ack") => self.ack(&request, p),
