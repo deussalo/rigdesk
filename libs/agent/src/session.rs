@@ -45,10 +45,16 @@ impl Refusal {
         match self {
             Refusal::NoSession => "no session: this desktop is not shared with you; ask the human for a share link and call desk/join".into(),
             Refusal::WrongGrant => "that share link is not valid here: it was already used, replaced or never minted; ask the human for a new one".into(),
-            Refusal::Blocked { since_ms } => format!("the human blocked the agent at {since_ms} (ms since epoch); nothing runs until they unblock it"),
-            Refusal::HumanHolds { since_ms } => format!("the human took over input at {since_ms} (ms since epoch); reads still work, actions wait until they hand it back"),
+            Refusal::Blocked { since_ms } => format!("the human blocked the agent at {}; nothing runs until they unblock it", clock(*since_ms)),
+            Refusal::HumanHolds { since_ms } => format!("the human took over at {}; reads still work, actions wait until they hand input back", clock(*since_ms)),
         }
     }
+}
+
+/// A moment as the agent reads it, in UTC: the PC's own zone is not known to the agent.
+fn clock(at_ms: u64) -> String {
+    let day = (at_ms / 1000) % 86_400;
+    format!("{:02}:{:02}:{:02} UTC", day / 3600, day / 60 % 60, day % 60)
 }
 
 struct Grant {
@@ -209,6 +215,12 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_names_the_time_of_day_it_began() {
+        let words = Refusal::HumanHolds { since_ms: 1_794_128_922_806 }.words();
+        assert!(words.contains("took over at 09:08:42 UTC"), "{words}");
+    }
 
     fn owner(id: &str) -> Owner {
         Owner { agent_id: id.into(), title: "front desk".into(), graph: "clients".into() }

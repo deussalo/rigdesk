@@ -9,7 +9,7 @@
 //!   GET  /attachments/<id> - an image from a human message, owner session only
 //!   POST /attachments/<id>/ack - mark messages delivered up to the message that image belongs to
 //!   POST /leave            - the owning agent ends its session
-//!   GET  /health           - liveness and the current standing
+//!   GET  /health           - liveness, this process's boot id and the current standing
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -40,6 +40,8 @@ pub struct Api {
     journal: Arc<Journal>,
     mcp: Arc<Mcp>,
     bearer: [u8; 32],
+    /// Fresh each start: event ids and sessions do not outlive the process, so a client that sees a new boot starts over.
+    boot: String,
 }
 
 fn full(bytes: impl Into<Bytes>) -> Body {
@@ -61,7 +63,8 @@ fn text(status: StatusCode, body: &str) -> Response<Body> {
 impl Api {
     pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into() })
+        let boot = format!("{:016x}", rand::random::<u64>());
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot })
     }
 
     fn bearer_ok(&self, request: &Request<Incoming>) -> bool {
@@ -97,14 +100,12 @@ impl Api {
 
     async fn route(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
         let path = request.uri().path().to_string();
-        if path == "/health" {
-            return json_response(StatusCode::OK, &json!({"ok": true, "standing": self.shared.standing()}));
-        }
         if !self.bearer_ok(&request) {
             return text(StatusCode::UNAUTHORIZED, "bad bearer token");
         }
         let method = request.method().clone();
         match (method.as_str(), path.as_str()) {
+            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "standing": self.shared.standing()})),
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
             ("POST", "/leave") => self.leave(&request),

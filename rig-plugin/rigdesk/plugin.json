@@ -1,0 +1,8 @@
+{
+  "release": "0.1.0",
+  "provides": [
+    { "type": "route", "path": "all", "module": "page.tsx", "export": "RigdeskPage" },
+    { "type": "entry", "list": "app_tabs", "id": "rigdesk", "order": 21, "module": "page.tsx", "export": "RigdeskTab" },
+    { "type": "entry", "list": "agent_pins", "id": "rigdesk", "module": "agent_pin.tsx", "export": "RigdeskAgentPin" }
+  ]
+}
