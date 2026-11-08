@@ -104,12 +104,12 @@ try {
 
   # Where Notepad's text area is, found by the test itself: a stock PC has no UI tree for the agent.
   $window = [IntPtr]::Zero
-  foreach ($i in 1..20) { $window = [Win]::FindWindow("Notepad", $null); if ($window -ne [IntPtr]::Zero) { break }; Start-Sleep -Milliseconds 500 }
+  foreach ($i in 1..20) { $window = [Win]::FindWindow("Notepad", [NullString]::Value); if ($window -ne [IntPtr]::Zero) { break }; Start-Sleep -Milliseconds 500 }
   if ($window -eq [IntPtr]::Zero) { Fail "the test could not find Notepad's window" }
   # Topmost, so no console window the runner opens covers it.
   $null = [Win]::SetWindowPos($window, [IntPtr](-1), 200, 150, 600, 400, 0x40)
   Start-Sleep -Milliseconds 500
-  $edit = [Win]::FindWindowEx($window, [IntPtr]::Zero, "Edit", $null)
+  $edit = [Win]::FindWindowEx($window, [IntPtr]::Zero, "Edit", [NullString]::Value)
   if ($edit -eq [IntPtr]::Zero) { Fail "the test could not find Notepad's text area" }
   $r = New-Object Win+RECT
   $null = [Win]::GetWindowRect($edit, [ref]$r)
@@ -169,6 +169,6 @@ try {
   if ((Get-Content -Raw (Join-Path $out "remote.err.log")) -match [regex]::Escape($password)) { Fail "the password reached rigdesk-remote's log" }
   Write-Host "stock $Version smoke passed"
 } finally {
-  if ($remote) { Stop-Process -Id $remote.Id -Force -ErrorAction SilentlyContinue }
+  if ($null -ne $remote -and $null -ne $remote.Id) { Stop-Process -Id $remote.Id -Force -ErrorAction SilentlyContinue }
   Get-Process rustdesk, notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
