@@ -3,14 +3,17 @@ from then on desk/<tool> drives that PC through the PC's own agent API, and what
 The fork's source: https://github.com/deussalo/rigdesk (AGPL-3.0); Rig talks to it over HTTP only."""
 from __future__ import annotations
 
+import asyncio
+import os
 from collections.abc import Mapping
 from http import HTTPStatus
-from typing import Any
+from pathlib import Path
+from typing import Annotated, Any
 
 import aiohttp
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from core.base import ToolAnswer, View
+from core.base import ToolAnswer, View, replace_file
 from core.boundary import BranchTool, NoParams, Params, StatusLine
 from core.kernel_api import mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
@@ -198,6 +201,42 @@ async def get_session(request: Request[SessionParams]) -> SessionView:
     return SessionView(session=request.host().live(Desks).session_of(request.params.graph, request.params.agent))
 
 
+TOKENS = Path("~/.rig/rigdesk")
+
+type PcName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")]
+type Token = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{32,128}$")]
+
+
+class TokenBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", defer_build=True)
+    pc: PcName
+    token: Token
+
+
+class TokenParams(Params):
+    body: TokenBody
+
+
+class TokenKept(View):
+    token_file: str = Field(description="Where the PC's agent-API token is kept, readable by this user alone: name it as the PC's token_file in plugins.rigdesk.pcs.")
+
+
+def _kept(path: Path, token: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.exists():
+        os.chmod(path, 0o600)
+    replace_file(path, token.encode(), new_mode=0o600)
+
+
+@endpoint(TokenParams, OPERATOR)
+async def post_token(request: Request[TokenParams]) -> TokenKept:
+    """Keeps a PC's agent-API token, the one its install line sets, in a 0600 file of its own; a second call for the same PC replaces it, as rerunning the line rotates it."""
+    body = request.params.body
+    path = TOKENS / f"{body.pc}.token"
+    await asyncio.to_thread(_kept, path.expanduser(), body.token)
+    return TokenKept(token_file=str(path))
+
+
 async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
     return tuple(StatusLine(text=f"RigDesk {row['name']}: {row['state']}" + (f" ({row['why']})" if row["why"] else ""))
                  for row in host.live(Desks).pcs() if row["state"] == "down")
@@ -207,4 +246,4 @@ CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, status=_status,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _opened, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE},
-    routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session)))
+    routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token)))

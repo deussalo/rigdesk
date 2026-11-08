@@ -15,6 +15,7 @@ use rigdesk_agent::{Events, Journal, Minted, Shared, Standing};
 
 mod capture;
 mod desk;
+pub mod enroll;
 mod input;
 mod shell;
 mod uia;

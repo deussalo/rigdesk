@@ -1,182 +1,110 @@
-<p align="center">
-  <img src="res/logo-header.svg" alt="RustDesk - Your remote desktop"><br>
-  <a href="#raw-steps-to-build">Build</a> •
-  <a href="#how-to-build-with-docker">Docker</a> •
-  <a href="#file-structure">Structure</a> •
-  <a href="#screenshots">Screenshots</a><br>
-  [<a href="docs/README-UA.md">Українська</a>] | [<a href="docs/README-CS.md">česky</a>] | [<a href="docs/README-ZH.md">中文</a>] | [<a href="docs/README-HU.md">Magyar</a>] | [<a href="docs/README-ES.md">Español</a>] | [<a href="docs/README-FA.md">فارسی</a>] | [<a href="docs/README-FR.md">Français</a>] | [<a href="docs/README-DE.md">Deutsch</a>] | [<a href="docs/README-PL.md">Polski</a>] | [<a href="docs/README-ID.md">Indonesian</a>] | [<a href="docs/README-FI.md">Suomi</a>] | [<a href="docs/README-ML.md">മലയാളം</a>] | [<a href="docs/README-JP.md">日本語</a>] | [<a href="docs/README-NL.md">Nederlands</a>] | [<a href="docs/README-IT.md">Italiano</a>] | [<a href="docs/README-RU.md">Русский</a>] | [<a href="docs/README-PTPT.md">Português (Portugal)</a>] | [<a href="docs/README-PTBR.md">Português (Brasil)</a>] | [<a href="docs/README-EO.md">Esperanto</a>] | [<a href="docs/README-KR.md">한국어</a>] | [<a href="docs/README-AR.md">العربي</a>] | [<a href="docs/README-VN.md">Tiếng Việt</a>] | [<a href="docs/README-DA.md">Dansk</a>] | [<a href="docs/README-GR.md">Ελληνικά</a>] | [<a href="docs/README-TR.md">Türkçe</a>] | [<a href="docs/README-NO.md">Norsk</a>] | [<a href="docs/README-RO.md">Română</a>]<br>
-  <b>We need your help to translate this README, <a href="https://github.com/rustdesk/rustdesk/tree/master/src/lang">RustDesk UI</a> and <a href="https://github.com/rustdesk/doc.rustdesk.com">RustDesk Doc</a> to your native language</b>
-</p>
+# RigDesk
 
-> [!Caution]
-> **Misuse Disclaimer:** <br>
-> The developers of RustDesk do not condone or support any unethical or illegal use of this software. Misuse, such as unauthorized access, control or invasion of privacy, is strictly against our guidelines. The authors are not responsible for any misuse of the application.
+RigDesk is a light fork of [RustDesk](https://github.com/rustdesk/rustdesk) 1.5.1. It comes as a prebuilt,
+preconfigured Windows desk that runs as a locked-down service on a client's PC and is reached only over our tailnet.
+A remote viewer can **share the session with a Rig agent**, which then drives the PC with Windows-MCP-like tools. The
+human watching can take input back at any moment, block the agent outright, or send it a message with an annotated
+screenshot.
 
+RigDesk is free software under the [AGPL-3.0](LICENCE), and this repository is its complete source. RustDesk is a
+trademark of its owners; RigDesk is not affiliated with them, and their names and icons are replaced. The upstream
+README is kept at [docs/README-upstream.md](docs/README-upstream.md).
 
-Chat with us: [Discord](https://discord.gg/nDceKgxnkV) | [Twitter](https://twitter.com/rustdesk) | [Reddit](https://www.reddit.com/r/rustdesk) | [YouTube](https://www.youtube.com/@rustdesk)
+## How it is wired
 
-[![RustDesk Server Pro](https://img.shields.io/badge/RustDesk%20Server%20Pro-Advanced%20Features-blue)](https://rustdesk.com/pricing.html)
+- **No servers of ours or RustDesk's.** There is no rendezvous, relay, ID server, API server or updater. The build
+  embeds its settings (`res/rigdesk.json`), and CI greps the binary for RustDesk's public hosts and keys.
+- **Direct IP over the tailnet.** The viewer dials `<pc>.<tailnet>.ts.net:21118`. The PC accepts connections only
+  from Tailscale addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48), and the firewall rule admits nothing else.
+- **Agent API.** The user-session server process serves MCP on `127.0.0.1:21119`, published on the tailnet at
+  `https://<pc>.<tailnet>.ts.net/` by `tailscale serve`. Every request needs the PC's bearer token, and every tool
+  call also needs the session token that `/claim` returns for a share link.
+- **Locked settings.** Server, network, proxy and security settings are hidden. The permanent password can be changed
+  only by running the install line again, and the admin settings PIN guards the rest.
 
-Yet another remote desktop solution, written in Rust. Works out of the box with no configuration required. You have full control of your data, with no concerns about security. You can use our rendezvous/relay server, [set up your own](https://rustdesk.com/server), or [write your own rendezvous/relay server](https://github.com/rustdesk/rustdesk-server-demo).
+## Enrolling a PC
 
-![image](https://user-images.githubusercontent.com/71636191/171661982-430285f0-2e12-4b1d-9957-4a58e375304d.png)
+You need:
 
-RustDesk welcomes contribution from everyone. See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for help getting started.
+- a Tailscale auth key that may apply `tag:pc` and `tag:client-<slug>` (reusable or one-off, preauthorized), with
+  HTTPS certificates turned on for the tailnet;
+- a permanent password (8-64 characters), an admin PIN (4-32) and an agent API token (32-128 of `A-Za-z0-9_-`) for
+  this PC. Generate them, and give the token to Rig through the plugin's token route (see below).
 
-[**FAQ**](https://github.com/rustdesk/rustdesk/wiki/FAQ)
+Then run this once in an **administrator** PowerShell on the PC. The release notes give the exact line, pinned to
+that release's `install.ps1`:
 
-[**BINARY DOWNLOAD**](https://github.com/rustdesk/rustdesk/releases)
-
-[**NIGHTLY BUILD**](https://github.com/rustdesk/rustdesk/releases/tag/nightly)
-
-[<img src="https://f-droid.org/badge/get-it-on.png"
-    alt="Get it on F-Droid"
-    height="80">](https://f-droid.org/en/packages/com.carriez.flutter_hbb)
-[<img src="https://flathub.org/api/badge?svg&locale=en"
-    alt="Get it on Flathub"
-    height="80">](https://flathub.org/apps/com.rustdesk.RustDesk)
-
-## Dependencies
-
-Desktop versions use Flutter or Sciter (deprecated) for GUI. This tutorial is for Sciter only, since it is easier and more friendly to start. Check out our [CI](https://github.com/rustdesk/rustdesk/blob/master/.github/workflows/flutter-build.yml) for building the Flutter version.
-
-Please download Sciter dynamic library yourself.
-
-[Windows](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll) |
-[Linux](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/x64/libsciter-gtk.so) |
-[macOS](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.osx/libsciter.dylib)
-
-## Raw Steps to build
-
-- Prepare your Rust development env and C++ build env
-
-- Install [vcpkg](https://github.com/microsoft/vcpkg), and set `VCPKG_ROOT` env variable correctly
-
-  - Windows: vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
-  - Linux/macOS: vcpkg install libvpx libyuv opus aom
-
-- run `cargo run`
-
-## [Build](https://rustdesk.com/docs/en/dev/build/)
-
-## How to Build on Linux
-
-### Ubuntu 18 (Debian 10)
-
-```sh
-sudo apt install -y zip g++ gcc git curl wget nasm yasm libgtk-3-dev clang libxcb-randr0-dev libxdo-dev \
-        libxfixes-dev libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev libpulse-dev cmake make \
-        libclang-dev ninja-build libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+```powershell
+& ([scriptblock]::Create((irm https://github.com/deussalo/rigdesk/releases/download/<tag>/install.ps1))) -Client <slug> -TailscaleAuthKey <tskey-auth-...> -Password <password> -Pin <pin> -AgentToken <token>
 ```
 
-### openSUSE Tumbleweed
+The script ([install/install.ps1](install/install.ps1)):
 
-```sh
-sudo zypper install gcc-c++ git curl wget nasm yasm gcc gtk3-devel clang libxcb-devel libXfixes-devel cmake alsa-lib-devel gstreamer-devel gstreamer-plugins-base-devel xdotool-devel
+1. installs Tailscale unattended and joins as `tag:pc,tag:client-<slug>`, named after the computer;
+2. downloads the RigDesk package pinned by that release, **checks its SHA-256**, and installs it as the `RigDesk`
+   service, which starts at boot;
+3. passes the password, PIN and agent token to the service through `enroll.json` in the install folder (readable by
+   SYSTEM and Administrators only). The service applies it at startup and deletes it. No secret is printed or
+   logged, and the line is scrubbed from PowerShell's history;
+4. replaces the installer's inbound firewall rule with one for TCP 21118 from the tailnet only;
+5. runs `tailscale serve --bg --https=443 http://127.0.0.1:21119` for the agent API.
+
+Run it again with new values to rotate the secrets. CI runs the same script (minus Tailscale) against every build:
+see `.github/smoke/install.ps1`.
+
+### Tailnet policy
+
+```jsonc
+"tagOwners": { "tag:pc": ["autogroup:admin"], "tag:rig": ["autogroup:admin"], "tag:viewer": ["autogroup:admin"] },
+"grants": [
+  { "src": ["tag:viewer"], "dst": ["tag:pc"], "ip": ["tcp:21118"] },   // the remote viewer
+  { "src": ["tag:rig"],    "dst": ["tag:pc"], "ip": ["tcp:443"] }      // Rig's plugin to the agent API
+]
 ```
 
-### Fedora 28 (CentOS 8)
+A PC reaches nobody; viewers and Rig open every connection.
 
-```sh
-sudo yum -y install gcc-c++ git curl wget nasm yasm gcc gtk3-devel clang libxcb-devel libxdo-devel libXfixes-devel pulseaudio-libs-devel cmake alsa-lib-devel gstreamer1-devel gstreamer1-plugins-base-devel
-```
+## Sharing a session with an agent
 
-### Arch (Manjaro)
+In the remote window, the agent bar (bottom right) offers:
 
-```sh
-sudo pacman -Syu --needed unzip git cmake gcc curl wget yasm nasm zip make pkg-config clang gtk3 xdotool libxcb libxfixes alsa-lib pipewire
-```
+- **Share with agent** copies `rigdesk://<pc>/<grant>#<secret>`. Paste it to any Rig agent, which calls
+  `desk/join(link)`. The link works once, and the agent that claims it alone owns the session. The bar then shows
+  that agent's name.
+- **Hand to agent / Take back.** Any mouse or keyboard input, from a viewer or at the PC itself, takes input back
+  before the agent's next action. While the human holds input, the agent's actions are refused ("the human took over
+  at …") but its reads still work.
+- **Block agent** (big, red) refuses every call, reads included, until Unblock.
+- **Message** opens a box with a still of the current screen. Clip a region, mark it up with pen, arrow, box or
+  text, and send. The agent gets a Rig message naming the image, which it reads with `desk/attachment`.
+- The agent's pointer shows as a green dot labelled with its name and last action, and an action strip lists its
+  recent calls.
 
-### Install vcpkg
+Each claim, holder change, block and tool call is appended to the PC's action log, readable at `GET /log`.
 
-```sh
-git clone https://github.com/microsoft/vcpkg
-cd vcpkg
-git checkout 2023.04.15
-cd ..
-vcpkg/bootstrap-vcpkg.sh
-export VCPKG_ROOT=$HOME/vcpkg
-vcpkg/vcpkg install libvpx libyuv opus aom
-```
+## The Rig plugin
 
-### Fix libvpx (For Fedora)
+`rig-plugin/rigdesk` bridges Rig and the PCs. Install it with `rig plugin add rig-plugin/rigdesk` and list the PCs
+under `plugins.rigdesk.pcs` as `{name: {url, token_file, client}}`. See [rig-plugin/rigdesk/README.md](rig-plugin/rigdesk/README.md).
 
-```sh
-cd vcpkg/buildtrees/libvpx/src
-cd *
-./configure
-sed -i 's/CFLAGS+=-I/CFLAGS+=-fPIC -I/g' Makefile
-sed -i 's/CXXFLAGS+=-I/CXXFLAGS+=-fPIC -I/g' Makefile
-make
-cp libvpx.a $HOME/vcpkg/installed/x64-linux/lib/
-cd
-```
+## Agent API
 
-### Build
+| Route | What |
+|---|---|
+| `POST /claim` | `{grant, secret, agent: {id, title, graph}}` → session token (single use) |
+| `POST /mcp` | MCP JSON-RPC. `X-Desk-Session` carries the session token |
+| `GET /events` | SSE, resumable with `Last-Event-ID`: claimed, holder, revoked, message, dropped, action |
+| `GET /attachments/<id>`, `POST /attachments/<id>/ack` | images sent with human messages |
+| `POST /leave` | the owning agent ends its session |
+| `GET /log?n=N` | the action log |
+| `GET /health` | boot id and current standing |
 
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-git clone --recurse-submodules https://github.com/rustdesk/rustdesk
-cd rustdesk
-mkdir -p target/debug
-wget https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/x64/libsciter-gtk.so
-mv libsciter-gtk.so target/debug
-VCPKG_ROOT=$HOME/vcpkg cargo run
-```
+Tools: `screenshot`, `snapshot` (UI Automation tree with `@x,y` centres), `click`, `type`, `scroll`, `move`, `drag`,
+`key`, `shortcut`, `wait`, `app` (launch/switch), `powershell` (as the signed-in user, never SYSTEM) and `clipboard`.
+Input goes through the same injection path as viewer input, so viewers see it live.
 
-## How to build with Docker
+## Building
 
-Begin by cloning the repository and building the Docker container:
-
-```sh
-git clone https://github.com/rustdesk/rustdesk
-cd rustdesk
-git submodule update --init --recursive
-docker build -t "rustdesk-builder" .
-```
-
-Then, each time you need to build the application, run the following command:
-
-```sh
-docker run --rm -it -v $PWD:/home/user/rustdesk -v rustdesk-git-cache:/home/user/.cargo/git -v rustdesk-registry-cache:/home/user/.cargo/registry -e PUID="$(id -u)" -e PGID="$(id -g)" rustdesk-builder
-```
-
-Note that the first build may take longer before dependencies are cached, subsequent builds will be faster. Additionally, if you need to specify different arguments to the build command, you may do so at the end of the command in the `<OPTIONAL-ARGS>` position. For instance, if you wanted to build an optimized release version, you would run the command above followed by `--release`. The resulting executable will be available in the target folder on your system, and can be run with:
-
-```sh
-target/debug/rustdesk
-```
-
-Or, if you're running a release executable:
-
-```sh
-target/release/rustdesk
-```
-
-Please ensure that you run these commands from the root of the RustDesk repository, or the application may not find the required resources. Also note that other cargo subcommands such as `install` or `run` are not currently supported via this method as they would install or run the program inside the container instead of the host.
-
-## File Structure
-
-- **[libs/hbb_common](https://github.com/rustdesk/rustdesk/tree/master/libs/hbb_common)**: video codec, config, tcp/udp wrapper, and some other utility functions shared with the server
-- **[libs/base](https://github.com/rustdesk/rustdesk/tree/master/libs/base)**: protobuf, fs functions for file transfer, keyboard and platform code used only by this app
-- **[libs/scrap](https://github.com/rustdesk/rustdesk/tree/master/libs/scrap)**: screen capture
-- **[libs/enigo](https://github.com/rustdesk/rustdesk/tree/master/libs/enigo)**: platform specific keyboard/mouse control
-- **[libs/clipboard](https://github.com/rustdesk/rustdesk/tree/master/libs/clipboard)**: file copy and paste implementation for Windows, Linux, macOS.
-- **[src/ui](https://github.com/rustdesk/rustdesk/tree/master/src/ui)**: obsolete Sciter UI (deprecated)
-- **[src/server](https://github.com/rustdesk/rustdesk/tree/master/src/server)**: audio/clipboard/input/video services, and network connections
-- **[src/client.rs](https://github.com/rustdesk/rustdesk/tree/master/src/client.rs)**: start a peer connection
-- **[src/rendezvous_mediator.rs](https://github.com/rustdesk/rustdesk/tree/master/src/rendezvous_mediator.rs)**: Communicate with [rustdesk-server](https://github.com/rustdesk/rustdesk-server), wait for remote direct (TCP hole punching) or relayed connection
-- **[src/platform](https://github.com/rustdesk/rustdesk/tree/master/src/platform)**: platform specific code
-- **[flutter](https://github.com/rustdesk/rustdesk/tree/master/flutter)**: Flutter code for desktop and mobile
-
-## Screenshots
-
-![Connection Manager](https://github.com/rustdesk/rustdesk/assets/28412477/db82d4e7-c4bc-4823-8e6f-6af7eadf7651)
-
-![Connected to a Windows PC](https://github.com/rustdesk/rustdesk/assets/28412477/9baa91e9-3362-4d06-aa1a-7518edcbd7ea)
-
-![File Transfer](https://github.com/rustdesk/rustdesk/assets/28412477/39511ad3-aa9a-4f8c-8947-1cce286a46ad)
-
-![TCP Tunneling](https://github.com/rustdesk/rustdesk/assets/28412477/78e8708f-e87e-4570-8373-1360033ea6c5)
-
+GitHub Actions (`.github/workflows/windows.yml`) builds the Windows x64 package. It then runs the binary grep, an
+agent API smoke test against Notepad, the installer smoke test and the unit tests. The pure agent logic lives in
+`libs/agent` (`cargo test -p rigdesk-agent`), and runs and tests on any OS.

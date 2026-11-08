@@ -15,7 +15,8 @@ Then name each PC in Rig's settings (`plugins.rigdesk`):
      "for_fleet": true}
 
 `url` is the PC's agent API as `tailscale serve` publishes it; `token_file` holds the agent-API token the
-install line set on that PC (`chmod 600`). With `for_fleet` off, only graphs and agents whose
+install line set on that PC (`chmod 600`). `POST /x/rigdesk/token {"pc": "deus", "token": "..."}` keeps a token
+in such a file (`~/.rig/rigdesk/<pc>.token`) and answers its path. With `for_fleet` off, only graphs and agents whose
 `mcp_servers` name `desk` reach the tools.
 
 ## What an agent gets
