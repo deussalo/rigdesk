@@ -81,6 +81,8 @@ lazy_static::lazy_static! {
 }
 
 pub mod shortcuts;
+#[cfg(any(feature = "flutter", test))]
+pub mod agent_stop;
 
 pub mod client {
     use super::*;
@@ -353,6 +355,10 @@ pub mod client {
         ) {
             return;
         }
+        #[cfg(feature = "flutter")]
+        if crate::keyboard::agent_stop::try_stop(None, event) {
+            return;
+        }
 
         let keyboard_mode = get_keyboard_mode_enum(keyboard_mode);
         if is_long_press(&event) {
@@ -384,6 +390,10 @@ pub mod client {
             || session.peer_platform().to_lowercase(),
             |key_event| session.send_key_event(key_event),
         ) {
+            return;
+        }
+        #[cfg(feature = "flutter")]
+        if crate::keyboard::agent_stop::try_stop(Some(&session_id), event) {
             return;
         }
         #[cfg(not(feature = "flutter"))]

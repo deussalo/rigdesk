@@ -27,6 +27,11 @@ void onAgentStateEvent(SessionID sessionId, String stateJson) {
   if (update.note.isNotEmpty) showToast(update.note);
 }
 
+/// Ctrl+Alt+Esc in this session, taken off its key path in Rust so it never reaches the PC: Stop.
+void onAgentStopKey(FFI ffi) {
+  if (AgentModel.of(ffi.sessionId).isShared) _ask(ffi, 'stop');
+}
+
 /// The agent host each open session's panel talks to, once set up for that PC.
 final Map<String, AgentBridge> _bridges = {};
 
@@ -84,17 +89,16 @@ class _AgentOverlayState extends State<AgentOverlay> {
 
   bool get _hasHost => _bridges.containsKey('${ffi.sessionId}');
 
-  /// Ctrl+Alt+Esc stops the agent and never reaches the PC. Any other key while the agent holds input takes it back.
+  /// A key while the agent holds input takes it back. Ctrl+Alt+Esc is Stop, which the session's key path reports
+  /// (onAgentStopKey) whether or not the keyboard is grabbed.
   bool _onKey(KeyEvent event) {
     if (event is! KeyDownEvent) return false;
     final agent = AgentModel.of(ffi.sessionId);
     final keys = HardwareKeyboard.instance;
     if (event.logicalKey == LogicalKeyboardKey.escape &&
         keys.isControlPressed &&
-        keys.isAltPressed &&
-        agent.isShared) {
-      _ask(ffi, 'stop');
-      return true;
+        keys.isAltPressed) {
+      return false;
     }
     final onTop = mounted && (ModalRoute.of(context)?.isCurrent ?? true);
     if (agent.agentHolds && onTop) _ask(ffi, 'take_back');

@@ -470,6 +470,9 @@ class FfiModel with ChangeNotifier {
         _handleScreenshot(evt, sessionId, peerId);
       } else if (name == 'agent_state') {
         onAgentStateEvent(sessionId, evt['state'] ?? '{}');
+      } else if (name == 'agent_stop') {
+        final ffi = parent.target;
+        if (ffi != null) onAgentStopKey(ffi);
       } else if (name == 'exit_relative_mouse_mode') {
         // Handle exit shortcut from rdev grab loop (Ctrl+Alt on Win/Linux, Cmd+G on macOS)
         parent.target?.inputModel.exitRelativeMouseModeWithKeyRelease();
