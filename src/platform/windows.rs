@@ -4977,3 +4977,60 @@ ProcessId=10136
         assert_eq!(pids.len(), 0);
     }
 }
+
+/// Run a PowerShell script as the signed-in user, never as SYSTEM, and return its combined stdout and stderr.
+///
+/// When this process is already the user, it runs PowerShell directly. When it is SYSTEM (the service-spawned
+/// `--server`), it launches through the user's session token with `CreateProcessAsUserW` and reads the output back
+/// from a file under the public directory, which both SYSTEM and the user can reach. The agent's `powershell` tool
+/// is the only caller; keeping it off the SYSTEM token is a hard requirement of the share model.
+pub fn run_powershell_as_user(script: &str, timeout_ms: u32) -> ResultType<String> {
+    use std::io::Write;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::process::CommandExt;
+
+    if !is_root() {
+        let out = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()?;
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        return Ok(text);
+    }
+
+    let Some(session_id) = get_current_process_session_id() else {
+        bail!("cannot run PowerShell as the user: no session id for this process");
+    };
+    let public = std::env::var("PUBLIC").unwrap_or_else(|_| "C:\\Users\\Public".to_owned());
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tag = format!("rigdesk-ps-{}-{}", std::process::id(), nonce);
+    let ps1 = std::path::Path::new(&public).join(format!("{tag}.ps1"));
+    let out_path = std::path::Path::new(&public).join(format!("{tag}.out"));
+    std::fs::File::create(&ps1)?.write_all(script.as_bytes())?;
+
+    let cmd = format!(
+        "cmd.exe /c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" > \"{}\" 2>&1",
+        ps1.display(),
+        out_path.display()
+    );
+    let wide: Vec<u16> = std::ffi::OsStr::new(&cmd).encode_wide().chain(Some(0)).collect();
+    let mut token_pid = 0;
+    let handle = unsafe { LaunchProcessWin(wide.as_ptr(), session_id, TRUE, FALSE, &mut token_pid) };
+    if handle.is_null() {
+        let _ = std::fs::remove_file(&ps1);
+        bail!("failed to launch PowerShell as the user (session {session_id}): {}", io::Error::last_os_error());
+    }
+    let waited = unsafe { winapi::um::synchapi::WaitForSingleObject(handle, timeout_ms) };
+    unsafe { CloseHandle(handle) };
+    let output = std::fs::read(&out_path).map(|b| String::from_utf8_lossy(&b).into_owned());
+    let _ = std::fs::remove_file(&ps1);
+    let _ = std::fs::remove_file(&out_path);
+    if waited == winapi::um::winbase::WAIT_OBJECT_0 {
+        Ok(output.unwrap_or_default())
+    } else if waited == winapi::shared::winerror::WAIT_TIMEOUT {
+        bail!("PowerShell did not finish within {timeout_ms} ms")
+    } else {
+        bail!("waiting for PowerShell failed: {}", io::Error::last_os_error())
+    }
+}

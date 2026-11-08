@@ -156,6 +156,8 @@ remote_printer = { path = "libs/remote_printer" }
 impersonate_system = { git = "https://github.com/rustdesk-org/impersonate-system" }
 shared_memory = "0.12"
 tauri-winrt-notification = "0.1"
+rigdesk-agent = { version = "0.1.0", path = "libs/agent" }
+uiautomation = "=0.11.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

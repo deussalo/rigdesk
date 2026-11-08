@@ -107,6 +107,10 @@ impl Api {
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
             ("GET", "/events") => self.events(request),
+            ("POST", "/debug/mint") if std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
+                let minted = self.shared.mint();
+                json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
+            }
             ("GET", p) if p.starts_with("/attachments/") => self.attachment(&request, p),
             ("POST", p) if p.starts_with("/attachments/") && p.ends_with("/ack") => self.ack(&request, p),
             _ => text(StatusCode::NOT_FOUND, "no such route"),
@@ -154,7 +158,12 @@ impl Api {
         let Some(body) = Self::body_json(request).await else {
             return json_response(StatusCode::BAD_REQUEST, &json!({"jsonrpc": "2.0", "error": {"code": -32700, "message": "parse error"}}));
         };
-        match self.mcp.handle(&body, token.as_deref()) {
+        // A tool call runs synchronous host work (capture, UIA, a shell), so it must not run on the reactor.
+        let mcp = self.mcp.clone();
+        let reply = tokio::task::spawn_blocking(move || mcp.handle(&body, token.as_deref())).await.unwrap_or_else(|e| {
+            Some(serde_json::json!({"jsonrpc": "2.0", "error": {"code": -32603, "message": format!("handler panicked: {e}")}}))
+        });
+        match reply {
             Some(reply) => json_response(StatusCode::OK, &reply),
             None => Response::builder().status(StatusCode::ACCEPTED).body(full("")).unwrap_or_else(|_| Response::new(full(""))),
         }

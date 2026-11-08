@@ -11,7 +11,9 @@ pub mod session;
 
 pub use desk::{Content, Desk, ToolSpec};
 pub use events::{Event, EventKind, Events};
-pub use session::{Holder, Owner, Refusal, Shared};
+pub use http::Api;
+pub use journal::{Entry, Journal};
+pub use session::{Holder, Minted, Owner, Refusal, Shared, Standing};
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
