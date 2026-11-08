@@ -1,0 +1,173 @@
+# RigDesk's GUI for the Linux host that runs Rig: the Flutter viewer, which drives stock RustDesk PCs for Rig agents.
+# Derived from upstream's flutter-build.yml (v1.5.1) build-rustdesk-linux, built natively on the runner and shipped
+# as a tarball of the Flutter bundle.
+name: linux
+
+on:
+  push:
+    branches: [master, "s*"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.75"
+  FLUTTER_VERSION: "3.24.5"
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VCPKG_TRIPLET: x64-linux
+
+jobs:
+
+  bridge:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang cmake curl gcc git g++ libclang-dev libgtk-3-dev llvm-dev nasm ninja-build pkg-config wget
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: "rustfmt"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: bridge
+      - uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        with:
+          path: ~/.cargo/bin/flutter_rust_bridge_codegen
+          key: frb-${{ env.FLUTTER_RUST_BRIDGE_VERSION }}-${{ env.CARGO_EXPAND_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+          cache: true
+      - name: Install flutter rust bridge
+        shell: bash
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          [ -x ~/.cargo/bin/flutter_rust_bridge_codegen ] || cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+          # extended_text 14 needs a newer Dart than the bridge's Flutter.
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          pushd flutter && flutter pub get && popd
+      - name: Generate the bridge
+        run: |
+          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bridge
+          path: |
+            ./src/bridge_generated.rs
+            ./src/bridge_generated.io.rs
+            ./flutter/lib/generated_bridge.dart
+            ./flutter/lib/generated_bridge.freezed.dart
+
+  linux-x64:
+    needs: [bridge]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Free space and install build dependencies
+        run: |
+          sudo rm -rf /opt/ghc /usr/local/lib/android /usr/share/dotnet
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential clang cmake curl gcc git g++ libayatana-appindicator3-dev \
+            libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk-3-dev libpulse-dev \
+            libva-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev llvm-dev nasm \
+            ninja-build pkg-config python3 unzip wget xz-utils libssl-dev xvfb
+          sudo apt-get remove -y libopus-dev || true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge
+          path: ./
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: "rustfmt"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: linux-x64
+      # As on Windows: GitHub's release download pages sometimes answer 504 for hours, so the vcpkg tool and every
+      # download vcpkg makes go through .github/ci/fetch_asset.py.
+      - name: vcpkg at the pinned commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone -q https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          cd "$HOME/vcpkg"
+          git checkout -q "$VCPKG_COMMIT_ID"
+          tag=$(sed -n 's/^VCPKG_TOOL_RELEASE_TAG=//p' scripts/vcpkg-tool-metadata.txt | tr -d '\r')
+          if python3 "$GITHUB_WORKSPACE/.github/ci/fetch_asset.py" "https://github.com/microsoft/vcpkg-tool/releases/download/$tag/vcpkg-glibc" vcpkg; then
+            chmod +x vcpkg
+          else
+            ./bootstrap-vcpkg.sh -disableMetrics
+          fi
+          ./vcpkg version | head -1
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+      - name: Install vcpkg dependencies
+        env:
+          X_VCPKG_ASSET_SOURCES: clear;x-script,python3 ${{ github.workspace }}/.github/ci/fetch_asset.py {url} {dst}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for try in 1 2 3 4 5; do
+            if $VCPKG_ROOT/vcpkg install --triplet $VCPKG_TRIPLET --x-install-root="$VCPKG_ROOT/installed"; then
+              exit 0
+            fi
+            [ $try -lt 5 ] && { echo "vcpkg install failed (attempt $try); retrying"; sleep $((60 * try)); }
+          done
+          find "${VCPKG_ROOT}/" -name "*.log" | while read -r log; do echo "$log:"; cat "$log"; done
+          exit 1
+      - name: Build the library
+        run: |
+          cargo build --locked --lib --features flutter,hwcodec --release
+          sed -i "s/ffi.NativeFunction<ffi.Bool Function(DartPort/ffi.NativeFunction<ffi.Uint8 Function(DartPort/g" flutter/lib/generated_bridge.dart
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - name: Patch Flutter
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
+          cd $(dirname $(dirname $(which flutter)))
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+      - name: Build the GUI
+        id: build
+        run: |
+          cd flutter && flutter build linux --release
+          cd .. && mv flutter/build/linux/x64/release/bundle rigdesk
+          strip rigdesk/lib/librustdesk.so
+      - name: Version, and the libraries it needs
+        run: |
+          xvfb-run -a ./rigdesk/rustdesk --version
+          ldd rigdesk/rustdesk rigdesk/lib/*.so | grep -v "rigdesk/lib" | awk '/=>/ {print $1}' | sort -u
+      - name: No public RustDesk servers or keys in the build
+        run: |
+          found=0
+          for needle in rs-ny.rustdesk.com api.rustdesk.com admin.rustdesk.com relay.rustdesk.com \
+                        OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw= 5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=; do
+            hits=$(grep -rlaF "$needle" rigdesk || true)
+            if [ -n "$hits" ]; then echo "::error::$needle found in: $hits"; found=1; fi
+          done
+          exit $found
+      - name: Package
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: tar -czf rigdesk-linux-x64.tar.gz rigdesk
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        with:
+          name: rigdesk-linux-x64
+          path: rigdesk-linux-x64.tar.gz
