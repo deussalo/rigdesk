@@ -19,6 +19,17 @@ def test_the_agent_hears_of_takeover_and_block_but_not_of_its_own_join_or_leave(
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
 
 
+def test_a_stock_pc_is_served_on_loopback() -> None:
+    stock = {"peer": "front.tail1234.ts.net", "password_file": "/dev/null"}
+    assert DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock).stock is not None
+    try:
+        DeskPc(url="https://front.tail1234.ts.net", token_file="/dev/null", stock=stock)
+    except ValueError as refused:
+        assert "http://127.0.0.1:<port>" in str(refused)
+    else:
+        raise AssertionError("a stock PC with a tailnet url was accepted")
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

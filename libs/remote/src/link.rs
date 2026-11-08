@@ -199,7 +199,7 @@ impl Link {
                     state.out = Some(tx.clone());
                     state.failure = None;
                 }
-                None => {}
+                _ => {}
             },
             Some(message::Union::PeerInfo(pi)) => {
                 if let Some(peer) = self.state.lock().unwrap().peer.as_mut() {

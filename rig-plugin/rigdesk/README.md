@@ -19,6 +19,43 @@ install line set on that PC (`chmod 600`). `POST /x/rigdesk/token {"pc": "deus",
 in such a file (`~/.rig/rigdesk/<pc>.token`) and answers its path. With `for_fleet` off, only graphs and agents whose
 `mcp_servers` name `desk` reach the tools.
 
+## Stock RustDesk PCs
+
+A PC running unmodified RustDesk (1.4.0 or later) can be handed to an agent too, with no RigDesk on it. Rig runs
+`rigdesk-remote` for it on this host: a headless RustDesk client that logs in to the PC by direct IP over the tailnet
+with the PC's permanent password and serves the same agent API on loopback.
+
+On the PC, in RustDesk's settings:
+
+* Security → **Enable direct IP access** (port 21118), and **Use permanent password** with a password set;
+* the PC on your tailnet (Tailscale installed and signed in). No public RustDesk server is used.
+
+On the Rig host, put `rigdesk-remote` on `PATH` (or name it as `remote_bin`): CI builds it as the
+`rigdesk-remote-linux-x64` artifact of the `stock` workflow. Keep the PC's password in a 0600 file, and a token of
+your choosing for the local API in another (`POST /x/rigdesk/token` keeps one), then name the PC:
+
+    {"pcs": {"front": {"url": "http://127.0.0.1:21120",
+                       "token_file": "~/.rig/rigdesk/front.token",
+                       "client": "acme",
+                       "stock": {"peer": "front.<tailnet>.ts.net",
+                                 "password_file": "~/.rig/rigdesk/front.password"}}}}
+
+Each stock PC needs its own loopback port. Rig starts `rigdesk-remote` with the plugin, restarts it if it exits, and
+writes its output to `remote-<pc>.log` in the plugin's state directory. It connects to the PC when the agent first
+acts and leaves after ten idle minutes, so the PC shows a RustDesk session only while the agent works.
+
+The **RigDesk** tab stands in for the viewer: **share with agent** mints a one-use link (copied to the clipboard)
+to give an agent for `desk/join`, and **hand to agent**, **take back**, **block**, **unblock** and **end share**
+act as the viewer's buttons do.
+
+Known limits against a RigDesk PC:
+
+* tools: screenshot, move, click, drag, scroll, type, key, shortcut, wait and clipboard only; no UI tree
+  (snapshot), app or powershell;
+* the human takes input back by moving the PC's mouse (or with **take back**); keyboard use at the PC is not seen;
+* direct IP access has no RustDesk-layer encryption; the tailnet's WireGuard is what protects the session;
+* screenshots come from the PC's own screenshot feature, so each costs a round trip of a full PNG.
+
 ## What an agent gets
 
 * `desk/join(link)` — the human clicks **Share with agent** in the viewer and gives the agent the

@@ -8,16 +8,18 @@ import os
 from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from core.base import ToolAnswer, View, replace_file
+from core.capability import RigReach
 from core.boundary import BranchTool, NoParams, Params, StatusLine
 from core.kernel_api import mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.endpoint import Request, endpoint
+from core.model import RefusedOutcome
 from core.mcp_call import Answer, Call, ToolDef, ToolInput, gloss_of
 from core.plugin_host import Live, PluginHost
 from core.policy import OPERATOR
@@ -137,21 +139,21 @@ def _tools(host: PluginHost) -> tuple[ToolDef, ...]:
     return host.live(Desks).tools(_built)
 
 
-def _why_missing(host: PluginHost, name: str) -> str | None:
+def _why_missing(host: PluginHost, name: str, listed: bool) -> str | None:
     branch, slash, tool = name.partition("/")
     if branch != BRANCH or not slash:
         return None
     if not host.live(Desks).catalog():
         return f"no RigDesk PC has been reached yet, so its tools are not known; desk/join works, and {name} shows once a PC answers"
-    return f"RigDesk PCs offer no tool {tool!r}; tool_load `desk/` lists the ones they do"
+    return f"RigDesk PCs offer no tool {tool!r}" + ("; tool_load `desk/` lists the ones they do" if listed else "")
 
 
 def _capabilities(host: PluginHost) -> Mapping[str, str]:
     return {CAPABILITY: "Join a RigDesk PC with a share link and use its tools."}
 
 
-def _opened(host: PluginHost) -> frozenset[str]:
-    return frozenset({CAPABILITY}) if host.live(Desks).for_fleet else frozenset()
+def _reach(host: PluginHost) -> Mapping[str, RigReach]:
+    return {BRANCH: "listed" if host.live(Desks).for_fleet else "withheld"}
 
 
 def _listing(host: PluginHost, capability: str) -> tuple[BranchTool, ...]:
@@ -169,6 +171,7 @@ class PcRow(View):
     name: str
     client: str
     url: str
+    stock: bool = Field(description="A stock RustDesk PC, driven through rigdesk-remote on this host; its share and holder buttons are on this page.")
     state: str
     why: str | None
     down_since_ms: int | None
@@ -199,6 +202,36 @@ class SessionView(View):
 @endpoint(SessionParams, OPERATOR)
 async def get_session(request: Request[SessionParams]) -> SessionView:
     return SessionView(session=request.host().live(Desks).session_of(request.params.graph, request.params.agent))
+
+
+type ViewerVerb = Literal["mint", "hand", "human", "block", "unblock", "revoke"]
+
+
+class ViewerBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", defer_build=True)
+    pc: str
+    verb: ViewerVerb
+
+
+class ViewerParams(Params):
+    body: ViewerBody
+
+
+class ViewerDone(View):
+    link: str | None = Field(default=None, description="For mint: the share link to give an agent, rigdesk://<pc>/<grant>#<secret>; it works once.")
+    changed: bool | None = Field(default=None, description="For the holder verbs: whether the standing changed.")
+
+
+@endpoint(ViewerParams, OPERATOR)
+async def post_viewer(request: Request[ViewerParams]) -> ViewerDone | RefusedOutcome:
+    """A stock PC's viewer buttons: mint a share link, hand input to the agent, take it back (human), block, unblock or revoke the share."""
+    body = request.params.body
+    try:
+        return ViewerDone(**await request.host().live(Desks).viewer(body.pc, body.verb))
+    except DeskRefused as refused:
+        return request.refused(REFUSED, str(refused))
+    except (aiohttp.ClientError, TimeoutError, OSError) as failed:
+        return request.refused(DOWN, f"{body.pc}'s rigdesk-remote did not answer: {type(failed).__name__}: {failed}")
 
 
 TOKENS = Path("~/.rig/rigdesk")
@@ -244,6 +277,7 @@ async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
 
 CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, status=_status,
-    tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _opened, _listing, _decide),
+    tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE},
-    routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token)))
+    routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
+            RouteContribution("POST", "viewer", post_viewer)))
