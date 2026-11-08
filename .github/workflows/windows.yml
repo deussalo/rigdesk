@@ -105,7 +105,10 @@ jobs:
       - name: Replace the Flutter engine with RustDesk's
         run: |
           flutter precache --windows
-          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          foreach ($try in 1..8) {
+            try { Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip; break }
+            catch { if ($try -eq 8) { throw }; Write-Host "engine download failed ($_); retrying"; Start-Sleep -Seconds (15 * $try) }
+          }
           Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
           mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
       - name: Patch Flutter
@@ -123,6 +126,18 @@ jobs:
         with:
           prefix-key: windows-2022
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        id: vcpkg
+        continue-on-error: true
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+      # Its vcpkg-tool download comes from GitHub releases, which sometimes answer 504 for minutes.
+      - name: Wait before retrying vcpkg
+        if: steps.vcpkg.outcome == 'failure'
+        run: Start-Sleep -Seconds 90
+      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        if: steps.vcpkg.outcome == 'failure'
         with:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
