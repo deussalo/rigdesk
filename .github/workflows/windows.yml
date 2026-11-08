@@ -186,3 +186,25 @@ jobs:
         run: |
           cargo test -p rigdesk-agent --locked
           cd flutter && flutter test test/agent_share_test.dart
+
+  # A tag v* publishes the package, the install script pinned to it, and their checksums.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows-x64
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigdesk-windows-x64
+          path: rigdesk
+      - name: Package and pin
+        run: .github/release/package.sh "$GITHUB_REF_NAME"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/rigdesk-windows-x64.zip out/install.ps1 out/SHA256SUMS \
+            --title "RigDesk $GITHUB_REF_NAME" --notes-file out/NOTES.md
