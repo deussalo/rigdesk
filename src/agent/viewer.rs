@@ -79,7 +79,7 @@ pub fn request(conn_id: i32, req: AgentRequest) {
                 send_to(conn_id, reply);
             });
         }
-        None => {}
+        _ => {}
     }
 }
 
