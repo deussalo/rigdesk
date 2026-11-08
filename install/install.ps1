@@ -99,7 +99,9 @@ try {
     if (-not $exe) { throw 'The package holds no RigDesk executable.' }
 
     Step 'Installing RigDesk as a service'
-    Start-Process -FilePath $exe.FullName -ArgumentList '--silent-install' -Wait | Out-Null
+    # Not Start-Process -Wait: that also waits for every process the installer starts, and RigDesk keeps running.
+    $p = Start-Process -FilePath $exe.FullName -ArgumentList '--silent-install' -PassThru
+    if (-not $p.WaitForExit(300000)) { throw 'The RigDesk installer did not finish within 5 minutes.' }
     $deadline = (Get-Date).AddMinutes(3)
     while (-not (Get-Service -Name $AppName -ErrorAction SilentlyContinue)) {
         if ((Get-Date) -gt $deadline) { throw "The $AppName service did not appear." }

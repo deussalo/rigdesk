@@ -9,10 +9,13 @@ Compress-Archive -Path ".\rigdesk\*" -DestinationPath $zip -Force
 $sha = (Get-FileHash -Algorithm SHA256 $zip).Hash
 $token = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
 $password = "Ci-" + [guid]::NewGuid().ToString("N").Substring(0, 12)
+# Masked so that a leak fails the check below without landing in the log.
+Write-Host "::add-mask::$password"
+Write-Host "::add-mask::$token"
 
-$out = & .\install\install.ps1 -Client ci -SkipTailscale -Password $password -Pin "2468" -AgentToken $token `
-  -PackageUrl ([Uri]$zip).AbsoluteUri -PackageSha256 $sha *>&1 | Out-String
-Write-Host $out
+$lines = & .\install\install.ps1 -Client ci -SkipTailscale -Password $password -Pin "2468" -AgentToken $token `
+  -PackageUrl ([Uri]$zip).AbsoluteUri -PackageSha256 $sha *>&1 | ForEach-Object { $s = "$_"; Write-Host $s; $s }
+$out = $lines -join "`n"
 foreach ($secret in @($password, $token)) { if ($out.Contains($secret)) { Fail "the install line printed a secret" } }
 
 $service = Get-Service -Name RigDesk -ErrorAction SilentlyContinue
