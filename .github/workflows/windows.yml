@@ -85,8 +85,17 @@ jobs:
           name: bridge
           path: ./
       - uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
+        id: llvm
+        continue-on-error: true
         with:
           version: ${{ env.LLVM_VERSION }}
+      # GitHub release downloads sometimes answer 504 for minutes; the runner image ships its own LLVM for bindgen.
+      - name: Fall back to the runner's LLVM
+        if: steps.llvm.outcome == 'failure'
+        shell: bash
+        run: |
+          test -f "/c/Program Files/LLVM/bin/libclang.dll"
+          echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
       - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
         with:
           channel: "stable"
