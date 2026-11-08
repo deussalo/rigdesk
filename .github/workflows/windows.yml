@@ -1,11 +1,8 @@
 # RigDesk: one Windows x64 build. Derived from upstream's flutter-build.yml (v1.5.1), cut to the one target we ship.
 name: windows
 
+# Parked with the dedicated Windows client (plan p-97f7, 2026-11-08): run by hand until it resumes.
 on:
-  push:
-    branches: [master, "s*"]
-    tags: ["v*"]
-  pull_request:
   workflow_dispatch:
 
 env:
