@@ -2,7 +2,19 @@
 # runs at boot start, the secrets reach it without being printed, the direct port is open to the tailnet only, and
 # the agent API answers with the enrolled token.
 $ErrorActionPreference = "Stop"
-function Fail($why) { Write-Host "::error::install smoke: $why"; exit 1 }
+function Show-State {
+  Write-Host "--- processes"
+  Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(rustdesk|rigdesk|cmd|conhost|consent|powershell)\.exe$' } |
+    ForEach-Object { Write-Host "$($_.ProcessId) <- $($_.ParentProcessId) $($_.Name): $($_.CommandLine)" }
+  Write-Host "--- service: $((Get-Service -Name RigDesk -ErrorAction SilentlyContinue).Status)"
+  Write-Host "--- EnableLUA: $((Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System).EnableLUA)"
+  foreach ($dir in @("$env:APPDATA\RigDesk\log", "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RigDesk\log")) {
+    Get-ChildItem -Path $dir -Recurse -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
+      Write-Host "--- $($_.FullName)"; Get-Content $_.FullName -Tail 60 | ForEach-Object { Write-Host $_ }
+    }
+  }
+}
+function Fail($why) { Write-Host "::error::install smoke: $why"; Show-State; exit 1 }
 
 $zip = Join-Path $PWD "rigdesk-windows-x64.zip"
 Compress-Archive -Path ".\rigdesk\*" -DestinationPath $zip -Force
@@ -13,8 +25,10 @@ $password = "Ci-" + [guid]::NewGuid().ToString("N").Substring(0, 12)
 Write-Host "::add-mask::$password"
 Write-Host "::add-mask::$token"
 
-$lines = & .\install\install.ps1 -Client ci -SkipTailscale -Password $password -Pin "2468" -AgentToken $token `
-  -PackageUrl ([Uri]$zip).AbsoluteUri -PackageSha256 $sha *>&1 | ForEach-Object { $s = "$_"; Write-Host $s; $s }
+try {
+  $lines = & .\install\install.ps1 -Client ci -SkipTailscale -Password $password -Pin "2468" -AgentToken $token `
+    -PackageUrl ([Uri]$zip).AbsoluteUri -PackageSha256 $sha *>&1 | ForEach-Object { $s = "$_"; Write-Host $s; $s }
+} catch { Fail "the install line failed: $_" }
 $out = $lines -join "`n"
 foreach ($secret in @($password, $token)) { if ($out.Contains($secret)) { Fail "the install line printed a secret" } }
 
