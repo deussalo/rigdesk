@@ -402,13 +402,13 @@ class Desks:
                         await self._event(link, event)
 
     async def _rebooted(self, pc: str, boot: str) -> None:
-        """A PC that restarted lost its sessions and numbers its events afresh."""
+        """A PC whose agent host restarted lost its sessions and numbers its events afresh."""
         known = pc in self._boots
         self._boots[pc], self._last[pc] = boot, 0
         held = self._sessions.pop(pc, None)
         await asyncio.to_thread(self._write_state)
         if known and held is not None and self.assigned_pc(held.agent, held.graph) != pc:
-            await self._tell(held, f"RigDesk {pc}: the PC restarted, so your session there ended. Ask the human for a new link to join again.", f"boot:{boot}")
+            await self._tell(held, f"RigDesk {pc}: RigDesk restarted (on the PC or the bridge), so your session there ended. Ask the human for a new link to join again.", f"boot:{boot}")
 
     async def _listed(self, link: PcLink) -> None:
         """desk/* offers every tool any PC offers: a stock PC has fewer than a RigDesk PC, and refuses the ones it lacks."""
