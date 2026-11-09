@@ -1,5 +1,6 @@
 <resources>
     <string name="app_name">RigDesk</string>
     <string name="accessibility_service_description">Allow other devices to control your phone using virtual touch, when RigDesk screen sharing is established</string>
+    <string name="client_session_special_use_subtype">Keeps a remote desktop session this phone started connected while the app is in the background.</string>
     <string name="foreground_service_special_use_subtype">Keeps the RigDesk remote desktop host available for authorized unattended connections and foreground notifications without starting screen capture before user approval.</string>
 </resources>

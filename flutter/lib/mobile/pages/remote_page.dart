@@ -169,6 +169,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       }
     });
     WidgetsBinding.instance.addObserver(this);
+    gFFI.invokeMethod("client_session_service", true);
 
     inputModel.keyboardInputAllowed = true;
 
@@ -197,6 +198,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     // "Connecting...". Dispatching it here makes teardown happen synchronously on
     // pop; the `sessionClose` in `gFFI.close()` becomes a no-op once removed.
     unawaited(bind.sessionClose(sessionId: sessionId));
+    unawaited(gFFI.invokeMethod("client_session_service", false));
     // https://github.com/flutter/flutter/issues/64935
     super.dispose();
     gFFI.dialogManager.hideMobileActionsOverlay(store: false);

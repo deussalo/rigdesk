@@ -388,6 +388,10 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
 
                 }
+                "client_session_service" -> {
+                    ClientSessionService.set(this, call.arguments as Boolean)
+                    result.success(true)
+                }
                 "try_sync_clipboard" -> {
                     rdClipboardManager?.syncClipboard(true)
                     result.success(true)
