@@ -28,6 +28,9 @@ const PING_EVERY: Duration = Duration::from_secs(3);
 const REFUSAL_PAUSE: Duration = Duration::from_secs(3);
 /// The words a RustDesk client takes as "ask for the password again".
 const WRONG_PASSWORD: &str = "Wrong Password";
+/// The words a RustDesk client takes as "ask for the password".
+const EMPTY_PASSWORD: &str = "Empty Password";
+const WRONG_PASSWORD_LIMIT: u32 = 5;
 
 pub struct Relay {
     link: Arc<Link>,
@@ -113,17 +116,26 @@ impl Relay {
         let mut msg = Message::new();
         msg.set_hash(hash.clone());
         stream.send(&msg).await?;
+        let mut wrong = 0;
         let login = loop {
             let Some(Ok(bytes)) = stream.next_timeout(LOGIN_WAIT_MS).await else { bail!("no login") };
-            if let Ok(Message { union: Some(message::Union::LoginRequest(login)), .. }) = Message::parse_from_bytes(&bytes) {
+            let Ok(Message { union: Some(message::Union::LoginRequest(login)), .. }) = Message::parse_from_bytes(&bytes) else { continue };
+            // A client with no saved password logs in empty first and asks for one only on this answer, on the same connection.
+            if login.password.is_empty() {
+                stream.send(&login_error(EMPTY_PASSWORD)).await?;
+                continue;
+            }
+            if same(&login.password, &login_proof(&self.password, &hash)) {
                 break login;
             }
-        };
-        if !same(&login.password, &login_proof(&self.password, &hash)) {
+            wrong += 1;
+            log::info!("{} ({}) gave a wrong password", login.my_name, login.my_platform);
             tokio::time::sleep(REFUSAL_PAUSE).await;
             stream.send(&login_error(WRONG_PASSWORD)).await?;
-            bail!("{} ({}) gave a wrong password", login.my_name, login.my_platform);
-        }
+            if wrong >= WRONG_PASSWORD_LIMIT {
+                bail!("{} ({}) gave a wrong password {wrong} times", login.my_name, login.my_platform);
+            }
+        };
         if login.union.is_some() {
             stream.send(&login_error("The bridge relays the remote desktop only")).await?;
             bail!("{} asked for a session other than the desktop", login.my_name);
@@ -237,21 +249,6 @@ mod tests {
         }
     }
 
-    async fn log_in(port: u16, password: &str) -> (FramedStream, Message) {
-        let mut viewer = FramedStream::new(format!("127.0.0.1:{port}"), None, 5_000).await.expect("the viewer port answers");
-        viewer.send(&Message::new()).await.expect("send");
-        let Some(message::Union::Hash(hash)) = next(&mut viewer).await.union else { panic!("no challenge") };
-        let mut msg = Message::new();
-        msg.set_login_request(base::message_proto::LoginRequest {
-            password: login_proof(password, &hash).into(),
-            my_name: "phone".into(),
-            ..Default::default()
-        });
-        viewer.send(&msg).await.expect("send");
-        let answer = next(&mut viewer).await;
-        (viewer, answer)
-    }
-
     #[tokio::test]
     async fn a_viewer_logs_in_to_the_bridge_sees_the_pc_and_its_click_takes_input_back_from_the_agent() {
         let pc = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -266,10 +263,20 @@ mod tests {
         shared.claim(&minted.grant, &minted.secret, owner).expect("claimed");
         let port = Relay::new(link, shared.clone(), "bridge-pw".into()).listen(0).await.expect("listening");
 
-        let (_, refused) = log_in(port, "guess").await;
-        assert!(matches!(refused.union, Some(message::Union::LoginResponse(LoginResponse { union: Some(login_response::Union::Error(ref e)), .. })) if e == WRONG_PASSWORD));
-
-        let (mut viewer, welcome) = log_in(port, "bridge-pw").await;
+        let mut viewer = FramedStream::new(format!("127.0.0.1:{port}"), None, 5_000).await.expect("the viewer port answers");
+        viewer.send(&Message::new()).await.expect("send");
+        let Some(message::Union::Hash(hash)) = next(&mut viewer).await.union else { panic!("no challenge") };
+        let mut welcome = Message::new();
+        for (password, refusal) in [("", Some(EMPTY_PASSWORD)), ("guess", Some(WRONG_PASSWORD)), ("bridge-pw", None)] {
+            let mut msg = Message::new();
+            let proof = if password.is_empty() { Vec::new() } else { login_proof(password, &hash) };
+            msg.set_login_request(base::message_proto::LoginRequest { password: proof.into(), my_name: "phone".into(), ..Default::default() });
+            viewer.send(&msg).await.expect("send");
+            welcome = next(&mut viewer).await;
+            if let Some(words) = refusal {
+                assert!(matches!(welcome.union, Some(message::Union::LoginResponse(LoginResponse { union: Some(login_response::Union::Error(ref e)), .. })) if e == words));
+            }
+        }
         let Some(message::Union::LoginResponse(LoginResponse { union: Some(login_response::Union::PeerInfo(info)), .. })) = welcome.union else {
             panic!("no PeerInfo: {welcome:?}")
         };
