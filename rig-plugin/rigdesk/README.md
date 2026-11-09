@@ -90,6 +90,10 @@ Known limits against a RigDesk PC:
 * `desk/join(link)` — the human clicks **Share with agent** in the viewer and gives the agent the
   `rigdesk://<pc>/<grant>#<secret>` link. Joining claims the PC's session for that agent alone; a
   link works once.
+* **Standing grant (stock PCs).** `plugins.rigdesk.pcs.<pc>.assigned` lists `"agent:<id>"` or `"graph:<name>"`. Such an
+  agent needs no link: its first `desk/<tool>` call joins the PC (the plugin mints and claims on the bridge itself), and
+  so does its next call after the bridge or Rig restarts. Stop still blocks it; an agent sharing through a link at the
+  time is not displaced. Changing the list does not restart the bridge.
 * `desk/<tool>` — the PC's own tools (screenshot, snapshot, click, type, scroll, move, drag, key,
   shortcut, wait, app, powershell, clipboard), sent to the PC the calling agent joined. Images come
   back as PNG files under the plugin's state directory.

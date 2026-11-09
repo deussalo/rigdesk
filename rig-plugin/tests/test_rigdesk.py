@@ -67,6 +67,19 @@ def test_stop_interrupts_the_owning_agents_turn_but_a_replayed_stop_only_tells_i
     assert done == [("interrupt", "interrupt"), ("told", True), ("told", True)]
 
 
+def test_an_assigned_agent_or_graph_holds_a_standing_grant_to_its_stock_pc_only() -> None:
+    from rigdesk.desks import StockRemote
+    with tempfile.TemporaryDirectory() as state:
+        desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
+        stock = StockRemote(peer="deus.tail1234.ts.net", password_file="/dev/null")
+        desks._pcs["deus"] = PcLink("deus", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock, assigned=["agent:a1", "graph:clients"]))
+        desks._pcs["front"] = PcLink("front", DeskPc(url="https://front.tail1234.ts.net", token_file="/dev/null", assigned=["agent:a2"]))
+        assert desks.assigned_pc("a1", "g") == "deus"
+        assert desks.assigned_pc("anyone", "clients") == "deus"
+        assert desks.assigned_pc("a3", "g") is None
+        assert desks.assigned_pc("a2", "g") is None, "a RigDesk PC shares through its viewer only"
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

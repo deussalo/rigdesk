@@ -72,6 +72,8 @@ class DeskPc(Shape):
     token_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's agent-API token.")]
     client: Annotated[str, Field(description="The client this PC belongs to.")] = ""
     stock: Annotated[StockRemote | None, Field(description="Set for a PC running stock RustDesk instead of RigDesk.")] = None
+    assigned: Annotated[list[str], Field(description='Who holds a standing grant to this stock PC, as "agent:<id>" or "graph:<name>": '
+                                                     "they join on their first desk call, with no share link, and again after any restart.")] = []
 
     @model_validator(mode="after")
     def _stock_is_local(self) -> DeskPc:
@@ -237,6 +239,10 @@ class Desks:
         self._for_fleet = settings.for_fleet
         moved = settings.bridge_bin != self._bridge_bin
         self._bridge_bin = settings.bridge_bin
+        for name, link in self._pcs.items():
+            spec = settings.pcs.get(name)
+            if spec is not None and spec != link.spec and spec.model_copy(update={"assigned": link.spec.assigned}) == link.spec:
+                link.spec = spec
         for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
             link = self._pcs.pop(name)
             for task in (link.task, link.remote):
@@ -375,7 +381,7 @@ class Desks:
         self._boots[pc], self._last[pc] = boot, 0
         held = self._sessions.pop(pc, None)
         await asyncio.to_thread(self._write_state)
-        if known and held is not None:
+        if known and held is not None and self.assigned_pc(held.agent, held.graph) != pc:
             await self._tell(held, f"RigDesk {pc}: the PC restarted, so your session there ended. Ask the human for a new link to join again.", f"boot:{boot}")
 
     async def _listed(self, link: PcLink) -> None:
@@ -526,6 +532,22 @@ class Desks:
         if replaced is not None and replaced.agent != agent:
             await self._tell(replaced, f"RigDesk {pc}: the human shared the PC with another agent, so your session there ended.", f"replaced:{held.since_ms}")
         return held
+
+    def assigned_pc(self, agent: str, graph: str) -> str | None:
+        """The stock PC this agent, or its graph, holds a standing grant to."""
+        wanted = {f"agent:{agent}", f"graph:{graph}"}
+        return next((name for name, link in self._pcs.items() if link.spec.stock is not None and wanted & set(link.spec.assigned)), None)
+
+    async def assigned_join(self, agent: str, graph: str, node: str, title: str) -> Held | None:
+        """Joins the PC this agent is assigned, as a share link would, unless another agent holds it now; None with no grant."""
+        pc = self.assigned_pc(agent, graph)
+        if pc is None:
+            return None
+        other = self._sessions.get(pc)
+        if other is not None and other.agent != agent:
+            raise DeskRefused(f"{pc} is assigned to you, but {other.title} holds it now through a share link; it frees when they leave or the human ends that share")
+        minted = await self.viewer(pc, "mint")
+        return await self.join(minted["link"], agent, graph, node, title)
 
     async def leave(self, held: Held) -> bool:
         link = self._link(held.pc)

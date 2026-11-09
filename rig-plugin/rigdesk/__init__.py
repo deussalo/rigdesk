@@ -103,11 +103,12 @@ async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answe
 
 def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
     async def run(call: Call, given: ToolInput) -> Answer:
-        agent, graph, _, _ = _who(call)
+        agent, graph, node, title = _who(call)
         held = desks.held_by(agent, graph)
-        if held is None:
-            return call.refused(REFUSED, NO_SESSION)
         try:
+            held = held or await desks.assigned_join(agent, graph, node, title)
+            if held is None:
+                return call.refused(REFUSED, NO_SESSION)
             return await desks.call(held, tool, dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
             return _refused(call, failed)
