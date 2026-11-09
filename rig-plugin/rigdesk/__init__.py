@@ -171,7 +171,7 @@ class PcRow(View):
     name: str
     client: str
     url: str
-    stock: bool = Field(description="A stock RustDesk PC, driven through rigdesk-remote on this host; its share and holder buttons are on this page.")
+    stock: bool = Field(description="A stock RustDesk PC, driven through rigdesk-bridge on this host; its share and holder buttons are on this page.")
     state: str
     why: str | None
     down_since_ms: int | None
@@ -231,7 +231,7 @@ async def post_viewer(request: Request[ViewerParams]) -> ViewerDone | RefusedOut
     except DeskRefused as refused:
         return request.refused(REFUSED, str(refused))
     except (aiohttp.ClientError, TimeoutError, OSError) as failed:
-        return request.refused(DOWN, f"{body.pc}'s rigdesk-remote did not answer: {type(failed).__name__}: {failed}")
+        return request.refused(DOWN, f"{body.pc}'s rigdesk-bridge did not answer: {type(failed).__name__}: {failed}")
 
 
 TOKENS = Path("~/.rig/rigdesk")

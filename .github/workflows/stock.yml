@@ -1,4 +1,4 @@
-# RigDesk's agent on stock RustDesk PCs (plan S9): rigdesk-remote, the headless client that runs on the Rig host, built
+# RigDesk's agent on stock RustDesk PCs (plan S9): rigdesk-bridge, the headless client that runs on the Rig host, built
 # for Linux, and driven end to end on a Windows runner against unmodified RustDesk, the oldest release it supports and
 # the newest.
 name: stock
@@ -7,7 +7,7 @@ on:
   push:
     branches: [master, "s*"]
     tags: ["v*"]
-    paths: [libs/remote/**, libs/agent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/workflows/stock.yml]
+    paths: [libs/bridge/**, libs/agent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/workflows/stock.yml]
   pull_request:
   workflow_dispatch:
 
@@ -32,16 +32,16 @@ jobs:
         with:
           prefix-key: stock-linux
       - name: Unit tests
-        run: cargo test -p rigdesk-remote -p rigdesk-agent --locked
+        run: cargo test -p rigdesk-bridge -p rigdesk-agent --locked
       - name: Build
         run: |
-          cargo build --release -p rigdesk-remote --locked
-          ldd target/release/rigdesk-remote
-          ./target/release/rigdesk-remote 2>&1 | grep -q -- "--peer is required"
+          cargo build --release -p rigdesk-bridge --locked
+          ldd target/release/rigdesk-bridge
+          ./target/release/rigdesk-bridge 2>&1 | grep -q -- "--peer is required"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rigdesk-remote-linux-x64
-          path: target/release/rigdesk-remote
+          name: rigdesk-bridge-linux-x64
+          path: target/release/rigdesk-bridge
 
   windows:
     runs-on: windows-2022
@@ -60,8 +60,8 @@ jobs:
         with:
           prefix-key: stock-windows
       - name: Build
-        run: cargo build --release -p rigdesk-remote --locked
-      - name: Stock RustDesk ${{ matrix.stock }}, driven by rigdesk-remote
+        run: cargo build --release -p rigdesk-bridge --locked
+      - name: Stock RustDesk ${{ matrix.stock }}, driven by rigdesk-bridge
         timeout-minutes: 10
         shell: powershell
         env:

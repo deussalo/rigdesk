@@ -1,8 +1,8 @@
 # Stock-PC smoke test (plan S9): unmodified RustDesk runs --server on the runner with direct IP access and a permanent
-# password, as an operator would set up a client's PC; rigdesk-remote logs in to it over 127.0.0.1 and serves the agent
+# password, as an operator would set up a client's PC; rigdesk-bridge logs in to it over 127.0.0.1 and serves the agent
 # API. Checks a screenshot, a click and typing into Notepad, the clipboard both ways, a takeover by someone at the PC,
 # hand-back, Block, and the action log.
-param([Parameter(Mandatory = $true)][string]$Version, [string]$Remote = ".\target\release\rigdesk-remote.exe")
+param([Parameter(Mandatory = $true)][string]$Version, [string]$Remote = ".\target\release\rigdesk-bridge.exe")
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type @"
@@ -76,7 +76,7 @@ foreach ($i in 1..90) {
 if (-not $listening) { Fail "RustDesk $Version is not listening on the direct-IP port 21118 after 90 s" }
 Write-Host "RustDesk $Version listens on 21118"
 
-# 2. rigdesk-remote, as the Rig host runs it.
+# 2. rigdesk-bridge, as the Rig host runs it.
 $secrets = Join-Path $env:RUNNER_TEMP "stock-secrets"
 New-Item -ItemType Directory -Force $secrets | Out-Null
 [IO.File]::WriteAllText((Join-Path $secrets "password"), $password, $utf8)
@@ -89,7 +89,7 @@ try {
   foreach ($i in 1..30) {
     try { $health = Invoke-RestMethod -Uri "$base/health" -Headers $auth; $up = $true; break } catch { Start-Sleep 1 }
   }
-  if (-not $up) { Fail "rigdesk-remote did not answer on $base within 30 s" }
+  if (-not $up) { Fail "rigdesk-bridge did not answer on $base within 30 s" }
   Write-Host "health: $($health | ConvertTo-Json -Compress)"
 
   $minted = Post "/viewer/mint" @{}
@@ -166,7 +166,7 @@ try {
   $log = Invoke-RestMethod -Uri "$base/log?n=50" -Headers $auth
   $what = ($log.entries | ForEach-Object { $_.what }) -join ","
   foreach ($w in @("claim", "click", "type", "block")) { if ($what -notmatch $w) { Fail "the action log lacks $w`: $what" } }
-  if ((Get-Content -Raw (Join-Path $out "remote.err.log")) -match [regex]::Escape($password)) { Fail "the password reached rigdesk-remote's log" }
+  if ((Get-Content -Raw (Join-Path $out "remote.err.log")) -match [regex]::Escape($password)) { Fail "the password reached rigdesk-bridge's log" }
   Write-Host "stock $Version smoke passed"
 } finally {
   if ($null -ne $remote -and $null -ne $remote.Id) { Stop-Process -Id $remote.Id -Force -ErrorAction SilentlyContinue }

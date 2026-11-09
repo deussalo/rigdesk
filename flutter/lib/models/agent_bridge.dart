@@ -4,7 +4,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
-/// Where the agent host for one PC is: the rigdesk-remote on the Rig host that keeps the agent's own session to the
+/// Where the agent host for one PC is: the rigdesk-bridge on the Rig host that keeps the agent's own session to the
 /// PC. The viewer shows the PC itself; this carries the agent panel's buttons and the agent's state.
 class AgentHost {
   final String url;

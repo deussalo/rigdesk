@@ -1,24 +1,26 @@
 //! The RustDesk session with the stock PC: a direct TCP connection to its direct-IP port, the password login, and the
 //! messages the agent's tools need (screenshots, the cursor the PC reports, its clipboard). It connects when a tool
-//! first asks and lets go after `IDLE`, so the PC shows a RustDesk session only while the agent is at work.
+//! first asks or a viewer attaches, and lets go after `IDLE` with no viewer, so the PC shows a RustDesk session only
+//! while it is in use. What the PC sends is also relayed to the attached viewers (see `relay`).
 //!
 //! No RustDesk-layer encryption: a direct-IP connection has no rendezvous server to vouch for the PC's key, so stock
 //! RustDesk itself sends such sessions in the clear. The tailnet's WireGuard carries them, as it does every RigDesk PC.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use base::message_proto::{
     login_response, message, misc, option_message::BoolOption, supported_decoding::PreferCodec, ClipboardFormat,
-    DisplayInfo, Hash, ImageQuality, LoginRequest, Message, OptionMessage, ScreenshotRequest, SupportedDecoding,
+    DisplayInfo, Hash, ImageQuality, LoginRequest, Message, Misc, OptionMessage, PeerInfo, ScreenshotRequest,
+    SupportedDecoding,
 };
 use hbb_common::protobuf::{Message as _, MessageField};
 use hbb_common::sha2::{Digest, Sha256};
 use hbb_common::tcp::FramedStream;
-use hbb_common::tokio::{self, sync::mpsc, sync::Notify};
+use hbb_common::tokio::{self, sync::broadcast, sync::mpsc, sync::Notify};
 use hbb_common::{bail, log, ResultType};
 
 /// RustDesk's direct-IP port.
@@ -34,6 +36,16 @@ const LOGIN_RETRY: Duration = Duration::from_secs(5 * 60);
 const OWN_INPUT_SLACK_MS: u64 = 500;
 /// The protocol version this client speaks, the RustDesk release its code is taken from.
 const CLIENT_VERSION: &str = "1.5.1";
+/// Messages from the PC a slow viewer may fall behind by before it is told to catch up from a fresh key frame.
+const RELAY_BACKLOG: usize = 256;
+
+/// What the session sends its attached viewers.
+#[derive(Clone)]
+pub enum ToViewer {
+    Message(Arc<Message>),
+    /// The session to the PC ended; a viewer reconnects to get the next one.
+    Ended,
+}
 
 #[derive(Clone, Default)]
 pub struct Peer {
@@ -51,6 +63,8 @@ struct State {
     /// Why the last attempt or session ended, and when (ms).
     failure: Option<(String, u64)>,
     clipboard: Option<String>,
+    /// The PC's login answer as it sent it, handed to each viewer as its own.
+    info: Option<PeerInfo>,
 }
 
 pub struct Link {
@@ -65,6 +79,8 @@ pub struct Link {
     injected_at: Mutex<(i32, i32)>,
     foreign_move_ms: AtomicU64,
     shots: Mutex<HashMap<String, std_mpsc::Sender<Result<Vec<u8>, String>>>>,
+    viewers: AtomicUsize,
+    to_viewers: broadcast::Sender<ToViewer>,
 }
 
 fn now_ms() -> u64 {
@@ -108,11 +124,13 @@ impl Link {
             injected_at: Mutex::new((i32::MIN, i32::MIN)),
             foreign_move_ms: AtomicU64::new(0),
             shots: Mutex::new(HashMap::new()),
+            viewers: AtomicUsize::new(0),
+            to_viewers: broadcast::channel(RELAY_BACKLOG).0,
         })
     }
 
     fn wanted(&self) -> bool {
-        now_ms().saturating_sub(self.last_use_ms.load(Ordering::SeqCst)) < IDLE.as_millis() as u64
+        self.viewers.load(Ordering::SeqCst) > 0 || now_ms().saturating_sub(self.last_use_ms.load(Ordering::SeqCst)) < IDLE.as_millis() as u64
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -127,10 +145,12 @@ impl Link {
                 let mut state = self.state.lock().unwrap();
                 state.out = None;
                 state.peer = None;
+                state.info = None;
                 if let Err(e) = &ended {
                     state.failure = Some((e.to_string(), now_ms()));
                 }
             }
+            let _ = self.to_viewers.send(ToViewer::Ended);
             for (_, waiter) in self.shots.lock().unwrap().drain() {
                 let _ = waiter.send(Err("the RustDesk session to the PC closed".into()));
             }
@@ -182,6 +202,9 @@ impl Link {
     }
 
     fn on_message(&self, msg: Message, tx: &mpsc::UnboundedSender<Message>) -> ResultType<Option<Message>> {
+        if self.to_viewers.receiver_count() > 0 && self.relayed(&msg) {
+            let _ = self.to_viewers.send(ToViewer::Message(Arc::new(msg.clone())));
+        }
         match msg.union {
             Some(message::Union::Hash(hash)) => return Ok(Some(self.login(&hash))),
             Some(message::Union::LoginResponse(res)) => match res.union {
@@ -196,15 +219,21 @@ impl Link {
                         displays: pi.displays.clone(),
                         current: pi.current_display.max(0) as usize,
                     });
+                    state.info = Some(pi);
                     state.out = Some(tx.clone());
                     state.failure = None;
                 }
                 _ => {}
             },
             Some(message::Union::PeerInfo(pi)) => {
-                if let Some(peer) = self.state.lock().unwrap().peer.as_mut() {
+                let mut state = self.state.lock().unwrap();
+                if let Some(peer) = state.peer.as_mut() {
                     peer.displays = pi.displays.clone();
                     peer.current = pi.current_display.max(0) as usize;
+                }
+                if let Some(info) = state.info.as_mut() {
+                    info.displays = pi.displays;
+                    info.current_display = pi.current_display;
                 }
             }
             Some(message::Union::TestDelay(t)) if !t.from_client => {
@@ -227,8 +256,12 @@ impl Link {
             Some(message::Union::Misc(m)) => match m.union {
                 Some(misc::Union::CloseReason(reason)) => bail!("the PC closed the session: {reason}"),
                 Some(misc::Union::SwitchDisplay(sd)) => {
-                    if let Some(peer) = self.state.lock().unwrap().peer.as_mut() {
+                    let mut state = self.state.lock().unwrap();
+                    if let Some(peer) = state.peer.as_mut() {
                         peer.current = sd.display.max(0) as usize;
+                    }
+                    if let Some(info) = state.info.as_mut() {
+                        info.current_display = sd.display;
                     }
                 }
                 _ => {}
@@ -244,10 +277,31 @@ impl Link {
         Ok(None)
     }
 
+    /// What viewers see of the PC: all but the login, the PC's pings and the answers to the agent's own screenshots.
+    fn relayed(&self, msg: &Message) -> bool {
+        match &msg.union {
+            Some(message::Union::Hash(_) | message::Union::LoginResponse(_) | message::Union::TestDelay(_)) => false,
+            Some(message::Union::SignedId(_) | message::Union::PublicKey(_)) => false,
+            Some(message::Union::ScreenshotResponse(res)) => !self.shots.lock().unwrap().contains_key(&res.sid),
+            Some(message::Union::Misc(m)) => !matches!(m.union, Some(misc::Union::CloseReason(_))),
+            _ => true,
+        }
+    }
+
+    /// The agent reads still screenshots, so the stream is kept lean until a person watches.
+    fn quality(&self) -> (ImageQuality, i32) {
+        if self.viewers.load(Ordering::SeqCst) > 0 {
+            (ImageQuality::Balanced, 30)
+        } else {
+            (ImageQuality::Low, 5)
+        }
+    }
+
     fn login(&self, hash: &Hash) -> Message {
+        let (image_quality, custom_fps) = self.quality();
         let option = OptionMessage {
-            image_quality: ImageQuality::Low.into(),
-            custom_fps: 5,
+            image_quality: image_quality.into(),
+            custom_fps,
             show_remote_cursor: BoolOption::Yes.into(),
             disable_audio: BoolOption::Yes.into(),
             supported_decoding: MessageField::some(SupportedDecoding {
@@ -346,6 +400,72 @@ impl Link {
         match got {
             Ok(r) => r,
             Err(_) => Err("the PC did not answer the screenshot request; RustDesk 1.4 or newer is needed on the PC".into()),
+        }
+    }
+
+    /// A viewer joins: the session opens if it is not, keeps open while any viewer stays, and streams for watching.
+    pub fn attach(&self) -> broadcast::Receiver<ToViewer> {
+        let rx = self.to_viewers.subscribe();
+        if self.viewers.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.send_quality();
+        }
+        self.demand.notify_one();
+        rx
+    }
+
+    pub fn detach(&self) {
+        if self.viewers.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.send_quality();
+            self.last_use_ms.store(now_ms(), Ordering::SeqCst);
+        }
+    }
+
+    fn send_quality(&self) {
+        let (image_quality, custom_fps) = self.quality();
+        let mut misc = Misc::new();
+        misc.set_option(OptionMessage { image_quality: image_quality.into(), custom_fps, ..Default::default() });
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        self.forward(msg);
+    }
+
+    /// Asks the PC for a fresh key frame, which a viewer that joined or fell behind decodes from.
+    pub fn refresh_video(&self) {
+        let mut misc = Misc::new();
+        misc.set_refresh_video(true);
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        self.forward(msg);
+    }
+
+    /// A viewer's message to the PC, sent as is; dropped when no session is open.
+    pub fn forward(&self, msg: Message) {
+        if let Some(out) = &self.state.lock().unwrap().out {
+            let _ = out.send(msg);
+        }
+    }
+
+    /// The PC's login answer once the session is up, waiting up to `wait` for it.
+    pub async fn peer_info(&self, wait: Duration) -> Result<PeerInfo, String> {
+        let asked = now_ms();
+        self.demand.notify_one();
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            {
+                let state = self.state.lock().unwrap();
+                if let (Some(_), Some(info)) = (&state.out, &state.info) {
+                    return Ok(info.clone());
+                }
+                if let Some((why, at)) = &state.failure {
+                    if *at >= asked {
+                        return Err(format!("cannot reach the PC: {why}"));
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("no session to the PC yet".into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
