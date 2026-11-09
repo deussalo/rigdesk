@@ -2516,7 +2516,22 @@ const RIGDESK_CONFIG: &str = include_str!("../res/rigdesk.json");
 pub fn load_custom_client() {
     let data = serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(RIGDESK_CONFIG)
         .expect("res/rigdesk.json is a JSON object");
+    #[cfg(target_os = "android")]
+    let data = android_owner_sets_password(data);
     apply_custom_client(data);
+}
+
+/// A phone has no install line to set its permanent password, and its owner is the one at it, so the phone app
+/// lets them set it.
+#[cfg(target_os = "android")]
+fn android_owner_sets_password(
+    mut data: std::collections::HashMap<String, serde_json::Value>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    if let Some(serde_json::Value::Object(settings)) = data.get_mut("override-settings") {
+        settings.remove("hide-security-settings");
+        settings.remove("disable-change-permanent-password");
+    }
+    data
 }
 
 fn read_custom_client_advanced_settings(
