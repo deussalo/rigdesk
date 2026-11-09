@@ -19,11 +19,13 @@ def test_a_link_names_its_pc_by_name_or_tailnet_host() -> None:
     assert "not a RigDesk share link" in str(pc_of_link("https://example.com", PCS))
 
 
-def test_the_agent_hears_of_takeover_and_block_but_not_of_its_own_join_or_leave() -> None:
-    assert "took input back" in str(words_of("deus", {"type": "holder", "holder": "human", "by": "viewer input", "at_ms": 0}))
+def test_the_agent_hears_of_stop_and_block_but_not_of_the_humans_passing_input_or_its_own_join_or_leave() -> None:
+    assert words_of("deus", {"type": "holder", "holder": "human", "by": "viewer input", "at_ms": 0}) is None
+    assert words_of("deus", {"type": "holder", "holder": "agent", "by": "quiet", "at_ms": 0}) is None
+    assert "resumed you" in str(words_of("deus", {"type": "holder", "holder": "agent", "by": "unblock", "at_ms": 0}))
     assert "blocked you" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "block", "at_ms": 0}))
     assert words_of("deus", {"type": "holder", "holder": "agent", "by": "share", "at_ms": 0}) is None
-    assert "pressed Stop" in str(words_of("deus", {"type": "holder", "holder": "human", "by": "stop", "at_ms": 0}))
+    assert "pressed Stop" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "stop", "at_ms": 0}))
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
 
 
@@ -58,8 +60,8 @@ def test_stop_interrupts_the_owning_agents_turn_but_a_replayed_stop_only_tells_i
             desks = Desks(host)  # type: ignore[arg-type]
             desks._sessions["deus"] = Held("deus", "agent_a", "g", "n", "A", "s", 0)
             link = PcLink("deus", PCS["deus"])
-            await desks._event(link, {"type": "holder", "holder": "human", "by": "stop", "id": 1, "at_ms": now_ms()})
-            await desks._event(link, {"type": "holder", "holder": "human", "by": "stop", "id": 2, "at_ms": now_ms() - 3_600_000})
+            await desks._event(link, {"type": "holder", "holder": "blocked", "by": "stop", "id": 1, "at_ms": now_ms()})
+            await desks._event(link, {"type": "holder", "holder": "blocked", "by": "stop", "id": 2, "at_ms": now_ms() - 3_600_000})
 
     asyncio.run(run())
     assert done == [("interrupt", "interrupt"), ("told", True), ("told", True)]

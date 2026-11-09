@@ -187,17 +187,18 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
           : 'waiting';
 
   Widget _stopButton({bool wide = false}) {
+    final blocked = AgentModel.of(ffi.sessionId).isBlocked;
     return ElevatedButton.icon(
       style: ElevatedButton.styleFrom(
-        backgroundColor: _stopRed,
+        backgroundColor: blocked ? _agentGreen : _stopRed,
         foregroundColor: Colors.white,
         minimumSize: wide ? const Size.fromHeight(56) : null,
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
         textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
       ),
-      onPressed: () => _ask('stop'),
-      icon: const Icon(Icons.stop_circle),
-      label: const Text('Stop'),
+      onPressed: () => _ask(blocked ? 'unblock' : 'stop'),
+      icon: Icon(blocked ? Icons.play_circle : Icons.stop_circle),
+      label: Text(blocked ? 'Resume' : 'Stop'),
     );
   }
 

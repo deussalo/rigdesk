@@ -144,11 +144,12 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
             return None
         if by == "stop":
             return (f"RigDesk {pc}: the human pressed Stop at {at}. Stop what you are doing there and wait for them; "
-                    "your actions there are refused until they hand input back.")
-        if holder == "human" and by == "unblock":
-            return f"RigDesk {pc}: the human unblocked you at {at}. Input stays with them until they hand it to you; reads work again."
-        if holder == "human":
-            return f"RigDesk {pc}: the human took input back at {at} ({by}). Your actions there are refused until they hand it to you; reads still work."
+                    "every call there is refused until they resume you.")
+        if holder == "agent" and by == "unblock":
+            return f"RigDesk {pc}: the human resumed you at {at}. You may act there again; look first, the screen may have changed."
+        if (holder == "human" and by != "unblock") or (holder == "agent" and by == "quiet"):
+            # Input passes to the human while they use the PC and back once they pause; a call in between is refused with when to retry.
+            return None
         if holder == "agent":
             return f"RigDesk {pc}: the human handed input to you at {at}. You may act there again."
         if holder == "blocked":

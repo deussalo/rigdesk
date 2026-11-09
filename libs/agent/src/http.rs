@@ -466,7 +466,7 @@ mod tests {
         let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
         post(port, "/claim", "", &json!({"grant": minted["grant"], "secret": minted["secret"], "agent": agent})).await;
         let mut events = shared.events.subscribe();
-        assert_eq!(post(port, "/viewer/stop", "", &json!({})).await["standing"]["holder"], json!("human"));
+        assert_eq!(post(port, "/viewer/stop", "", &json!({})).await["standing"]["holder"], json!("blocked"));
         let stopped = events.recv().await.unwrap();
         assert!(matches!(stopped.kind, EventKind::Holder { ref by, .. } if by == "stop"), "{stopped:?}");
         post(port, "/viewer/stop", "", &json!({})).await;

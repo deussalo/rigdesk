@@ -282,18 +282,20 @@ class _AgentOverlayState extends State<AgentOverlay> {
       ));
       items.add(const SizedBox(width: 6));
       items.add(Tooltip(
-        message: 'Take input back and stop the agent now (Ctrl+Alt+Esc)',
+        message: agent.isBlocked
+            ? 'Let the agent act again'
+            : 'Stop the agent until you resume it (Ctrl+Alt+Esc)',
         child: ElevatedButton.icon(
           style: ElevatedButton.styleFrom(
-            backgroundColor: _blockRed,
+            backgroundColor: agent.isBlocked ? _agentGreen : _blockRed,
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
             textStyle:
                 const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
-          onPressed: () => _ask(ffi, 'stop'),
-          icon: const Icon(Icons.stop_circle),
-          label: const Text('Stop'),
+          onPressed: () => _ask(ffi, agent.isBlocked ? 'unblock' : 'stop'),
+          icon: Icon(agent.isBlocked ? Icons.play_circle : Icons.stop_circle),
+          label: Text(agent.isBlocked ? 'Resume' : 'Stop'),
         ),
       ));
     }

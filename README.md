@@ -73,10 +73,11 @@ In the remote window, the agent bar (bottom right) offers:
 - **Share with agent** copies `rigdesk://<pc>/<grant>#<secret>`. Paste it to any Rig agent, which calls
   `desk/join(link)`. The link works once, and the agent that claims it alone owns the session. The bar then shows
   that agent's name.
-- **Hand to agent / Take back.** Any mouse or keyboard input, from a viewer or at the PC itself, takes input back
-  before the agent's next action. While the human holds input, the agent's actions are refused ("the human took over
-  at …") but its reads still work.
-- **Block agent** (big, red) refuses every call, reads included, until Unblock.
+- **Your input goes first.** Any mouse or keyboard input, from a viewer or at the PC itself, reaches the PC at once,
+  and the agent's actions are refused ("the human is using the PC …", reads still work) until that input pauses for
+  3 seconds; then the agent may act again by itself.
+- **Stop** (big, red) blocks the agent, reads included, and cuts its turn short. It turns into a green **Resume**,
+  which lets the agent act again.
 - **Message** opens a box with a still of the current screen. Clip a region, mark it up with pen, arrow, box or
   text, and send. The agent gets a Rig message naming the image, which it reads with `desk/attachment`.
 - The agent's pointer shows as a green dot labelled with its name and last action, and an action strip lists its
@@ -85,8 +86,8 @@ In the remote window, the agent bar (bottom right) offers:
 On Android (the arm64 APK, which installs as RigDesk beside RustDesk) the phone connects to the bridge's viewer port,
 `<bridge host>.<tailnet>.ts.net:21128`, with the bridge's viewer password, and the agent badge at the top left opens
 these controls as a sheet. Its bridge settings take the bridge's agent API URL, which must be https (e.g.
-`tailscale serve`) since Android blocks cleartext HTTP. The red Stop stays on screen while an agent holds the share,
-and a touch on the remote image takes input back.
+`tailscale serve`) since Android blocks cleartext HTTP. The red Stop (green Resume while stopped) stays on screen
+while an agent holds the share.
 
 Each claim, holder change, block and tool call is appended to the PC's action log, readable at `GET /log`.
 

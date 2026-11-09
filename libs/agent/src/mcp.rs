@@ -175,7 +175,7 @@ mod tests {
         let link = mcp.shared.mint();
         let token = mcp.shared.claim(&link.grant, &link.secret, Owner { agent_id: "a1".into(), title: "t".into(), graph: "g".into() }).unwrap();
         let typed = mcp.handle(&call("type", json!({"text": "hi"})), Some(&token)).unwrap();
-        assert!(typed["result"]["content"][0]["text"].as_str().unwrap().contains("took over"));
+        assert!(typed["result"]["content"][0]["text"].as_str().unwrap().contains("is using the PC"));
         assert_eq!(mcp.shared.standing().holder, Some(Holder::Human));
     }
 
@@ -205,7 +205,7 @@ mod tests {
         assert!(mcp.shared.human_input("viewer"));
         let typed = mcp.handle(&call("type", json!({"text": "hi"})), Some(&token)).unwrap();
         assert_eq!(typed["result"]["isError"], json!(true));
-        assert!(typed["result"]["content"][0]["text"].as_str().unwrap().contains("took over"));
+        assert!(typed["result"]["content"][0]["text"].as_str().unwrap().contains("is using the PC"));
         let shot = mcp.handle(&call("screenshot", json!({})), Some(&token)).unwrap();
         assert_eq!(shot["result"]["isError"], json!(false));
         assert_eq!(shot["result"]["content"][0]["type"], json!("image"));

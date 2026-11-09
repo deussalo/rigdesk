@@ -38,26 +38,10 @@ pub struct Relay {
     password: String,
 }
 
-/// What one input from a viewer does: go to the PC, take input back from the agent first, or stay off the PC.
-#[derive(Debug, PartialEq)]
-enum Input {
-    Forward,
-    TakeBackThenForward,
-    Hold,
-}
 
-/// A pointer move while the agent holds input is held back; any other pointer act or key takes input back first.
-fn judge(msg: &Message, agent_holds: bool) -> Input {
-    let pointer_move = match &msg.union {
-        Some(message::Union::MouseEvent(m)) => m.mask & 0x7 == 0,
-        Some(message::Union::KeyEvent(_) | message::Union::PointerDeviceEvent(_)) => false,
-        _ => return Input::Forward,
-    };
-    match (agent_holds, pointer_move) {
-        (false, _) => Input::Forward,
-        (true, true) => Input::Hold,
-        (true, false) => Input::TakeBackThenForward,
-    }
+/// The human's input goes first: it reaches the PC, and the agent's actions wait until it pauses.
+fn is_input(msg: &Message) -> bool {
+    matches!(&msg.union, Some(message::Union::MouseEvent(_) | message::Union::KeyEvent(_) | message::Union::PointerDeviceEvent(_)))
 }
 
 /// What a viewer may send the PC: its input, clipboard, screenshots and the picture's own controls. Its pings and video
@@ -184,13 +168,8 @@ impl Relay {
                     if !to_pc(&msg) {
                         continue;
                     }
-                    let agent_holds = self.shared.standing().holder == Some(Holder::Agent);
-                    match judge(&msg, agent_holds) {
-                        Input::Hold => continue,
-                        Input::TakeBackThenForward => {
-                            self.shared.human_input("viewer input");
-                        }
-                        Input::Forward => {}
+                    if is_input(&msg) {
+                        self.shared.human_input("viewer input");
                     }
                     self.link.forward(msg);
                 }
@@ -289,8 +268,6 @@ mod tests {
         assert_eq!(info.hostname, "pc");
         while !matches!(next(&mut viewer).await.union, Some(message::Union::VideoFrame(_))) {}
 
-        viewer.send(&mouse(0)).await.expect("send");
-        assert_eq!(shared.standing().holder, Some(Holder::Agent));
         viewer.send(&mouse(1 | (1 << 3))).await.expect("send");
         assert_eq!(tokio::time::timeout(Duration::from_secs(5), pointer.recv()).await.expect("the click reaches the PC"), Some(1 | (1 << 3)));
         assert_eq!(shared.standing().holder, Some(Holder::Human));
@@ -309,17 +286,5 @@ mod tests {
             salts.push(hash.salt);
         }
         assert_eq!(salts[0], salts[1]);
-    }
-
-    #[test]
-    fn while_the_agent_holds_input_a_click_or_key_takes_it_back_and_a_passing_pointer_is_held() {
-        let mut key = Message::new();
-        key.set_key_event(KeyEvent::new());
-        assert_eq!(judge(&mouse(0), true), Input::Hold);
-        assert_eq!(judge(&mouse(1 | (1 << 3)), true), Input::TakeBackThenForward);
-        assert_eq!(judge(&mouse(3), true), Input::TakeBackThenForward);
-        assert_eq!(judge(&key, true), Input::TakeBackThenForward);
-        assert_eq!(judge(&mouse(0), false), Input::Forward);
-        assert_eq!(judge(&key, false), Input::Forward);
     }
 }
