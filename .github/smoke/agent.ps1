@@ -76,7 +76,7 @@ try {
 
   $null = Post "/debug/viewer/human" @{}
   $held = Tool "type" @{ text = "x" }
-  if (-not $held.isError -or (Text $held) -notmatch "took over") { Fail "an action ran while the human held input: $(Text $held)" }
+  if (-not $held.isError -or (Text $held) -notmatch "is using the PC") { Fail "an action ran while the human held input: $(Text $held)" }
   $read = Tool "screenshot"
   if ($read.isError) { Fail "a read was refused while the human held input: $(Text $read)" }
   $null = Post "/debug/viewer/hand" @{}

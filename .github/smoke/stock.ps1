@@ -150,7 +150,7 @@ try {
   [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(($ox + 90), ($oy + 70))
   Start-Sleep 1
   $held = Tool "type" @{ text = "x" }
-  if (-not $held.isError -or (Text $held) -notmatch "took over") { Fail "an action ran after someone at the PC moved the mouse: $(Text $held)" }
+  if (-not $held.isError -or (Text $held) -notmatch "is using the PC") { Fail "an action ran after someone at the PC moved the mouse: $(Text $held)" }
   $null = Shot "while-human-holds"
   Write-Host "takeover: $(Text $held)"
 
