@@ -178,11 +178,16 @@ impl Link {
         stream.send(&Message::new()).await?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let mut idle_check = tokio::time::interval(Duration::from_secs(5));
+        // next_timeout restarts with every select! round, so the idle tick alone would keep a dead link looking alive.
+        let mut heard = std::time::Instant::now();
         loop {
             tokio::select! {
                 incoming = stream.next_timeout(READ_TIMEOUT_MS) => {
                     let bytes = match incoming {
-                        Some(Ok(bytes)) => bytes,
+                        Some(Ok(bytes)) => {
+                            heard = std::time::Instant::now();
+                            bytes
+                        }
                         Some(Err(e)) => bail!("connection error: {e}"),
                         None => bail!("the PC went silent or closed the connection"),
                     };
@@ -195,6 +200,9 @@ impl Link {
                 _ = idle_check.tick() => {
                     if !self.wanted() {
                         return Ok(());
+                    }
+                    if heard.elapsed() > Duration::from_millis(READ_TIMEOUT_MS) {
+                        bail!("the PC sent nothing for {} s; reconnecting", READ_TIMEOUT_MS / 1000);
                     }
                 }
             }

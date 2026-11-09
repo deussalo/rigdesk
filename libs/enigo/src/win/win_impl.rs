@@ -46,7 +46,8 @@ fn to_absolute(v: i32, origin: i32, extent: i32) -> Option<i32> {
     if extent <= 0 {
         return None;
     }
-    let abs = (v as i64 - origin as i64) * 65535 / extent as i64;
+    // Windows maps back as abs * extent / 65536 rounded down, so round up here or every position lands 1 px short.
+    let abs = ((v as i64 - origin as i64) * 65536 + extent as i64 - 1).div_euclid(extent as i64);
     Some(abs.clamp(0, 65535) as i32)
 }
 

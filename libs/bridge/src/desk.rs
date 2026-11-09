@@ -46,7 +46,32 @@ fn display(peer: &Peer, args: &Value) -> Result<(usize, i32, i32, i32, i32), Str
 /// Screenshot pixels on that display to the PC's desktop coordinates.
 fn at(peer: &Peer, args: &Value, x: i32, y: i32) -> Result<(i32, i32), String> {
     let (_, ox, oy, _, _) = display(peer, args)?;
-    Ok((ox + x, oy + y))
+    let nudge = windows_truncation_nudge(peer);
+    Ok((ox + x + nudge, oy + y + nudge))
+}
+
+// Stock RustDesk on Windows scales to SendInput's 0..65535 range rounding down, and Windows rounds down again, so every
+// pointer position lands 1 px up and left; asking for the next pixel lands on the one meant.
+fn windows_truncation_nudge(peer: &Peer) -> i32 {
+    i32::from(peer.platform == "Windows")
+}
+
+fn scroll_rate(peer: &Peer) -> &'static str {
+    if peer.platform == "Windows" {
+        "1 notch is 3 lines unless the PC's WheelScrollLines setting differs; apps that scroll by pixels vary"
+    } else {
+        "how far a notch goes is up to the app"
+    }
+}
+
+/// What a scroll did, in notches, with how far a notch goes.
+fn scrolled(dx: i32, dy: i32, rate: &str) -> String {
+    let notches = |n: i32, more: &str, less: &str| format!("{} notch{} {}", n.abs(), if n.abs() == 1 { "" } else { "es" }, if n > 0 { more } else { less });
+    let moves: Vec<String> = [(dy != 0).then(|| notches(dy, "up", "down")), (dx != 0).then(|| notches(dx, "right", "left"))].into_iter().flatten().collect();
+    if moves.is_empty() {
+        return "scrolled nothing: dx and dy are 0".into();
+    }
+    format!("scrolled {} ({rate})", moves.join(" and "))
 }
 
 impl Desk for RemoteDesk {
@@ -64,7 +89,7 @@ impl Desk for RemoteDesk {
                 input_schema: obj(json!({"x": {"type": "integer"}, "y": {"type": "integer"}, "button": {"type": "string"}, "double": {"type": "boolean"}, "display": disp}), &["x", "y"]) },
             ToolSpec { name: "drag", read_only: false, description: "Press at x1,y1, move to x2,y2 and release (screenshot pixels).",
                 input_schema: obj(json!({"x1": {"type": "integer"}, "y1": {"type": "integer"}, "x2": {"type": "integer"}, "y2": {"type": "integer"}, "button": {"type": "string"}, "display": disp}), &["x1", "y1", "x2", "y2"]) },
-            ToolSpec { name: "scroll", read_only: false, description: "Scroll by whole notches at the pointer: positive dy up, positive dx right.",
+            ToolSpec { name: "scroll", read_only: false, description: "Scroll by whole notches at the pointer: positive dy up, positive dx right. On Windows 1 notch is usually 3 lines; the result says.",
                 input_schema: obj(json!({"dx": {"type": "integer"}, "dy": {"type": "integer"}}), &[]) },
             ToolSpec { name: "type", read_only: false, description: "Type a run of text at the focused control.",
                 input_schema: obj(json!({"text": {"type": "string"}}), &["text"]) },
@@ -125,7 +150,7 @@ impl Desk for RemoteDesk {
             "scroll" => {
                 let (dx, dy) = (int(args, "dx").unwrap_or(0), int(args, "dy").unwrap_or(0));
                 send(keys::scroll(dx, dy))?;
-                ok("scrolled")
+                ok(scrolled(dx, dy, scroll_rate(&peer)))
             }
             "type" => {
                 let t = text(args, "text")?;
@@ -152,5 +177,16 @@ impl Desk for RemoteDesk {
             },
             other => Err(format!("no tool {other} on a stock RustDesk PC")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrolled;
+
+    #[test]
+    fn a_scroll_reports_its_notches_and_the_rate() {
+        assert_eq!(scrolled(0, -45, "1 notch is 3 lines"), "scrolled 45 notches down (1 notch is 3 lines)");
+        assert_eq!(scrolled(1, 1, "r"), "scrolled 1 notch up and 1 notch right (r)");
     }
 }

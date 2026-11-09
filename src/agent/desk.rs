@@ -33,6 +33,29 @@ fn last_input_ms() -> Option<u64> {
     Some(rigdesk_agent::now_ms().saturating_sub(idle as u64))
 }
 
+/// How far one wheel notch goes on this PC, from its WheelScrollLines setting.
+fn scroll_rate() -> String {
+    use winapi::um::winuser::{SystemParametersInfoW, SPI_GETWHEELSCROLLLINES, WHEEL_PAGESCROLL};
+    let mut lines: u32 = 0;
+    if unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &mut lines as *mut u32 as *mut _, 0) } == 0 {
+        return "this PC's lines per notch could not be read; apps that scroll by pixels vary".into();
+    }
+    match lines {
+        WHEEL_PAGESCROLL => "1 notch is one page on this PC".into(),
+        n => format!("1 notch is {n} line{} on this PC; apps that scroll by pixels vary", if n == 1 { "" } else { "s" }),
+    }
+}
+
+/// What a scroll did, in notches, with how far a notch goes.
+fn scrolled(dx: i32, dy: i32, rate: &str) -> String {
+    let notches = |n: i32, more: &str, less: &str| format!("{} notch{} {}", n.abs(), if n.abs() == 1 { "" } else { "es" }, if n > 0 { more } else { less });
+    let moves: Vec<String> = [(dy != 0).then(|| notches(dy, "up", "down")), (dx != 0).then(|| notches(dx, "right", "left"))].into_iter().flatten().collect();
+    if moves.is_empty() {
+        return "scrolled nothing: dx and dy are 0".into();
+    }
+    format!("scrolled {} ({rate})", moves.join(" and "))
+}
+
 fn int(args: &Value, key: &str) -> Result<i32, String> {
     args.get(key).and_then(Value::as_i64).map(|v| v as i32).ok_or_else(|| format!("missing integer {key}"))
 }
@@ -60,7 +83,7 @@ impl Desk for WinDesk {
                 input_schema: obj(json!({"x": {"type": "integer"}, "y": {"type": "integer"}, "button": {"type": "string"}, "double": {"type": "boolean"}}), &["x", "y"]) },
             ToolSpec { name: "drag", read_only: false, description: "Press at x1,y1, move to x2,y2 and release. button is left (default) or right.",
                 input_schema: obj(json!({"x1": {"type": "integer"}, "y1": {"type": "integer"}, "x2": {"type": "integer"}, "y2": {"type": "integer"}, "button": {"type": "string"}}), &["x1", "y1", "x2", "y2"]) },
-            ToolSpec { name: "scroll", read_only: false, description: "Scroll by whole notches at the pointer: positive dy up, positive dx right.",
+            ToolSpec { name: "scroll", read_only: false, description: "Scroll by whole notches at the pointer: positive dy up, positive dx right. The result says how many lines a notch is on this PC.",
                 input_schema: obj(json!({"dx": {"type": "integer"}, "dy": {"type": "integer"}}), &[]) },
             ToolSpec { name: "type", read_only: false, description: "Type a run of text at the focused control.",
                 input_schema: obj(json!({"text": {"type": "string"}}), &["text"]) },
@@ -121,7 +144,7 @@ impl WinDesk {
                 let dx = args.get("dx").and_then(Value::as_i64).unwrap_or(0) as i32;
                 let dy = args.get("dy").and_then(Value::as_i64).unwrap_or(0) as i32;
                 input::scroll(dx, dy);
-                ok("scrolled")
+                ok(scrolled(dx, dy, &scroll_rate()))
             }
             "type" => {
                 input::type_text(&text(args, "text")?);
