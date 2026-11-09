@@ -82,8 +82,10 @@ In the remote window, the agent bar (bottom right) offers:
 - The agent's pointer shows as a green dot labelled with its name and last action, and an action strip lists its
   recent calls.
 
-On Android (the arm64 APK, which installs as RigDesk beside RustDesk) the agent badge at the top left opens these
-controls as a sheet, set up per PC as on the desktop; the red Stop stays on screen while an agent holds the share,
+On Android (the arm64 APK, which installs as RigDesk beside RustDesk) the phone connects to the bridge's viewer port,
+`<bridge host>.<tailnet>.ts.net:21128`, with the bridge's viewer password, and the agent badge at the top left opens
+these controls as a sheet. Its bridge settings take the bridge's agent API URL, which must be https (e.g.
+`tailscale serve`) since Android blocks cleartext HTTP. The red Stop stays on screen while an agent holds the share,
 and a touch on the remote image takes input back.
 
 Each claim, holder change, block and tool call is appended to the PC's action log, readable at `GET /log`.

@@ -22,9 +22,9 @@ void _allowSoftKeyboard() {
 }
 
 /// The agent panel on the phone's remote page: the desktop overlay's controls (AgentOverlay), laid out for touch.
-/// The badge opens a sheet with Share, Hand to agent / Take back, the message box, Block, End share and the host
-/// settings; Stop stays on screen while an agent holds the share. A touch on the remote image while the agent
-/// holds input takes it back.
+/// The badge opens a sheet with Share, Hand to agent / Take back, the message box, Block, End share and the bridge
+/// settings; Stop stays on screen while an agent holds the share. The bridge already takes input back on a GUI's
+/// touch; the panel's own take-back on touch is a fallback.
 class MobileAgentPanel extends StatefulWidget {
   final FFI ffi;
 
@@ -149,7 +149,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
   Widget _badge(AgentModel agent) {
     final String label;
     if (_bridge == null) {
-      label = 'Set up agent host';
+      label = 'Set up bridge';
     } else if (agent.isShared) {
       label = '${agent.ownerTitle} · ${_holds(agent)}';
     } else if (agent.linkOpen) {
@@ -274,7 +274,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                     ),
                   ListTile(
                     leading: const Icon(Icons.settings),
-                    title: const Text('Agent host settings'),
+                    title: const Text('Bridge settings'),
                     onTap: () => run(_setUp),
                   ),
                   if (agent.isShared)
