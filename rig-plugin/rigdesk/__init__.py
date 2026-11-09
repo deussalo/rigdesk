@@ -73,7 +73,8 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
     except Exception as failed:  # noqa: BLE001
         return _refused(call, failed)
     return {"pc": held.pc, "joined": True, "said": (f"You own {held.pc}'s session and hold its input. desk/<tool> acts there; the human sees each call live. "
-                                                    "If they take input back or block you, you are told, and your actions are refused until they hand it back.")}
+                                                    "Their own input goes first: while they use the PC your actions are refused, and work again once they pause "
+                                                    "for 3 s. If they press Stop you are told, and every call is refused until they resume you.")}
 
 
 async def _leave(desks: Desks, call: Call, _given: LeaveInput) -> Answer:
