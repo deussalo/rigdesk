@@ -30,6 +30,7 @@ ID = "rigdesk"
 _LOG = event_log(__name__)
 RETRY_S = (1.0, 2.0, 5.0, 10.0, 30.0)
 SETTINGS_EVERY_S = 5.0
+IDLE_LEAVE_MS = 5 * 60_000
 CALL_LIMIT_S = 120.0
 FILES_KEPT = 300
 STOP_FRESH_MS = 60_000  # a Stop replayed after Rig was away is told, not acted on: the turn it meant is long gone
@@ -102,6 +103,7 @@ class Held:
     session: str
     since_ms: int
     via: Literal["link", "assigned"] = "link"
+    used_ms: int = 0
 
 
 class DeskRefused(Exception):
@@ -255,6 +257,7 @@ class Desks:
             try:
                 settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
                 self._reconcile(settings)
+                await self._idle_leaves()
             except Exception as failed:  # noqa: BLE001
                 _LOG.warning("rigdesk_settings_unread", f"RigDesk settings could not be read, PCs stay as they are: {type(failed).__name__}: {failed}")
             await asyncio.sleep(SETTINGS_EVERY_S)
@@ -578,9 +581,21 @@ class Desks:
             return None
         other = self._sessions.get(pc)
         if other is not None and other.agent != agent:
-            raise DeskRefused(f"{pc} is assigned to you, but {other.title} holds it now through a share link; it frees when they leave or the human ends that share")
+            frees = f"they leave or after {IDLE_LEAVE_MS // 60_000} minutes without a desk call" if other.via == "assigned" else "they leave or the human ends that share link"
+            raise DeskRefused(f"{pc} is assigned to you, but {other.title} holds it now; it frees when {frees}")
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title, via="assigned")
+
+    async def _idle_leaves(self) -> None:
+        """A session held through a standing grant ends after IDLE_LEAVE_MS without a desk call, so other assigned agents can take the PC; the next call rejoins."""
+        cutoff = now_ms() - IDLE_LEAVE_MS
+        for held in [held for held in self._sessions.values() if held.via == "assigned" and max(held.used_ms, held.since_ms) < cutoff]:
+            try:
+                await self.leave(held)
+            except (aiohttp.ClientError, TimeoutError, OSError) as failed:
+                _LOG.warning("rigdesk_idle_leave_failed", f"RigDesk {held.pc}: leaving the idle session failed: {failed}", pc=held.pc)
+            await self._tell(held, f"RigDesk {held.pc}: you made no desk call for {IDLE_LEAVE_MS // 60_000} minutes, so you left the PC for other agents; your next desk call joins it again if it is free.",
+                             f"idle:{held.since_ms}")
 
     async def leave(self, held: Held) -> bool:
         link = self._link(held.pc)
@@ -594,6 +609,7 @@ class Desks:
 
     async def call(self, held: Held, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         link = self._link(held.pc)
+        held.used_ms = now_ms()
         if link.state != "up":
             raise DeskRefused(f"RigDesk PC {held.pc} is down: {link.why or 'not reached yet'}")
         body = {"jsonrpc": "2.0", "id": now_ms(), "method": "tools/call", "params": {"name": tool, "arguments": arguments}}

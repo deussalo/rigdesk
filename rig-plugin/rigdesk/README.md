@@ -93,7 +93,8 @@ Known limits against a RigDesk PC:
 * **Standing grant (stock PCs).** `plugins.rigdesk.pcs.<pc>.assigned` lists `"agent:<id>"` or `"graph:<name>"`. Such an
   agent needs no link: its first `desk/<tool>` call joins the PC (the plugin mints and claims on the bridge itself), and
   so does its next call after the bridge or Rig restarts. Stop still blocks it; an agent sharing through a link at the
-  time is not displaced. Changing the list does not restart the bridge.
+  time is not displaced. Changing the list does not restart the bridge. A session held through the grant ends after
+  5 minutes without a desk call, so other assigned agents can take the PC; the agent is told, and its next call rejoins.
 * `desk/<tool>` — the PC's own tools (screenshot, snapshot, click, type, scroll, move, drag, key,
   shortcut, wait, app, powershell, clipboard), sent to the PC the calling agent joined. Images come
   back as PNG files under the plugin's state directory.

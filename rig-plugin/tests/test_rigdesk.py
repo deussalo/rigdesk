@@ -103,6 +103,36 @@ def test_taking_the_grant_away_ends_the_assigned_session_at_once() -> None:
     assert ended == ["deus"]
 
 
+
+def test_an_assigned_session_idle_five_minutes_leaves_the_pc_but_a_link_session_stays() -> None:
+    left: list[str] = []
+    told: list[str] = []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
+            stale = now_ms() - 6 * 60_000
+            desks._sessions["deus"] = Held("deus", "a1", "g", "n", "A", "s", stale, "assigned")
+            desks._sessions["front"] = Held("front", "a2", "g", "n", "B", "s", stale, "link")
+            desks._sessions["back"] = Held("back", "a3", "g", "n", "C", "s", stale, "assigned", used_ms=now_ms())
+
+            async def leave(held: Held) -> bool:
+                left.append(held.pc)
+                desks._sessions.pop(held.pc)
+                return True
+
+            async def tell(held: Held, words: str, key: str) -> bool:
+                told.append(words)
+                return True
+            desks.leave = leave  # type: ignore[method-assign]
+            desks._tell = tell  # type: ignore[method-assign]
+            await desks._idle_leaves()
+
+    asyncio.run(run())
+    assert left == ["deus"]
+    assert "next desk call joins it again" in told[0]
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
