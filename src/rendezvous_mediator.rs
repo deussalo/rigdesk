@@ -1427,6 +1427,13 @@ fn is_tailnet(ip: &std::net::IpAddr) -> bool {
     }
 }
 
+/// The direct server is RigDesk's only way in, so it listening is what "ready" means; no rendezvous server ever answers.
+static DIRECT_LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_direct_listening() -> bool {
+    DIRECT_LISTENING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn get_direct_port() -> i32 {
     let mut port = Config::get_option("direct-access-port")
         .parse::<i32>()
@@ -1450,6 +1457,7 @@ async fn direct_server(server: ServerPtr) {
             match hbb_common::tcp::listen_any(port as _).await {
                 Ok(l) => {
                     listener = Some(l);
+                    DIRECT_LISTENING.store(true, std::sync::atomic::Ordering::Relaxed);
                     log::info!(
                         "Direct server listening on: {:?}",
                         listener.as_ref().map(|l| l.local_addr())
@@ -1475,6 +1483,7 @@ async fn direct_server(server: ServerPtr) {
             if disabled || port != get_direct_port() {
                 log::info!("Exit direct access listen");
                 listener = None;
+                DIRECT_LISTENING.store(false, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             if let Ok(Ok((stream, addr))) = hbb_common::timeout(1000, l.accept()).await {

@@ -909,7 +909,10 @@ async fn handle(data: Data, stream: &mut Connection) {
             }
         }
         Data::OnlineStatus(_) => {
-            let x = config::get_online_state();
+            let mut x = config::get_online_state();
+            if crate::rendezvous_mediator::is_direct_listening() {
+                x = x.max(1);
+            }
             let confirmed = Config::get_key_confirmed();
             allow_err!(stream.send(&Data::OnlineStatus(Some((x, confirmed)))).await);
         }
