@@ -127,9 +127,10 @@ class PcHolder(TypedDict):
     graph: str
 
 
+# One RigDesk PC as another plugin reads it through the provision rigdesk.pcs. assigned is its standing grant (plugins.rigdesk.pcs.<name>.assigned,
+# "agent:<id>" or "graph:<name>"), which only a stock PC honours; held_by is the agent that owns its session now, by a link or the grant.
+# The pcs plugin copies PcHolder and PcEntry exactly and matches the schema, so no docstrings and never change one side alone.
 class PcEntry(TypedDict):
-    """One RigDesk PC as another plugin reads it through the provision rigdesk.pcs. assigned is its standing grant (plugins.rigdesk.pcs.<name>.assigned,
-    "agent:<id>" or "graph:<name>"), which only a stock PC honours; held_by is the agent that owns its session now, by a link or the grant."""
     name: str
     client: str
     stock: bool
