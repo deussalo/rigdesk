@@ -167,7 +167,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.smart_toy,
+            AgentDiamond(
                 size: 18, color: agent.isShared ? _agentGreen : null),
             const SizedBox(width: 6),
             ConstrainedBox(
@@ -225,7 +225,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                   if (agent.isShared)
                     ListTile(
                       leading:
-                          const Icon(Icons.smart_toy, color: _agentGreen),
+                          const AgentDiamond(color: _agentGreen),
                       title: Text(agent.ownerTitle),
                       subtitle: Text(
                           'Rig agent in ${agent.ownerGraph} · ${_holds(agent)}'),

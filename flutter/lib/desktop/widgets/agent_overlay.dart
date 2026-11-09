@@ -219,7 +219,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
         borderRadius: BorderRadius.circular(8),
         child: TextButton.icon(
           onPressed: () => _setUp(context),
-          icon: const Icon(Icons.smart_toy, size: 18),
+          icon: const AgentDiamond(size: 18),
           label: const Text('Set up agent host'),
         ),
       );
@@ -245,7 +245,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
       items.add(Tooltip(
         message: 'Rig agent ${agent.ownerTitle} in ${agent.ownerGraph}',
         child: Chip(
-          avatar: const Icon(Icons.smart_toy, size: 18, color: _agentGreen),
+          avatar: const AgentDiamond(size: 18, color: _agentGreen),
           label: Text('${agent.ownerTitle} · $holds'),
         ),
       ));
@@ -711,4 +711,31 @@ class _NotePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+
+/// Rig's mark for an agent: a filled diamond, sized and coloured like an Icon.
+class AgentDiamond extends StatelessWidget {
+  const AgentDiamond({super.key, this.size, this.color});
+
+  final double? size;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = IconTheme.of(context);
+    final side = size ?? theme.size ?? 24;
+    return SizedBox.square(
+      dimension: side,
+      child: Center(
+        child: Transform.rotate(
+          angle: math.pi / 4,
+          child: Container(
+              width: side * 0.55,
+              height: side * 0.55,
+              color: color ?? theme.color),
+        ),
+      ),
+    );
+  }
 }

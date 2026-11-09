@@ -486,10 +486,18 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   }
 
   Widget _bottomWidget() => _showGestureHelp
-      ? getGestureHelp()
+      ? _aboveSystemNavBar(
+          getGestureHelp(),
+          Theme.of(context).bottomAppBarTheme.color ??
+              Theme.of(context).colorScheme.surface)
       : (_showBar && gFFI.ffiModel.pi.displays.isNotEmpty
-          ? getBottomAppBar()
+          ? _aboveSystemNavBar(getBottomAppBar(), MyTheme.accent)
           : Offstage());
+
+  // Android 15+ draws edge to edge, so the system navigation bar would cover the bar.
+  Widget _aboveSystemNavBar(Widget bar, Color fill) => ColoredBox(
+      color: fill,
+      child: SafeArea(top: false, left: false, right: false, child: bar));
 
   @override
   Widget build(BuildContext context) {
