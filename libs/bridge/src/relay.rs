@@ -15,7 +15,7 @@ use base::message_proto::{login_response, message, misc, Hash, LoginResponse, Me
 use hbb_common::protobuf::Message as _;
 use hbb_common::tcp::{new_listener, FramedStream};
 use hbb_common::tokio::{self, sync::broadcast::error::RecvError};
-use hbb_common::{bail, log, ResultType};
+use hbb_common::{bail, log, sha2::{Digest, Sha256}, ResultType};
 use rigdesk_agent::{Holder, Shared};
 
 use crate::link::{login_proof, Link, ToViewer};
@@ -78,6 +78,12 @@ fn fresh() -> String {
     format!("{:016x}{:016x}", hbb_common::rand::random::<u64>(), hbb_common::rand::random::<u64>())
 }
 
+/// A RustDesk client remembers sha256(password + salt), so the salt stays the same across connections and restarts, as a stock PC's does.
+fn steady_salt(password: &str) -> String {
+    let digest = Sha256::new().chain_update("rigdesk viewer salt\0").chain_update(password).finalize();
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -112,7 +118,7 @@ impl Relay {
     }
 
     async fn viewer(&self, mut stream: FramedStream) -> ResultType<()> {
-        let hash = Hash { salt: fresh(), challenge: fresh(), ..Default::default() };
+        let hash = Hash { salt: steady_salt(&self.password), challenge: fresh(), ..Default::default() };
         let mut msg = Message::new();
         msg.set_hash(hash.clone());
         stream.send(&msg).await?;
@@ -288,6 +294,21 @@ mod tests {
         viewer.send(&mouse(1 | (1 << 3))).await.expect("send");
         assert_eq!(tokio::time::timeout(Duration::from_secs(5), pointer.recv()).await.expect("the click reaches the PC"), Some(1 | (1 << 3)));
         assert_eq!(shared.standing().holder, Some(Holder::Human));
+    }
+
+    #[tokio::test]
+    async fn a_remembered_password_works_on_the_next_connection() {
+        let link = Link::new("127.0.0.1:1".into(), "pc-pw".into(), "Rig agent".into());
+        let shared = Arc::new(Shared::new(rigdesk_agent::Events::new(64)));
+        let port = Relay::new(link, shared, "bridge-pw".into()).listen(0).await.expect("listening");
+        let mut salts = Vec::new();
+        for _ in 0..2 {
+            let mut viewer = FramedStream::new(format!("127.0.0.1:{port}"), None, 5_000).await.expect("the viewer port answers");
+            viewer.send(&Message::new()).await.expect("send");
+            let Some(message::Union::Hash(hash)) = next(&mut viewer).await.union else { panic!("no challenge") };
+            salts.push(hash.salt);
+        }
+        assert_eq!(salts[0], salts[1]);
     }
 
     #[test]
