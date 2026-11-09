@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
@@ -25,7 +25,7 @@ from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from .desks import ID, NATIVE, Desks, DeskRefused, RigdeskSettings
+from .desks import ID, NATIVE, Desks, DeskRefused, PcEntry, RigdeskSettings
 
 BRANCH = "desk"
 CAPABILITY = mcp_capability(BRANCH)
@@ -34,16 +34,8 @@ DOWN = PluginCode(f"{ID}.pc_down")
 UNSHARED = PluginCode(f"{ID}.no_session")
 
 
-class DeskPc(TypedDict):
-    name: str
-    client: str
-    state: str
-    why: str | None
-    assigned: list[str]
-
-
-# The pcs plugin declares the same shape; Provided.ask matches the rendered schema exactly, so no docstring and no field changes on one side alone.
-PCS = Provision("rigdesk.pcs", TypeAdapter(type(None)), TypeAdapter(tuple[DeskPc, ...]))
+# The pcs plugin copies PcEntry and PcHolder verbatim; Provided.ask matches the rendered schema exactly, docstring included, so never change one side alone.
+PCS = Provision("rigdesk.pcs", TypeAdapter(type(None)), TypeAdapter(tuple[PcEntry, ...]))
 NO_SESSION = ("you own no RigDesk session and no PC is assigned to you: ask the human at the PC for a share link (Share with agent in the viewer) "
               "and call desk/join with it, or ask the operator to assign you a PC on the PCs page")
 
@@ -291,8 +283,8 @@ async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
                  for row in host.live(Desks).pcs() if row["state"] == "down")
 
 
-async def _provided(host: PluginHost, _asked: None) -> tuple[DeskPc, ...]:
-    return tuple(DeskPc(name=e["name"], client=e["client"], state=e["state"], why=e["why"], assigned=list(e["assigned"])) for e in host.live(Desks).entries())
+async def _provided(host: PluginHost, _asked: None) -> tuple[PcEntry, ...]:
+    return host.live(Desks).entries()
 
 
 CONTRIBUTION = ContributionDescriptor(
