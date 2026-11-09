@@ -14,9 +14,8 @@ import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from core.base import ToolAnswer, View, replace_file
-from core.capability import RigReach
 from core.boundary import BranchTool, NoParams, Params, StatusLine
-from core.kernel_api import mcp_capability, plugin_capability
+from core.kernel_api import RigReach, mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.endpoint import Request, endpoint
 from core.model import RefusedOutcome
