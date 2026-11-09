@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import aiohttp
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 from core.base import ToolAnswer, View, replace_file
 from core.boundary import BranchTool, NoParams, Params, StatusLine
@@ -21,16 +21,20 @@ from core.endpoint import Request, endpoint
 from core.model import RefusedOutcome
 from core.mcp_call import Answer, Call, ToolDef, ToolInput, gloss_of
 from core.plugin_host import Live, PluginHost
+from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from .desks import ID, NATIVE, Desks, DeskRefused, RigdeskSettings
+from .desks import ID, NATIVE, Desks, DeskRefused, PcEntry, RigdeskSettings
 
 BRANCH = "desk"
 CAPABILITY = mcp_capability(BRANCH)
 REFUSED = PluginCode(f"{ID}.refused")
 DOWN = PluginCode(f"{ID}.pc_down")
-NO_SESSION = "you own no RigDesk session: ask the human at the PC for a share link (Share with agent in the viewer), then call desk/join with it"
+UNSHARED = PluginCode(f"{ID}.no_session")
+PCS = Provision("rigdesk.pcs", TypeAdapter(type(None)), TypeAdapter(tuple[PcEntry, ...]))
+NO_SESSION = ("you own no RigDesk session and no PC is assigned to you: ask the human at the PC for a share link (Share with agent in the viewer) "
+              "and call desk/join with it, or ask the operator to assign you a PC on the PCs page")
 
 
 class JoinInput(ToolInput):
@@ -81,7 +85,7 @@ async def _leave(desks: Desks, call: Call, _given: LeaveInput) -> Answer:
     agent, graph, _, _ = _who(call)
     held = desks.held_by(agent, graph)
     if held is None:
-        return call.refused(REFUSED, NO_SESSION)
+        return call.refused(UNSHARED, NO_SESSION)
     try:
         left = await desks.leave(held)
     except Exception as failed:  # noqa: BLE001
@@ -93,7 +97,7 @@ async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answe
     agent, graph, _, _ = _who(call)
     held = desks.held_by(agent, graph)
     if held is None:
-        return call.refused(REFUSED, NO_SESSION)
+        return call.refused(UNSHARED, NO_SESSION)
     try:
         path = await desks.attachment(held, given.id)
     except Exception as failed:  # noqa: BLE001
@@ -108,7 +112,7 @@ def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
         try:
             held = held or await desks.assigned_join(agent, graph, node, title)
             if held is None:
-                return call.refused(REFUSED, NO_SESSION)
+                return call.refused(UNSHARED, NO_SESSION)
             return await desks.call(held, tool, dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
             return _refused(call, failed)
@@ -276,9 +280,14 @@ async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
                  for row in host.live(Desks).pcs() if row["state"] == "down")
 
 
+async def _provided(host: PluginHost, _asked: None) -> tuple[PcEntry, ...]:
+    return host.live(Desks).entries()
+
+
 CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, status=_status,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
-    refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE},
+    refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN},
+    provisions=(provider(PCS, _provided),),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer)))

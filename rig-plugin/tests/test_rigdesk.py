@@ -80,6 +80,29 @@ def test_an_assigned_agent_or_graph_holds_a_standing_grant_to_its_stock_pc_only(
         assert desks.assigned_pc("a2", "g") is None, "a RigDesk PC shares through its viewer only"
 
 
+def test_taking_the_grant_away_ends_the_assigned_session_at_once() -> None:
+    from rigdesk.desks import RigdeskSettings, StockRemote
+    ended: list[str] = []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
+            stock = StockRemote(peer="deus.tail1234.ts.net", password_file="/dev/null")
+            spec = DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock, assigned=["agent:a1"])
+            desks._pcs["deus"] = PcLink("deus", spec)
+            desks._sessions["deus"] = Held("deus", "a1", "g", "n", "A", "s", 0, "assigned")
+
+            async def unassigned(pc: str) -> None:
+                ended.append(pc)
+            desks._unassigned = unassigned  # type: ignore[method-assign]
+            desks._reconcile(RigdeskSettings(pcs={"deus": spec.model_copy(update={"assigned": []})}))
+            await asyncio.sleep(0.01)
+            assert desks._pcs["deus"].spec.assigned == [], "the bridge keeps running; only the grant changed"
+
+    asyncio.run(run())
+    assert ended == ["deus"]
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

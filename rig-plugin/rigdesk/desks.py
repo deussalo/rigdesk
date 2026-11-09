@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -101,6 +101,7 @@ class Held:
     title: str
     session: str
     since_ms: int
+    via: Literal["link", "assigned"] = "link"
 
 
 class DeskRefused(Exception):
@@ -118,6 +119,28 @@ class PcLink:
     task: asyncio.Task[None] | None = None
     remote: asyncio.Task[None] | None = None
     remote_why: str | None = None
+
+
+class PcHolder(TypedDict):
+    agent_id: str
+    title: str
+    graph: str
+
+
+class PcEntry(TypedDict):
+    """One RigDesk PC as another plugin reads it through the provision rigdesk.pcs. assigned is its standing grant (plugins.rigdesk.pcs.<name>.assigned,
+    "agent:<id>" or "graph:<name>"), which only a stock PC honours; held_by is the agent that owns its session now, by a link or the grant."""
+    name: str
+    client: str
+    stock: bool
+    state: Literal["connecting", "up", "down"]
+    why: str | None
+    assigned: tuple[str, ...]
+    held_by: PcHolder | None
+
+
+def _grants(assigned: list[str], agent: str, graph: str) -> bool:
+    return bool({f"agent:{agent}", f"graph:{graph}"} & set(assigned))
 
 
 def pc_of_link(link: str, pcs: dict[str, DeskPc]) -> tuple[str, str, str] | str:
@@ -243,6 +266,9 @@ class Desks:
             spec = settings.pcs.get(name)
             if spec is not None and spec != link.spec and spec.model_copy(update={"assigned": link.spec.assigned}) == link.spec:
                 link.spec = spec
+                held = self._sessions.get(name)
+                if held is not None and held.via == "assigned" and not _grants(spec.assigned, held.agent, held.graph):
+                    TASKS.spawn(f"rigdesk-unassign-{name}", self._unassigned(name))
         for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
             link = self._pcs.pop(name)
             for task in (link.task, link.remote):
@@ -510,7 +536,7 @@ class Desks:
             raise DeskRefused(f"RigDesk PC {pc} is no longer set up in Rig")
         return link
 
-    async def join(self, link_text: str, agent: str, graph: str, node: str, title: str) -> Held:
+    async def join(self, link_text: str, agent: str, graph: str, node: str, title: str, via: Literal["link", "assigned"] = "link") -> Held:
         settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
         found = pc_of_link(link_text, dict(settings.pcs))
         if isinstance(found, str):
@@ -526,7 +552,7 @@ class Desks:
             if answer.status != 200:
                 raise DeskRefused(f"{pc} refused the link: {said.get('error', f'HTTP {answer.status}') if isinstance(said, dict) else answer.status}")
         replaced = self._sessions.get(pc)
-        held = self._sessions[pc] = Held(pc, agent, graph, node, title, str(said["session"]), now_ms())
+        held = self._sessions[pc] = Held(pc, agent, graph, node, title, str(said["session"]), now_ms(), via)
         link.standing = said.get("standing")
         await asyncio.to_thread(self._write_state)
         if replaced is not None and replaced.agent != agent:
@@ -535,8 +561,14 @@ class Desks:
 
     def assigned_pc(self, agent: str, graph: str) -> str | None:
         """The stock PC this agent, or its graph, holds a standing grant to."""
-        wanted = {f"agent:{agent}", f"graph:{graph}"}
-        return next((name for name, link in self._pcs.items() if link.spec.stock is not None and wanted & set(link.spec.assigned)), None)
+        return next((name for name, link in self._pcs.items() if link.spec.stock is not None and _grants(link.spec.assigned, agent, graph)), None)
+
+    async def _unassigned(self, pc: str) -> None:
+        """The operator took the grant away: its session ends now, and the agent is told by the revoke event."""
+        try:
+            await self.viewer(pc, "revoke")
+        except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
+            _LOG.warning("rigdesk_unassign_failed", f"RigDesk {pc}: ending the unassigned session failed: {failed}", pc=pc)
 
     async def assigned_join(self, agent: str, graph: str, node: str, title: str) -> Held | None:
         """Joins the PC this agent is assigned, as a share link would, unless another agent holds it now; None with no grant."""
@@ -547,7 +579,7 @@ class Desks:
         if other is not None and other.agent != agent:
             raise DeskRefused(f"{pc} is assigned to you, but {other.title} holds it now through a share link; it frees when they leave or the human ends that share")
         minted = await self.viewer(pc, "mint")
-        return await self.join(minted["link"], agent, graph, node, title)
+        return await self.join(minted["link"], agent, graph, node, title, via="assigned")
 
     async def leave(self, held: Held) -> bool:
         link = self._link(held.pc)
@@ -614,6 +646,15 @@ class Desks:
                          "owner": None if owner is None else {"id": owner.get("agent_id"), "title": owner.get("title"), "graph": owner.get("graph")},
                          "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id")})
         return rows
+
+    def entries(self) -> tuple[PcEntry, ...]:
+        """What the provision rigdesk.pcs answers: each PC, its grant and who holds it."""
+        rows: list[PcEntry] = []
+        for name, link in sorted(self._pcs.items()):
+            held = self._sessions.get(name)
+            rows.append(PcEntry(name=name, client=link.spec.client, stock=link.spec.stock is not None, state=link.state, why=link.remote_why or link.why,
+                                assigned=tuple(link.spec.assigned), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph)))
+        return tuple(rows)
 
     def session_of(self, graph: str, agent: str) -> dict[str, Any] | None:
         held = self.held_by(agent, graph)
