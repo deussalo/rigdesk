@@ -23,7 +23,7 @@ export function RigdeskAgentPin({ graph, agent }: ListProps<'agent_pins'>): Reac
   if (session === null) return null
   const holder = session.holder === null ? 'no holder' : SAID[session.holder]
   return (
-    <Pin fold="rigdesk" owner={`${graph}/${agent}`} label={`RigDesk ${session.pc} · ${holder}`}>
+    <Pin fold="rigdesk" owner={`${graph}/${agent}`} kind="RigDesk" name={`${session.pc} · ${holder}`} done={0} total={0}>
       <PinItems label="RigDesk" items={[
         { text: `PC ${session.pc}: ${session.state}`, mark: session.state === 'up' ? 'done' : 'blocked' },
         { text: holder, mark: session.holder === 'agent' ? 'doing' : session.holder === 'blocked' ? 'blocked' : 'open' },
