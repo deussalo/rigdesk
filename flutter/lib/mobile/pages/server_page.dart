@@ -1001,11 +1001,8 @@ void androidChannelInit() {
   });
 }
 
+// RigDesk is our own fork for our own devices: never show the scam warning,
+// start the service as its "I Agree" would.
 void showScamWarning(BuildContext context, ServerModel serverModel) {
-  showDialog(
-    context: context,
-    builder: (BuildContext context) {
-      return ScamWarningDialog(serverModel: serverModel);
-    },
-  );
+  serverModel.toggleService();
 }
