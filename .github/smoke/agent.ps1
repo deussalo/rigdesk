@@ -1,6 +1,6 @@
 # Agent API smoke test (plan acceptance 4.4): the built server, headless on the runner, against Notepad.
 # Mints a grant through the debug-only route, claims it, then checks screenshot, UIA snapshot, type, Block and a holder change.
-param([string]$Exe = ".\rigdesk\rustdesk.exe")
+param([string]$Exe = ".\rigdesk\RigDesk.exe")
 $ErrorActionPreference = "Stop"
 $token = "smoke-" + [guid]::NewGuid().ToString("N")
 $dir = Join-Path $env:APPDATA "RigDesk\config\agent"

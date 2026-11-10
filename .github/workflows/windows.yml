@@ -162,10 +162,13 @@ jobs:
         run: |
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
           mv ./flutter/build/windows/x64/runner/Release ./rigdesk
+          # The installer runs "<Program Files>\RigDesk\RigDesk.exe" (app name + .exe) after copying this folder;
+          # upstream's rustdesk.exe matches RustDesk.exe only because Windows ignores case.
+          mv ./rigdesk/rustdesk.exe ./rigdesk/RigDesk.exe
       - name: Version
         shell: powershell
         run: |
-          $v = (& ".\rigdesk\rustdesk.exe" --version | Out-String).Trim()
+          $v = (& ".\rigdesk\RigDesk.exe" --version | Out-String).Trim()
           if ($LASTEXITCODE -ne 0) { throw "--version exited with $LASTEXITCODE" }
           Write-Host "version: $v"
       - name: No public RustDesk servers or keys in the build
