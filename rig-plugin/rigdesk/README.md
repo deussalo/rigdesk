@@ -77,6 +77,33 @@ disturbs the agent. **Stop** (the panel's button, or Ctrl+Alt+Esc in the GUI) ta
 the owning agent's current Rig turn, as the operator's interrupt does; the agent is then told why. While a GUI watches,
 the bridge asks the PC for a watchable picture (balanced quality, 30 fps), and for a lean one (5 fps) otherwise.
 
+### By RustDesk ID, through our own ID server (no Tailscale on the PC)
+
+A PC that is not on the tailnet is named by its RustDesk ID instead of a `peer`. It registers with our own ID server
+(`hbbs`) and the bridge meets it on our relay (`hbbr`); no public RustDesk server is used. hbbs vouches for the PC's
+key, so the session is encrypted end to end by RustDesk's key exchange, and a PC whose signed identity does not verify
+is refused, never used in the clear.
+
+On the Rig host, run hbbs and hbbr (rustdesk-server 1.1.16 or later) with the key required, hbbs naming the relay by
+the address PCs reach it at, and open TCP 21115-21117 and UDP 21116 to the internet:
+
+    hbbs -r <public address>:21117 -k _        # writes id_ed25519 and id_ed25519.pub in its working directory
+    hbbr -k _                                  # same working directory, so the same key
+
+On the PC, in RustDesk → Settings → Network → ID/Relay server: **ID server** `<public address>`, **Key** the contents
+of `id_ed25519.pub`; leave Relay and API empty. Under Security, **Use permanent password** with a password set. Then
+name the server once and each PC by its ID (digits, no spaces):
+
+    {"id_server": {"host": "<public address>", "key_file": "~/.rig/rustdesk-server/id_ed25519.pub"},
+     "pcs": {"front": {"url": "http://127.0.0.1:21121",
+                       "token_file": "~/.rig/rigdesk/front.token",
+                       "client": "acme",
+                       "stock": {"id": "123456789",
+                                 "password_file": "~/.rig/rigdesk/front.password"}}}}
+
+The bridge always takes the relay (it runs beside hbbr, so a hole punch gains nothing). Its log names why a connection
+failed: the ID never registered, the PC is offline, or the key differs from hbbs's.
+
 Known limits against a RigDesk PC:
 
 * tools: screenshot, move, click, drag, scroll, type, key, shortcut, wait and clipboard only; no UI tree

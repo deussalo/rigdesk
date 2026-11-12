@@ -3,8 +3,10 @@
 //! first asks or a viewer attaches, and lets go after `IDLE` with no viewer, so the PC shows a RustDesk session only
 //! while it is in use. What the PC sends is also relayed to the attached viewers (see `relay`).
 //!
-//! No RustDesk-layer encryption: a direct-IP connection has no rendezvous server to vouch for the PC's key, so stock
-//! RustDesk itself sends such sessions in the clear. The tailnet's WireGuard carries them, as it does every RigDesk PC.
+//! The PC is reached one of two ways (`Route`). By direct IP there is no RustDesk-layer encryption: no rendezvous
+//! server vouches for the PC's key, so stock RustDesk itself sends such sessions in the clear, and the tailnet's
+//! WireGuard carries them, as it does every RigDesk PC. By ID, through our own hbbs and hbbr, the session is
+//! encrypted end to end (see `rendezvous`).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -67,7 +69,37 @@ struct State {
     info: Option<PeerInfo>,
 }
 
+/// How the bridge reaches the PC.
+#[derive(Clone, Debug)]
+pub enum Route {
+    /// Its direct-IP port, over the tailnet.
+    Direct { addr: String },
+    /// Its RustDesk ID, registered with our ID server, through our relay.
+    Id { id: String, server: crate::rendezvous::Server },
+}
+
+impl Route {
+    /// The route for a `--peer`, and the login username the PC expects on it: a stock PC accepts a direct-IP login
+    /// whose username is the address it was dialled at, and an ID login under its ID.
+    pub fn direct(peer: &str) -> (Route, String) {
+        let (addr, username) = target(peer);
+        (Route::Direct { addr }, username)
+    }
+
+    pub fn by_id(id: String, server: crate::rendezvous::Server) -> (Route, String) {
+        (Route::Id { id: id.clone(), server }, id)
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Route::Direct { addr } => addr.clone(),
+            Route::Id { id, server } => format!("ID {id} via {}", server.host),
+        }
+    }
+}
+
 pub struct Link {
+    route: Route,
     addr: String,
     username: String,
     password: String,
@@ -110,10 +142,10 @@ pub fn login_proof(password: &str, hash: &Hash) -> Vec<u8> {
 }
 
 impl Link {
-    pub fn new(peer: String, password: String, name: String) -> Arc<Self> {
-        let (addr, username) = target(&peer);
+    pub fn new((route, username): (Route, String), password: String, name: String) -> Arc<Self> {
         Arc::new(Link {
-            addr,
+            addr: route.label(),
+            route,
             username,
             password,
             name,
@@ -172,10 +204,16 @@ impl Link {
     }
 
     async fn session(&self) -> ResultType<()> {
-        let local: SocketAddr = (if self.addr.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" }).parse()?;
-        let mut stream = FramedStream::new(self.addr.as_str(), Some(local), CONNECT_TIMEOUT_MS).await?;
-        // Declines the key exchange; see the module note.
-        stream.send(&Message::new()).await?;
+        let mut stream = match &self.route {
+            Route::Direct { addr } => {
+                let local: SocketAddr = (if addr.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" }).parse()?;
+                let mut stream = FramedStream::new(addr.as_str(), Some(local), CONNECT_TIMEOUT_MS).await?;
+                // Declines the key exchange; see the module note.
+                stream.send(&Message::new()).await?;
+                stream
+            }
+            Route::Id { id, server } => crate::rendezvous::dial(server, id).await?,
+        };
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let mut idle_check = tokio::time::interval(Duration::from_secs(5));
         // next_timeout restarts with every select! round, so the idle tick alone would keep a dead link looking alive.

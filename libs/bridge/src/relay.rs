@@ -240,7 +240,7 @@ mod tests {
         let pc_port = pc.local_addr().expect("addr").port();
         let (pointer_tx, mut pointer) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(fake_pc(pc, "pc-pw", pointer_tx));
-        let link = Link::new(format!("127.0.0.1:{pc_port}"), "pc-pw".into(), "Rig agent".into());
+        let link = Link::new(crate::link::Route::direct(&format!("127.0.0.1:{pc_port}")), "pc-pw".into(), "Rig agent".into());
         tokio::spawn(link.clone().run());
         let shared = Arc::new(Shared::new(rigdesk_agent::Events::new(64)));
         let minted = shared.mint();
@@ -275,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_remembered_password_works_on_the_next_connection() {
-        let link = Link::new("127.0.0.1:1".into(), "pc-pw".into(), "Rig agent".into());
+        let link = Link::new(crate::link::Route::direct("127.0.0.1:1"), "pc-pw".into(), "Rig agent".into());
         let shared = Arc::new(Shared::new(rigdesk_agent::Events::new(64)));
         let port = Relay::new(link, shared, "bridge-pw".into()).listen(0).await.expect("listening");
         let mut salts = Vec::new();

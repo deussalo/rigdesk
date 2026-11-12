@@ -7,6 +7,7 @@
 //! attaches, and closes after a quiet spell with no GUI, so the PC shows a RustDesk session only while it is in use.
 //!
 //!   rigdesk-bridge --peer <tailnet name or 100.x address[:port]> --password-file <file> --token-file <file>
+//!   rigdesk-bridge --id <RustDesk ID> --id-server <hbbs host[:port]> --key-file <hbbs public key file> ...
 //!                  [--port 21120] [--journal <file>] [--name "Rig agent"]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
 //!
@@ -14,6 +15,7 @@
 
 mod desk;
 mod keys;
+mod rendezvous;
 mod link;
 mod relay;
 
@@ -27,7 +29,7 @@ const JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 const EVENT_RING: usize = 512;
 
 struct Args {
-    peer: String,
+    route: (link::Route, String),
     password_file: PathBuf,
     token_file: PathBuf,
     port: u16,
@@ -38,6 +40,9 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut peer = None;
+    let mut id = None;
+    let mut id_server = None;
+    let mut key_file = None;
     let mut password_file = None;
     let mut token_file = None;
     let mut port = 21120;
@@ -50,6 +55,9 @@ fn parse_args() -> Result<Args, String> {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
             "--peer" => peer = Some(value()?),
+            "--id" => id = Some(value()?),
+            "--id-server" => id_server = Some(value()?),
+            "--key-file" => key_file = Some(PathBuf::from(value()?)),
             "--password-file" => password_file = Some(PathBuf::from(value()?)),
             "--token-file" => token_file = Some(PathBuf::from(value()?)),
             "--port" => port = value()?.parse().map_err(|_| "--port needs a number".to_string())?,
@@ -65,8 +73,18 @@ fn parse_args() -> Result<Args, String> {
         (None, None) => None,
         _ => return Err("--viewer-port and --viewer-password-file go together".into()),
     };
+    let route = match (peer, id, id_server, key_file) {
+        (Some(peer), None, None, None) => link::Route::direct(&peer),
+        (None, Some(id), Some(host), Some(key_file)) => {
+            let key = read_secret(&key_file, "ID server key")?;
+            link::Route::by_id(rendezvous::parse_id(&id)?, rendezvous::Server::parse(&host, &key)?)
+        }
+        (None, None, None, None) => return Err("--peer, or --id with --id-server and --key-file, is required".into()),
+        (Some(_), _, _, _) => return Err("--peer goes alone; --id, --id-server and --key-file are the other way".into()),
+        _ => return Err("--id, --id-server and --key-file go together".into()),
+    };
     Ok(Args {
-        peer: peer.ok_or("--peer is required")?,
+        route,
         password_file: password_file.ok_or("--password-file is required")?,
         token_file: token_file.ok_or("--token-file is required")?,
         port,
@@ -119,7 +137,8 @@ fn main() {
         }
     };
     runtime.block_on(async move {
-        let link = link::Link::new(args.peer.clone(), password, args.name.clone());
+        let what = args.route.0.label();
+        let link = link::Link::new(args.route, password, args.name.clone());
         tokio::spawn(link.clone().run());
         let journal = match &args.journal {
             Some(path) => Journal::open(path.clone(), JOURNAL_BYTES),
@@ -128,7 +147,7 @@ fn main() {
         let shared = Arc::new(Shared::new(Events::new(EVENT_RING)));
         if let Some((port, password)) = viewer {
             match relay::Relay::new(link.clone(), shared.clone(), password).listen(port).await {
-                Ok(port) => log::info!("rigdesk-bridge: viewers of {} on 127.0.0.1:{port}", args.peer),
+                Ok(port) => log::info!("rigdesk-bridge: viewers of {what} on 127.0.0.1:{port}"),
                 Err(e) => {
                     eprintln!("rigdesk-bridge: cannot listen for viewers on 127.0.0.1:{port}: {e}");
                     std::process::exit(1);
@@ -138,7 +157,7 @@ fn main() {
         let api = Api::hosted(shared, Arc::new(desk::RemoteDesk::new(link)), Arc::new(journal), &bearer);
         match api.serve(args.port).await {
             Ok(port) => {
-                log::info!("rigdesk-bridge: agent API for {} on 127.0.0.1:{port}", args.peer);
+                log::info!("rigdesk-bridge: agent API for {what} on 127.0.0.1:{port}");
                 println!("listening {port}");
             }
             Err(e) => {

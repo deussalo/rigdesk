@@ -54,17 +54,27 @@ type WebAddress = Annotated[str, AfterValidator(_web_address)]
 
 
 class StockRemote(Shape):
-    model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A PC running stock RustDesk with direct IP access on: Rig runs rigdesk-bridge for it, which logs in with the PC's permanent password."})
-    peer: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$"), Field(description="The PC on the tailnet: its MagicDNS name or 100.x address, with :port if not 21118.")]
+    model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A PC running stock RustDesk: Rig runs rigdesk-bridge for it, which logs in with the PC's permanent password, "
+                                                                                 "by direct IP over the tailnet (peer) or by its RustDesk ID through the ID server (id)."})
+    peer: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$")] | None, Field(description="The PC on the tailnet: its MagicDNS name or 100.x address, with :port if not 21118.")] = None
+    id: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{6,32}$")] | None, Field(description="The PC's RustDesk ID, digits without spaces, for a PC registered with the id_server instead of on the tailnet.")] = None
     password_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's RustDesk permanent password.")]
     viewer_port: Annotated[int | None, Field(ge=1, le=65535, description="Where the bridge relays its session to RigDesk GUIs, on loopback (publish it with tailscale serve --tcp); unset, no GUI can attach.")] = None
     viewer_password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the password GUIs log in to the bridge with.")] = None
 
     @model_validator(mode="after")
     def _viewer_whole(self) -> StockRemote:
+        if (self.peer is None) == (self.id is None):
+            raise ValueError("a stock PC has a peer (direct IP over the tailnet) or an id (through the ID server), not both")
         if (self.viewer_port is None) != (self.viewer_password_file is None):
             raise ValueError("viewer_port and viewer_password_file go together")
         return self
+
+
+class IdServer(Shape):
+    model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A self-hosted RustDesk ID server and the public key its PCs were configured with."})
+    host: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$"), Field(description="Where hbbs listens, as host or host:port (21116 by default); its relay is the one hbbs names (-r).")]
+    key_file: Annotated[str, Field(description="A file holding hbbs's public key (id_ed25519.pub), the Key each PC's RustDesk was given.")]
 
 
 class DeskPc(Shape):
@@ -90,6 +100,14 @@ class RigdeskSettings(Shape):
     pcs: Annotated[dict[PcName, DeskPc], Field(default_factory=dict[str, DeskPc], description='Each by name: {"deus": {"url": "https://deus.tail1234.ts.net", "token_file": "~/.rig/rigdesk/deus.token", "client": "acme"}}.')]
     for_fleet: Annotated[bool, Field(description="desk/* is open to every agent, so any agent given a link can join; off, only graphs and agents whose mcp_servers name desk.")] = True
     bridge_bin: Annotated[str, Field(description="The rigdesk-bridge program run for each stock PC: a path, or a name on PATH.")] = "rigdesk-bridge"
+    id_server: Annotated[IdServer | None, Field(description="Our RustDesk ID server (hbbs, with hbbr beside it), through which stock PCs named by id are reached.")] = None
+
+    @model_validator(mode="after")
+    def _ids_have_a_server(self) -> RigdeskSettings:
+        by_id = sorted(name for name, pc in self.pcs.items() if pc.stock is not None and pc.stock.id is not None)
+        if by_id and self.id_server is None:
+            raise ValueError(f"{', '.join(by_id)} named by RustDesk id, but no id_server is set")
+        return self
 
 
 @dataclass
@@ -207,6 +225,7 @@ class Desks:
         self._pcs: dict[str, PcLink] = {}
         self._for_fleet = True
         self._bridge_bin = "rigdesk-bridge"
+        self._id_server: IdServer | None = None
         self._catalog: dict[str, dict[str, Any]] = {}
         self._tools: tuple[Any, ...] = ()
         self._tools_of: object = None
@@ -264,8 +283,9 @@ class Desks:
 
     def _reconcile(self, settings: RigdeskSettings) -> None:
         self._for_fleet = settings.for_fleet
-        moved = settings.bridge_bin != self._bridge_bin
+        moved = (settings.bridge_bin, settings.id_server) != (self._bridge_bin, self._id_server)
         self._bridge_bin = settings.bridge_bin
+        self._id_server = settings.id_server
         for name, link in self._pcs.items():
             spec = settings.pcs.get(name)
             if spec is not None and spec != link.spec and spec.model_copy(update={"assigned": link.spec.assigned}) == link.spec:
@@ -294,10 +314,17 @@ class Desks:
             path.replace(path.with_suffix(".log.1"))
         return open(path, "ab")  # noqa: SIM115
 
+    def _route(self, stock: StockRemote) -> list[str]:
+        """The bridge's arguments for reaching the PC: its tailnet address, or its ID through our ID server."""
+        if stock.peer is not None:
+            return ["--peer", stock.peer]
+        assert stock.id is not None and self._id_server is not None, "settings validation pairs an id with an id_server"
+        return ["--id", stock.id, "--id-server", self._id_server.host, "--key-file", str(Path(self._id_server.key_file).expanduser())]
+
     async def _remote(self, link: PcLink, stock: StockRemote) -> None:
         """Keeps one rigdesk-bridge running for a stock PC, restarting it when it exits; its output goes to bridge-<pc>.log here."""
         argv = [str(Path(self._bridge_bin).expanduser()) if "/" in self._bridge_bin else self._bridge_bin,
-                "--peer", stock.peer, "--password-file", str(Path(stock.password_file).expanduser()),
+                *self._route(stock), "--password-file", str(Path(stock.password_file).expanduser()),
                 "--token-file", str(Path(link.spec.token_file).expanduser()), "--port", str(urlsplit(link.spec.url).port),
                 "--journal", str(self._dir / f"bridge-{link.name}.journal")]
         if stock.viewer_port is not None and stock.viewer_password_file is not None:
