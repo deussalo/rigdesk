@@ -18,7 +18,7 @@ from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import urlsplit
 
 import aiohttp
-from pydantic import AfterValidator, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from core.base import event_log, now_ms, replace_file
 from core.model import AgentId, GraphName, RefusedOutcome, SeatId
@@ -39,6 +39,8 @@ VIEWER_VERBS = frozenset({"mint", "hand", "human", "stop", "block", "unblock", "
 LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
+type Grantee = Annotated[str, StringConstraints(pattern=r"^(agent|graph):[A-Za-z0-9_.:-]{1,128}$")]
+GRANTS_DOC = "grants"
 
 
 def _web_address(url: str) -> str:
@@ -82,9 +84,7 @@ class DeskPc(Shape):
     url: Annotated[WebAddress, Field(description="Its agent API, published by tailscale serve: https://<pc>.<tailnet>.ts.net; for a stock PC, http://127.0.0.1:<port> where Rig runs rigdesk-bridge.")]
     token_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's agent-API token.")]
     client: Annotated[str, Field(description="The client this PC belongs to.")] = ""
-    stock: Annotated[StockRemote | None, Field(description="Set for a PC running stock RustDesk instead of RigDesk.")] = None
-    assigned: Annotated[list[str], Field(description='Who holds a standing grant to this stock PC, as "agent:<id>" or "graph:<name>": '
-                                                     "they join on their first desk call, with no share link, and again after any restart.")] = []
+    stock: Annotated[StockRemote | None, Field(description="Set for a PC running stock RustDesk instead of RigDesk; who may act on it with no share link is set on the PCs page.")] = None
 
     @model_validator(mode="after")
     def _stock_is_local(self) -> DeskPc:
@@ -128,6 +128,12 @@ class DeskRefused(Exception):
     """A call that cannot go through, with the words the agent reads."""
 
 
+class Grants(BaseModel):
+    """Who holds a standing grant to each stock PC: rigdesk's own doc, written only by Desks.assign and Desks.unassign, on an operator's act."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    pcs: dict[PcName, tuple[Grantee, ...]] = {}
+
+
 @dataclass
 class PcLink:
     name: str
@@ -147,8 +153,8 @@ class PcHolder(TypedDict):
     graph: str
 
 
-# One RigDesk PC as another plugin reads it through the provision rigdesk.pcs. assigned is its standing grant (plugins.rigdesk.pcs.<name>.assigned,
-# "agent:<id>" or "graph:<name>"), which only a stock PC honours; held_by is the agent that owns its session now, by a link or the grant.
+# One RigDesk PC as another plugin reads it through the provision rigdesk.pcs. assigned is who holds a standing grant to it ("agent:<id>" or
+# "graph:<name>", in rigdesk's grants doc), which only a stock PC has; held_by is the agent that owns its session now, by a link or the grant.
 # The pcs plugin copies PcHolder and PcEntry exactly and matches the schema, so no docstrings and never change one side alone.
 class PcEntry(TypedDict):
     name: str
@@ -160,7 +166,7 @@ class PcEntry(TypedDict):
     held_by: PcHolder | None
 
 
-def _grants(assigned: list[str], agent: str, graph: str) -> bool:
+def _grants(assigned: tuple[str, ...], agent: str, graph: str) -> bool:
     return bool({f"agent:{agent}", f"graph:{graph}"} & set(assigned))
 
 
@@ -234,6 +240,9 @@ class Desks:
         self._last: dict[str, int] = {}
         self._http: aiohttp.ClientSession | None = None
         self._watch: asyncio.Task[None] | None = None
+        self._grants = Grants()
+        self._grants_revision = 0
+        self._granting = asyncio.Lock()
         self._read_state()
 
     # --- state kept across restarts ---
@@ -260,6 +269,7 @@ class Desks:
     # --- lifecycle ---
 
     async def settle(self) -> None:
+        await self._read_grants()
         self._http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10))
         self._watch = TASKS.spawn("rigdesk-settings", self._watching())
 
@@ -276,6 +286,7 @@ class Desks:
             try:
                 settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
                 self._reconcile(settings)
+                await self._prune_grants()
                 await self._idle_leaves()
             except Exception as failed:  # noqa: BLE001
                 _LOG.warning("rigdesk_settings_unread", f"RigDesk settings could not be read, PCs stay as they are: {type(failed).__name__}: {failed}")
@@ -286,13 +297,6 @@ class Desks:
         moved = (settings.bridge_bin, settings.id_server) != (self._bridge_bin, self._id_server)
         self._bridge_bin = settings.bridge_bin
         self._id_server = settings.id_server
-        for name, link in self._pcs.items():
-            spec = settings.pcs.get(name)
-            if spec is not None and spec != link.spec and spec.model_copy(update={"assigned": link.spec.assigned}) == link.spec:
-                link.spec = spec
-                held = self._sessions.get(name)
-                if held is not None and held.via == "assigned" and not _grants(spec.assigned, held.agent, held.graph):
-                    TASKS.spawn(f"rigdesk-unassign-{name}", self._unassigned(name))
         for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
             link = self._pcs.pop(name)
             for task in (link.task, link.remote):
@@ -304,6 +308,63 @@ class Desks:
                 if spec.stock is not None:
                     link.remote = TASKS.spawn(f"rigdesk-bridge-{name}", self._remote(link, spec.stock))
                 link.task = TASKS.spawn(f"rigdesk-{name}", self._held(link))
+
+    # --- standing grants, rigdesk's own fact ---
+
+    async def _read_grants(self) -> None:
+        """Grants are source facts: a doc that cannot be read stops the plugin, rather than starting with every grant gone."""
+        doc = await self.host.docs.get(GRANTS_DOC)
+        if doc is None:
+            return
+        try:
+            self._grants = Grants.model_validate(doc.body)
+        except ValidationError as broken:
+            raise RuntimeError(f"rigdesk's grants doc (revision {doc.revision}) is unreadable: {broken}") from broken
+        self._grants_revision = doc.revision
+
+    async def _save_grants(self, grants: Grants) -> None:
+        """Written before it is applied, and only over the revision read: a second writer is refused loudly, never overwritten."""
+        doc = await self.host.docs.put(GRANTS_DOC, grants.model_dump(mode="json"), expect=self._grants_revision)
+        self._grants, self._grants_revision = grants, doc.revision
+
+    def granted(self, pc: str) -> tuple[str, ...]:
+        return self._grants.pcs.get(pc, ())
+
+    async def assign(self, pc: str, grantee: str) -> bool:
+        """Grants one agent or graph a standing grant to a stock PC; False when it held one already."""
+        async with self._granting:
+            link = self._pcs.get(pc)
+            if link is None:
+                raise DeskRefused(f"no RigDesk PC named {pc} is set up in Rig")
+            if link.spec.stock is None:
+                raise DeskRefused(f"{pc} runs RigDesk: it is shared through its viewer with a share link, and takes no standing grant")
+            held = self.granted(pc)
+            if grantee in held:
+                return False
+            await self._save_grants(Grants(pcs=self._grants.pcs | {pc: (*held, grantee)}))
+            return True
+
+    async def unassign(self, pc: str, grantee: str) -> bool:
+        """Takes one grant away; a session held through it ends now. False when there was none."""
+        async with self._granting:
+            held = self.granted(pc)
+            if grantee not in held:
+                return False
+            left = tuple(each for each in held if each != grantee)
+            await self._save_grants(Grants(pcs={name: grantees for name, grantees in (self._grants.pcs | {pc: left}).items() if grantees}))
+        session = self._sessions.get(pc)
+        if session is not None and session.via == "assigned" and not _grants(left, session.agent, session.graph):
+            await self._unassigned(pc)
+        return True
+
+    async def _prune_grants(self) -> None:
+        """A grant exists only on a stock PC set up in Rig: one removed from settings, or no longer stock, loses its grants."""
+        async with self._granting:
+            kept = {pc: grantees for pc, grantees in self._grants.pcs.items() if (link := self._pcs.get(pc)) is not None and link.spec.stock is not None}
+            if kept != self._grants.pcs:
+                gone = sorted(set(self._grants.pcs) - set(kept))
+                await self._save_grants(Grants(pcs=kept))
+                _LOG.warning("rigdesk_grants_pruned", f"RigDesk: {', '.join(gone)} left Rig's settings or stopped being stock, so their grants were removed", pcs=", ".join(gone))
 
     # --- rigdesk-bridge, for a stock PC ---
 
@@ -438,7 +499,7 @@ class Desks:
         self._boots[pc], self._last[pc] = boot, 0
         held = self._sessions.pop(pc, None)
         await asyncio.to_thread(self._write_state)
-        if known and held is not None and self.assigned_pc(held.agent, held.graph) != pc:
+        if known and held is not None and not _grants(self.granted(pc), held.agent, held.graph):
             await self._tell(held, f"RigDesk {pc}: RigDesk restarted (on the PC or the bridge), so your session there ended. Ask the human for a new link to join again.", f"boot:{boot}")
 
     async def _listed(self, link: PcLink) -> None:
@@ -592,7 +653,7 @@ class Desks:
 
     def assigned_pc(self, agent: str, graph: str) -> str | None:
         """The stock PC this agent, or its graph, holds a standing grant to."""
-        return next((name for name, link in self._pcs.items() if link.spec.stock is not None and _grants(link.spec.assigned, agent, graph)), None)
+        return next((name for name, link in self._pcs.items() if link.spec.stock is not None and _grants(self.granted(name), agent, graph)), None)
 
     async def _unassigned(self, pc: str) -> None:
         """The operator took the grant away: its session ends now, and the agent is told by the revoke event."""
@@ -697,7 +758,7 @@ class Desks:
         for name, link in sorted(self._pcs.items()):
             held = self._sessions.get(name)
             rows.append(PcEntry(name=name, client=link.spec.client, stock=link.spec.stock is not None, state=link.state, why=link.remote_why or link.why,
-                                assigned=tuple(link.spec.assigned), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph)))
+                                assigned=self.granted(name), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph)))
         return tuple(rows)
 
     def session_of(self, graph: str, agent: str) -> dict[str, Any] | None:
@@ -710,4 +771,4 @@ class Desks:
                 "since_ms": standing.get("since_ms"), "joined_ms": held.since_ms}
 
 
-NATIVE = frozenset({"join", "leave", "attachment"})
+NATIVE = frozenset({"join", "leave", "attachment", "request"})

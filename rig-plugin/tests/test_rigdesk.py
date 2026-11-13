@@ -67,41 +67,112 @@ def test_stop_interrupts_the_owning_agents_turn_but_a_replayed_stop_only_tells_i
     assert done == [("interrupt", "interrupt"), ("told", True), ("told", True)]
 
 
-def test_an_assigned_agent_or_graph_holds_a_standing_grant_to_its_stock_pc_only() -> None:
+class _Docs:
+    """Rig's docs store for one plugin: a body and its revision per key, refusing a put over a revision it no longer holds."""
+    def __init__(self) -> None:
+        self.held: dict[str, tuple[int, dict]] = {}
+
+    async def get(self, key: str):
+        found = self.held.get(key)
+        return None if found is None else SimpleNamespace(key=key, revision=found[0], body=found[1])
+
+    async def put(self, key: str, body: dict, *, expect: int | None = None):
+        current = self.held.get(key, (0, {}))[0]
+        if expect is not None and expect != current:
+            raise RuntimeError(f"revision_conflict: {key} is at {current}, not {expect}")
+        self.held[key] = (current + 1, body)
+        return SimpleNamespace(key=key, revision=current + 1, body=body)
+
+
+def _granting(state: str, docs: _Docs) -> Desks:
     from rigdesk.desks import StockRemote
-    with tempfile.TemporaryDirectory() as state:
-        desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
-        stock = StockRemote(peer="deus.tail1234.ts.net", password_file="/dev/null")
-        desks._pcs["deus"] = PcLink("deus", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock, assigned=["agent:a1", "graph:clients"]))
-        desks._pcs["front"] = PcLink("front", DeskPc(url="https://front.tail1234.ts.net", token_file="/dev/null", assigned=["agent:a2"]))
-        assert desks.assigned_pc("a1", "g") == "deus"
-        assert desks.assigned_pc("anyone", "clients") == "deus"
-        assert desks.assigned_pc("a3", "g") is None
-        assert desks.assigned_pc("a2", "g") is None, "a RigDesk PC shares through its viewer only"
+    desks = Desks(SimpleNamespace(state_dir=Path(state), docs=docs))  # type: ignore[arg-type]
+    stock = StockRemote(peer="deus.tail1234.ts.net", password_file="/dev/null")
+    desks._pcs["deus"] = PcLink("deus", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
+    desks._pcs["front"] = PcLink("front", DeskPc(url="https://front.tail1234.ts.net", token_file="/dev/null"))
+    return desks
+
+
+def test_an_assigned_agent_or_graph_holds_a_standing_grant_to_its_stock_pc_only_and_keeps_it_across_a_restart() -> None:
+    from rigdesk.desks import DeskRefused
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            docs = _Docs()
+            desks = _granting(state, docs)
+            assert await desks.assign("deus", "agent:a1") and await desks.assign("deus", "graph:clients")
+            assert not await desks.assign("deus", "agent:a1"), "a grant held already changes nothing"
+            try:
+                await desks.assign("front", "agent:a2")
+            except DeskRefused:
+                pass
+            else:
+                raise AssertionError("a RigDesk PC took a standing grant")
+            assert desks.assigned_pc("a1", "g") == "deus"
+            assert desks.assigned_pc("anyone", "clients") == "deus"
+            assert desks.assigned_pc("a3", "g") is None
+            again = _granting(state, docs)
+            await again._read_grants()
+            assert again.granted("deus") == ("agent:a1", "graph:clients"), "grants outlive the plugin"
+
+    asyncio.run(run())
+
+
+def test_a_second_writer_is_refused_and_an_unreadable_grants_doc_stops_the_plugin() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            docs = _Docs()
+            desks = _granting(state, docs)
+            await docs.put("grants", {"pcs": {"deus": ["agent:other"]}})
+            try:
+                await desks.assign("deus", "agent:a1")
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("a grant overwrote one written behind it")
+            assert desks.granted("deus") == ()
+            await docs.put("grants", {"pcs": {"deus": "agent:a1"}})
+            try:
+                await _granting(state, docs)._read_grants()
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("an unreadable grants doc was read as no grants")
+
+    asyncio.run(run())
 
 
 def test_taking_the_grant_away_ends_the_assigned_session_at_once() -> None:
-    from rigdesk.desks import RigdeskSettings, StockRemote
     ended: list[str] = []
 
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
-            desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
-            stock = StockRemote(peer="deus.tail1234.ts.net", password_file="/dev/null")
-            spec = DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock, assigned=["agent:a1"])
-            desks._pcs["deus"] = PcLink("deus", spec)
+            desks = _granting(state, _Docs())
+            await desks.assign("deus", "agent:a1")
             desks._sessions["deus"] = Held("deus", "a1", "g", "n", "A", "s", 0, "assigned")
 
             async def unassigned(pc: str) -> None:
                 ended.append(pc)
             desks._unassigned = unassigned  # type: ignore[method-assign]
-            desks._reconcile(RigdeskSettings(pcs={"deus": spec.model_copy(update={"assigned": []})}))
-            await asyncio.sleep(0.01)
-            assert desks._pcs["deus"].spec.assigned == [], "the bridge keeps running; only the grant changed"
+            assert await desks.unassign("deus", "agent:a1")
+            assert desks.granted("deus") == ()
 
     asyncio.run(run())
     assert ended == ["deus"]
 
+
+def test_a_pc_gone_from_settings_or_no_longer_stock_loses_its_grants() -> None:
+    from rigdesk.desks import RigdeskSettings
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = _granting(state, _Docs())
+            await desks.assign("deus", "agent:a1")
+            desks._reconcile(RigdeskSettings(pcs={"front": desks._pcs["front"].spec}))
+            await desks._prune_grants()
+            assert desks.granted("deus") == ()
+
+    asyncio.run(run())
 
 
 def test_an_assigned_session_idle_five_minutes_leaves_the_pc_but_a_link_session_stays() -> None:

@@ -117,11 +117,17 @@ Known limits against a RigDesk PC:
 * `desk/join(link)` — the human clicks **Share with agent** in the viewer and gives the agent the
   `rigdesk://<pc>/<grant>#<secret>` link. Joining claims the PC's session for that agent alone; a
   link works once.
-* **Standing grant (stock PCs).** `plugins.rigdesk.pcs.<pc>.assigned` lists `"agent:<id>"` or `"graph:<name>"`. Such an
-  agent needs no link: its first `desk/<tool>` call joins the PC (the plugin mints and claims on the bridge itself), and
-  so does its next call after the bridge or Rig restarts. Stop still blocks it; an agent sharing through a link at the
-  time is not displaced. Changing the list does not restart the bridge. A session held through the grant ends after
+* **Standing grant (stock PCs).** rigdesk keeps who holds one, `"agent:<id>"` or `"graph:<name>"` per PC, in its own
+  `grants` doc in Rig's store, and alone writes it: on the PCs page (the `pcs` plugin, through the provision
+  `rigdesk.assign`) or on the operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
+  link: its first `desk/<tool>` call joins the PC (the plugin mints and claims on the bridge itself), and so does its
+  next call after the bridge or Rig restarts. Stop still blocks it; an agent sharing through a link at the time is not
+  displaced. A change applies at once and does not restart the bridge; taking a grant away ends a session held through
+  it. A PC removed from settings, or no longer stock, loses its grants. A session held through the grant ends after
   5 minutes without a desk call, so other assigned agents can take the PC; the agent is told, and its next call rejoins.
+* `desk/request(pc, why)` — asks the operator for a standing grant to a stock PC. Refused at once for an unknown PC,
+  a RigDesk PC, or one already granted to the caller; otherwise the operator gets an Accept/Deny, and on Accept the
+  caller is granted the PC and told so.
 * `desk/<tool>` — the PC's own tools (screenshot, snapshot, click, type, scroll, move, drag, key,
   shortcut, wait, app, powershell, clipboard), sent to the PC the calling agent joined. Images come
   back as PNG files under the plugin's state directory.

@@ -8,17 +8,18 @@ import os
 from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
-from core.base import ToolAnswer, View, replace_file
+from core.ask_said import Confirmed, Then
+from core.base import ToolAnswer, View, new_id, replace_file
 from core.boundary import BranchTool, NoParams, Params, StatusLine
 from core.kernel_api import RigReach, mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.endpoint import Request, endpoint
-from core.model import RefusedOutcome
+from core.model import GraphName, NodeId, Refused, RefusedOutcome, SeatId
 from core.mcp_call import Answer, Call, ToolDef, ToolInput, gloss_of
 from core.plugin_host import Live, PluginHost
 from core.provided import Provision, provider
@@ -37,7 +38,36 @@ UNSHARED = PluginCode(f"{ID}.no_session")
 # The pcs plugin copies PcEntry and PcHolder verbatim; Provided.ask matches the rendered schema exactly, docstring included, so never change one side alone.
 PCS = Provision("rigdesk.pcs", TypeAdapter(type(None)), TypeAdapter(tuple[PcEntry, ...]))
 NO_SESSION = ("you own no RigDesk session and no PC is assigned to you: ask the human at the PC for a share link (Share with agent in the viewer) "
-              "and call desk/join with it, or ask the operator to assign you a PC on the PCs page")
+              "and call desk/join with it, or ask the operator for a stock PC with desk/request(pc, why)")
+
+
+class GrantChange(TypedDict):
+    """One grant the pcs plugin's page gives or takes away, for the operator: grantee is "agent:<id>" or "graph:<name>"."""
+    pc: str
+    grantee: str
+    granted: bool
+
+
+class GrantDone(TypedDict):
+    changed: bool
+
+
+class GrantRefused(TypedDict):
+    why: str
+
+
+# The pcs plugin copies GrantChange, GrantDone and GrantRefused verbatim, as it does PcEntry.
+ASSIGN = Provision("rigdesk.assign", TypeAdapter(GrantChange), TypeAdapter(GrantDone | GrantRefused))
+REQUEST_CONFIRMED = Provision("rigdesk.request_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
+
+
+class Requested(TypedDict):
+    pc: str
+    agent: str
+    graph: str
+
+
+REQUESTED: TypeAdapter[Requested] = TypeAdapter(Requested)
 
 
 class JoinInput(ToolInput):
@@ -46,6 +76,11 @@ class JoinInput(ToolInput):
 
 class LeaveInput(ToolInput):
     pass
+
+
+class RequestInput(ToolInput):
+    pc: str = Field(description="The stock RustDesk PC you need, by its name in Rig.")
+    why: str = Field(min_length=1, max_length=1000, description="What you need it for, in a sentence or two; the operator reads it before deciding.")
 
 
 class AttachmentInput(ToolInput):
@@ -96,6 +131,49 @@ async def _leave(desks: Desks, call: Call, _given: LeaveInput) -> Answer:
     return {"pc": held.pc, "left": True, "pc_had_session": left}
 
 
+async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
+    agent, graph, _, title = _who(call)
+    known = {entry["name"]: entry for entry in desks.entries()}
+    entry = known.get(given.pc)
+    if entry is None:
+        return call.refused(REFUSED, f"no RigDesk PC named {given.pc} is set up in Rig; those that are: {', '.join(sorted(known)) or 'none'}")
+    if not entry["stock"]:
+        return call.refused(REFUSED, f"{given.pc} runs RigDesk: it takes no standing grant; ask the human at the PC for a share link and call desk/join with it")
+    if {f"agent:{agent}", f"graph:{graph}"} & set(entry["assigned"]):
+        return call.refused(REFUSED, f"{given.pc} is already assigned to you: call any desk/<tool> and you join it")
+    seat, asked = call.contract.place.seat, new_id("desk")
+    reason = (f"{title} ({agent}, in {graph}) asks for a standing grant to RigDesk PC {given.pc}:\n\n{given.why.strip()}\n\n"
+              "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the PCs page.")[:2000]
+    state = await call.host.confirm(seat, asked, reason, call.kernel.activation_id,
+                                    Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph}))
+    return {"pc": given.pc, "ask": asked, "state": state,
+            "said": "Nothing is granted yet: the operator is asked to Accept, and the decision arrives as your next input. Once accepted, any desk/<tool> call joins the PC."}
+
+
+async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
+    """The operator's Accept: the agent that asked is granted the PC, if it still stands at its seat and the PC is still stock."""
+    given = REQUESTED.validate_python(asked["given"])
+    seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
+    identity = await host.roster.identity(seat)
+    if identity is None or identity.agent != given["agent"] or seat in await host.roster.closed((seat,)):
+        raise Refused(REFUSED, f"{given['agent']} no longer stands at {seat.graph}/{seat.node}, so {given['pc']} was not assigned")
+    try:
+        changed = await host.live(Desks).assign(given["pc"], f"agent:{given['agent']}")
+    except DeskRefused as refused:
+        raise Refused(REFUSED, f"{refused}; nothing was assigned") from refused
+    held = "Assigned" if changed else "Already assigned"
+    return f"{held} {given['pc']} to you: any desk/<tool> call joins it, with no share link, until the operator unassigns it on the PCs page."
+
+
+async def _assign(host: PluginHost, change: GrantChange) -> GrantDone | GrantRefused:
+    desks = host.live(Desks)
+    try:
+        changed = await (desks.assign if change["granted"] else desks.unassign)(change["pc"], change["grantee"])
+    except DeskRefused as refused:
+        return GrantRefused(why=str(refused))
+    return GrantDone(changed=changed)
+
+
 async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answer:
     agent, graph, _, _ = _who(call)
     held = desks.held_by(agent, graph)
@@ -138,6 +216,8 @@ def _native[I: ToolInput](desks: Desks, tool: str, words: str, shape: type[I], h
 def _built(desks: Desks) -> tuple[ToolDef, ...]:
     return (_native(desks, "join", "Join a RigDesk PC with the share link its human gave you; you then own its session alone. The link works once.", JoinInput, _join),
             _native(desks, "leave", "Leave the RigDesk PC you joined; its session ends.", LeaveInput, _leave),
+            _native(desks, "request", "Ask the operator for a standing grant to a stock RustDesk PC: once they accept, your desk calls join it with no share link.",
+                    RequestInput, _request),
             _native(desks, "attachment", "An image the human sent you from the RigDesk viewer, as a PNG file you can read.", AttachmentInput, _attachment, read_only=True),
             *(_passed(desks, name, listed) for name, listed in desks.catalog().items() if name not in NATIVE))
 
@@ -291,6 +371,6 @@ CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, status=_status,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN},
-    provisions=(provider(PCS, _provided),),
+    provisions=(provider(PCS, _provided), provider(ASSIGN, _assign), provider(REQUEST_CONFIRMED, _request_confirmed)),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer)))
