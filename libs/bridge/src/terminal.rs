@@ -3,7 +3,8 @@
 //! time limit, its output kept in a private temp directory, then prints the exit status and that output in base64
 //! between markers, and the shell exits. Base64 carries the output whole through the PC's pseudo-terminal, which wraps
 //! and, on Windows, redraws what it shows; the runner is typed only as base64, so the echo of the typed lines never
-//! holds a marker.
+//! holds a marker. On Windows the runner keeps the report's base64 in its temp directory a while, and report lines the
+//! terminal lost are fetched by number in another terminal.
 
 use std::time::Duration;
 
@@ -40,10 +41,14 @@ const LINE: usize = 1000;
 /// The report's base64 comes in numbered lines of this many characters, narrower than the terminal: Windows' console
 /// redraws wrapped lines as it scrolls, repeating parts of them, so each line is taken once, by its number and length.
 const REPORT_LINE: usize = 152;
-/// Windows' console loses some of a long report's lines as it scrolls (seen on deus: line 18 of 252, at 20000 lines of
-/// output); the PowerShell runner prints lines named back to it again, for this many rounds of at most `REPAIR_ASK` lines.
+/// Stock RustDesk 1.4.5 on Windows drops terminal output when its channel is full, and stops sending a long report while
+/// the shell that printed it lives on (seen on deus: line 18 of 252 lost; a runner waiting after its report stalled at
+/// about 20 KB). So the PowerShell runner exits after its report, and lost lines are fetched again from the base64 it
+/// keeps, in another terminal each round, for this many rounds of at most `REPAIR_ASK` lines.
 const REPAIR_ROUNDS: usize = 5;
 const REPAIR_ASK: usize = 60;
+/// How long the PowerShell runner keeps the report's base64 for lost lines to be fetched again.
+const KEPT_SECS: u64 = 300;
 
 /// The shell RustDesk opens: PowerShell on Windows, the user's POSIX shell elsewhere.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,9 +67,9 @@ impl Shell {
     }
 }
 
-/// The lines typed at the prompt, each followed by Enter: the runner in base64 chunks, then the line that runs it.
-pub fn typed_lines(shell: Shell, command: &str, limit: Duration, nonce: &str) -> Vec<String> {
-    let encoded = B64.encode(runner(shell, command, limit, nonce));
+/// The lines typed at the prompt, each followed by Enter: a script in base64 chunks, then the line that runs it.
+fn typed_lines(shell: Shell, script: &str) -> Vec<String> {
+    let encoded = B64.encode(script);
     let chunks: Vec<&str> = encoded.as_bytes().chunks(LINE).map(|c| std::str::from_utf8(c).unwrap_or_default()).collect();
     let mut lines = Vec::with_capacity(chunks.len() + 2);
     match shell {
@@ -108,7 +113,7 @@ fn runner(shell: Shell, command: &str, limit: Duration, nonce: &str) -> String {
                 .replace("@HEAD@", &HEAD_PART.to_string())
                 .replace("@TAIL@", &TAIL_PART.to_string())
                 .replace("@LINE@", &REPORT_LINE.to_string())
-                .replace("@ROUNDS@", &REPAIR_ROUNDS.to_string())
+                .replace("@KEPT@", &KEPT_SECS.to_string())
                 .replace("@NONCE@", nonce)
         }
     }
@@ -146,11 +151,13 @@ rm -rf "$d"
 
 // The command runs in a fresh PowerShell (see `shell::POWERSHELL_WRAPPER`) from a file in the user's own temp directory,
 // behind cmd, which writes its output and errors to one file in the order they came. Over its limit, its whole process
-// tree is ended. After the report, the runner reads up to @ROUNDS@ lines naming report lines the terminal lost, such as
-// `h18 t5`, and prints each again as `~h18~<base64>`, then the end marker; an empty line or `ok` ends it.
+// tree is ended. The runner sweeps reports earlier runners kept past their time, and keeps its own report's two parts
+// in files `h` and `t` for `REFETCH_RUNNER`, with a hidden PowerShell set to remove them.
 const POWERSHELL_RUNNER: &str = r##"try {
 $ErrorActionPreference = 'Stop'
-$d = Join-Path ([IO.Path]::GetTempPath()) 'rig-@NONCE@'
+$tmp = [IO.Path]::GetTempPath()
+Get-ChildItem $tmp -Directory -Filter 'rig-*' -EA 0 | Where-Object { (Test-Path (Join-Path $_.FullName 'h')) -and $_.LastWriteTime -lt (Get-Date).AddSeconds(-@KEPT@) } | Remove-Item -Recurse -Force -EA 0
+$d = Join-Path $tmp 'rig-@NONCE@'
 New-Item -ItemType Directory -Path $d -Force | Out-Null
 [IO.File]::WriteAllBytes("$d\c.ps1", [Convert]::FromBase64String('@COMMAND@'))
 [IO.File]::WriteAllText("$d\w.ps1", @'
@@ -176,7 +183,12 @@ $top = "#RIG@NONCE@.$s.$t.$n#"
 $m = [Text.Encoding]::UTF8.GetBytes(($_ | Out-String))
 $top = "#RIG@NONCE@.x.0.$($m.Length)#"; $h = [Convert]::ToBase64String($m); $tl = ''
 }
-if ($d) { Remove-Item -Recurse -Force $d -EA 0 }
+try {
+  Remove-Item "$d\o", "$d\c.ps1", "$d\w.ps1" -Force -EA 0
+  [IO.File]::WriteAllText("$d\h", $h); [IO.File]::WriteAllText("$d\t", $tl)
+  $x = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("Start-Sleep @KEPT@; Remove-Item -Recurse -Force -LiteralPath '$d'"))
+  $null = Start-Process -FilePath $exe -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $x"
+} catch { if ($d) { Remove-Item -Recurse -Force $d -EA 0 } }
 function Lines($b64) {
   for ($i = 0; $i * @LINE@ -lt $b64.Length; $i++) { [Console]::Out.WriteLine('~' + $i + '~' + $b64.Substring($i * @LINE@, [Math]::Min(@LINE@, $b64.Length - $i * @LINE@))) }
 }
@@ -186,27 +198,15 @@ Lines $h
 [Console]::Out.WriteLine('#RIG@NONCE@.tail#')
 Lines $tl
 [Console]::Out.WriteLine('#RIG@NONCE@.end#')
-function Ask {
-  $q = ''; $by = [DateTime]::Now.AddSeconds(60)
-  while ([DateTime]::Now -lt $by) {
-    while ([Console]::KeyAvailable) { $c = [Console]::ReadKey($true); if ($c.Key -eq 'Enter') { return $q }; $q += $c.KeyChar }
-    Start-Sleep -Milliseconds 50
-  }
-  ''
-}
-for ($k = 0; $k -lt @ROUNDS@; $k++) {
-  $q = Ask
-  if (-not $q -or $q -eq 'ok') { break }
-  foreach ($w in ($q -split ' ' | Where-Object { $_.Length -gt 1 })) {
-    $b = if ($w[0] -eq 'h') { $h } elseif ($w[0] -eq 't') { $tl } else { '' }
-    $i = 0
-    if ($b -and [int]::TryParse($w.Substring(1), [ref]$i) -and $i * @LINE@ -lt $b.Length) {
-      [Console]::Out.WriteLine('~' + $w[0] + $i + '~' + $b.Substring($i * @LINE@, [Math]::Min(@LINE@, $b.Length - $i * @LINE@)))
-    }
-  }
-  [Console]::Out.WriteLine('#RIG@NONCE@.end#')
-}
 "##;
+
+// Prints report lines again from the files the runner kept, each as `~h18~<base64>`, then the end marker. The stock
+// smoke test runs this file too.
+const REFETCH_RUNNER: &str = include_str!("refetch.ps1");
+
+fn refetch_runner(nonce: &str, ask: &str) -> String {
+    REFETCH_RUNNER.replace("@NONCE@", nonce).replace("@ASK@", ask).replace("@LINE@", &REPORT_LINE.to_string())
+}
 
 /// What the terminal showed, with escape sequences, control characters and whitespace taken out: the runner's report
 /// survives this whole, wherever the terminal wrapped or redrew it.
@@ -233,14 +233,14 @@ impl Part {
 /// Why a complete report gave no answer.
 #[derive(Debug, PartialEq)]
 enum Unread {
-    /// These report lines never showed whole; the PowerShell runner prints them again when named.
+    /// These report lines never showed whole; on Windows they are fetched again.
     Missing(Vec<(Part, usize)>),
     /// Anything else, said as the answer.
     Failed(String),
 }
 
 impl Unread {
-    /// The line typed back to the runner to ask for the missing lines.
+    /// The report lines to fetch again, as `REFETCH_RUNNER` takes them.
     fn ask(lines: &[(Part, usize)]) -> String {
         lines.iter().take(REPAIR_ASK).map(|(part, n)| format!("{}{n}", part.tag())).collect::<Vec<_>>().join(" ")
     }
@@ -382,32 +382,67 @@ const CLOSED_RETRIES: [Duration; 3] = [Duration::from_millis(500), Duration::fro
 
 /// Run one command in a new terminal on the PC and answer what it printed and how it ended.
 pub async fn run(link: &Link, asked: &Asked) -> Result<Called, String> {
+    let nonce = format!("{:016x}", hbb_common::rand::random::<u64>());
+    let (command, limit) = (asked.command.clone(), asked.timeout);
+    let open = format!("#RIG{nonce}.");
+    let (shell, mut shown) =
+        session(link, &nonce, &open, limit + REPORT_GRACE, &|shell| runner(shell, &command, limit, &nonce)).await?;
+    for round in 0..=REPAIR_ROUNDS {
+        match report(&shown, &nonce, limit) {
+            None => return Err(format!("the PC's shell ended before the command reported back; the terminal last showed:\n{}", last_shown(&shown))),
+            Some(Ok((printed, ended))) => return shell::answer(&printed, ended),
+            Some(Err(Unread::Missing(lines))) if shell == Shell::PowerShell && round < REPAIR_ROUNDS => {
+                let ask = Unread::ask(&lines);
+                log::info!("terminal to {} lost {} report lines; fetching them again ({})", link.label(), lines.len(), round + 1);
+                match session(link, &nonce, "~", REPORT_GRACE, &|_| refetch_runner(&nonce, &ask)).await {
+                    Ok((_, again)) => {
+                        shown.push(b'\n');
+                        shown.extend_from_slice(&again);
+                    }
+                    Err(why) => return Err(format!("{}; fetching them again failed: {why}", Unread::Missing(lines).said())),
+                }
+            }
+            Some(Err(unread)) => return Err(unread.said()),
+        }
+    }
+    unreachable!("the last round answers")
+}
+
+/// One terminal on the PC that runs a script: answers the shell and all the terminal showed, up to the end marker. Waits
+/// `wait` after typing, and `REPORT_GRACE` past the last output once `begun` shows. A connection the PC drops before
+/// anything was typed is tried again.
+async fn session(link: &Link, nonce: &str, begun: &str, wait: Duration, script: &dyn Fn(Shell) -> String) -> Result<(Shell, Vec<u8>), String> {
     let mut waits = CLOSED_RETRIES.iter();
     loop {
         let mut typed = false;
-        match attempt(link, asked, &mut typed).await {
+        match attempt(link, nonce, begun, wait, script, &mut typed).await {
             Err(why) if !typed && (why == CLOSED || why.starts_with(BROKEN)) => match waits.next() {
-                Some(wait) => {
-                    log::info!("terminal to {} lost before the command was typed ({why}); trying again", link.label());
-                    sleep(*wait).await
+                Some(pause) => {
+                    log::info!("terminal to {} lost before anything was typed ({why}); trying again", link.label());
+                    sleep(*pause).await
                 }
-                None => return Err(format!("{why}, {} times before the command was typed", CLOSED_RETRIES.len() + 1)),
+                None => return Err(format!("{why}, {} times before anything was typed", CLOSED_RETRIES.len() + 1)),
             },
             done => return done,
         }
     }
 }
 
-async fn attempt(link: &Link, asked: &Asked, typed: &mut bool) -> Result<Called, String> {
+async fn attempt(
+    link: &Link,
+    nonce: &str,
+    begun: &str,
+    wait: Duration,
+    script: &dyn Fn(Shell) -> String,
+    typed: &mut bool,
+) -> Result<(Shell, Vec<u8>), String> {
     let mut stream = link.dial().await.map_err(|e| format!("cannot reach the PC at {}: {e}", link.label()))?;
-    let platform = log_in(link, &mut stream).await?;
+    let shell = Shell::of(&log_in(link, &mut stream).await?);
     send(&mut stream, &terminal(terminal_action::Union::Open(OpenTerminal { terminal_id: TERMINAL_ID, rows: ROWS, cols: COLS, ..Default::default() })))
         .await?;
-    let nonce = format!("{:016x}", hbb_common::rand::random::<u64>());
-    let result = converse(&mut stream, Shell::of(&platform), asked, &nonce, typed).await;
+    let shown = converse(&mut stream, &typed_lines(shell, &script(shell)), nonce, begun, wait, typed).await;
     let _ = send(&mut stream, &terminal(terminal_action::Union::Close(CloseTerminal { terminal_id: TERMINAL_ID, ..Default::default() }))).await;
-    let (printed, ended) = result?;
-    shell::answer(&printed, ended)
+    Ok((shell, shown?))
 }
 
 /// The terminal login; answers the PC's platform.
@@ -432,25 +467,15 @@ async fn log_in(link: &Link, stream: &mut FramedStream) -> Result<String, String
     }
 }
 
-async fn type_line(stream: &mut FramedStream, line: &str) -> Result<(), String> {
-    let data = TerminalData { terminal_id: TERMINAL_ID, data: format!("{line}\r").into_bytes().into(), ..Default::default() };
-    send(stream, &terminal(terminal_action::Union::Data(data))).await
-}
-
-/// Waits for the prompt, types the runner and reads until its report, asking a PowerShell runner again for lines the
-/// terminal lost.
-async fn converse(stream: &mut FramedStream, shell: Shell, asked: &Asked, nonce: &str, typed: &mut bool) -> Result<(Printed, Ended), String> {
+/// Waits for the prompt, types `lines` and reads until the end marker shows or the shell ends.
+async fn converse(stream: &mut FramedStream, lines: &[String], nonce: &str, begun: &str, wait: Duration, typed: &mut bool) -> Result<Vec<u8>, String> {
     let mut shown: Vec<u8> = Vec::new();
     let mut opened = false;
     let mut last_data: Option<Instant> = None;
     let prompt_by = Instant::now() + PROMPT_WAIT;
     let mut report_by: Option<Instant> = None;
     let mut reporting = false;
-    let open = format!("#RIG{nonce}.");
     let end = format!("#RIG{nonce}.end#");
-    // Rounds of lines asked again, and how many end markers had shown when the last was asked.
-    let mut asked_again = 0;
-    let mut ends_when_asked = 0;
     loop {
         let until = match (report_by, last_data) {
             (Some(by), _) => by,
@@ -460,24 +485,21 @@ async fn converse(stream: &mut FramedStream, shell: Shell, asked: &Asked, nonce:
         let Some(msg) = next(stream, until).await? else {
             if report_by.is_some() {
                 return Err(format!(
-                    "the PC did not report back within {} s of the command's {} s limit; the terminal last showed:\n{}",
-                    REPORT_GRACE.as_secs(),
-                    asked.timeout.as_secs(),
+                    "the PC did not report back within {} s; the terminal last showed:\n{}",
+                    wait.as_secs(),
                     last_shown(&shown)
                 ));
             }
             if !opened {
                 return Err(format!("the PC did not open a terminal within {} s", PROMPT_WAIT.as_secs()));
             }
-            let lines = typed_lines(shell, &asked.command, asked.timeout, nonce);
-            let total = lines.len();
             *typed = true;
-            for (i, line) in lines.into_iter().enumerate() {
-                type_line(stream, &line).await?;
+            for (i, line) in lines.iter().enumerate() {
+                type_line(stream, line).await?;
                 // The first line may change shells, and a new shell reads only what arrives after it starts.
-                sleep(Duration::from_millis(if i == 0 && total > 1 { 400 } else { 15 })).await;
+                sleep(Duration::from_millis(if i == 0 && lines.len() > 1 { 400 } else { 15 })).await;
             }
-            report_by = Some(Instant::now() + asked.timeout + REPORT_GRACE);
+            report_by = Some(Instant::now() + wait);
             continue;
         };
         let Some(message::Union::TerminalResponse(res)) = msg.union else { continue };
@@ -491,42 +513,27 @@ async fn converse(stream: &mut FramedStream, shell: Shell, asked: &Asked, nonce:
             Some(terminal_response::Union::Data(d)) => {
                 let data = if d.compressed { hbb_common::compress::decompress(&d.data) } else { d.data.to_vec() };
                 last_data = Some(Instant::now());
-                let ends_marker = data.contains(&b'#');
+                let marks = data.iter().any(|&b| b == b'#' || b == b'~');
                 shown.extend_from_slice(&data);
-                if report_by.is_some() && !reporting && ends_marker {
-                    reporting = bare(&shown).contains(&open);
+                if report_by.is_none() || !marks {
+                    continue;
                 }
+                let seen = bare(&shown);
+                reporting = reporting || seen.contains(begun);
                 // The command has ended once its report begins; however slowly the terminal shows the report, it may finish.
                 if reporting {
-                    report_by = Some(Instant::now() + REPORT_GRACE);
+                    report_by = Some(report_by.unwrap_or(until).max(Instant::now() + REPORT_GRACE));
                 }
-                if report_by.is_some() && ends_marker {
-                    let ends = bare(&shown).matches(&end).count();
-                    match report(&shown, nonce, asked.timeout) {
-                        None => {}
-                        Some(Err(Unread::Missing(lines))) if shell == Shell::PowerShell && asked_again < REPAIR_ROUNDS => {
-                            if ends > ends_when_asked {
-                                log::info!("terminal lost {} report lines; asking again ({})", lines.len(), asked_again + 1);
-                                asked_again += 1;
-                                ends_when_asked = ends;
-                                type_line(stream, &Unread::ask(&lines)).await?;
-                            }
-                        }
-                        Some(found) => {
-                            if shell == Shell::PowerShell {
-                                let _ = type_line(stream, "ok").await;
-                            }
-                            return found.map_err(Unread::said);
-                        }
-                    }
+                if seen.contains(&end) {
+                    return Ok(shown);
                 }
             }
             Some(terminal_response::Union::Closed(c)) => {
-                if let Some(found) = report(&shown, nonce, asked.timeout) {
-                    return found.map_err(Unread::said);
+                if bare(&shown).contains(&end) {
+                    return Ok(shown);
                 }
                 return Err(format!(
-                    "the PC's shell ended (exit {}) before the command reported back; the terminal last showed:\n{}",
+                    "the PC's shell ended (exit {}) before reporting back; the terminal last showed:\n{}",
                     c.exit_code,
                     last_shown(&shown)
                 ));
@@ -537,6 +544,11 @@ async fn converse(stream: &mut FramedStream, shell: Shell, asked: &Asked, nonce:
     }
 }
 
+async fn type_line(stream: &mut FramedStream, line: &str) -> Result<(), String> {
+    let data = TerminalData { terminal_id: TERMINAL_ID, data: format!("{line}\r").into_bytes().into(), ..Default::default() };
+    send(stream, &terminal(terminal_action::Union::Data(data))).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,10 +557,13 @@ mod tests {
     fn the_typed_lines_never_hold_a_marker_and_stay_short() {
         let command = "echo #RIGabc.1.0.5# && ".repeat(200);
         for shell in [Shell::Posix, Shell::PowerShell] {
-            let lines = typed_lines(shell, &command, Duration::from_secs(5), "abc");
+            let lines = typed_lines(shell, &runner(shell, &command, Duration::from_secs(5), "abc"));
             assert!(lines.iter().all(|l| l.len() < LINE + 20));
             assert!(!bare(lines.join("\r\n").as_bytes()).contains("#RIGabc."));
         }
+        // A refetch counts as begun at its first `~`, so its typed lines hold none.
+        let refetch = typed_lines(Shell::PowerShell, &refetch_runner("abc", "h18 t5"));
+        assert!(refetch.iter().all(|l| !l.contains('~') && !l.contains("#RIG")));
     }
 
     #[test]

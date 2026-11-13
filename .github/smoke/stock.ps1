@@ -160,7 +160,18 @@ try {
     if ($answer.cut_bytes -le 0 -or $answer.output -notmatch "line 000001" -or $answer.output -notmatch "line 020000") {
       Fail "a long output was not cut from the middle: cut $($answer.cut_bytes), $(Text $long)"
     }
-    Write-Host "shell: exit 3 from plain output, a time-out, a long output with $($answer.cut_bytes) bytes cut"
+    # The runner keeps the report's two parts for lost lines to be fetched again; the bridge's refetch script prints them.
+    $kept = Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter "rig-*" | Where-Object { Test-Path (Join-Path $_.FullName "t") } | Sort-Object LastWriteTime | Select-Object -Last 1
+    if (-not $kept) { Fail "the long output's report was not kept in $([IO.Path]::GetTempPath())" }
+    $head = [IO.File]::ReadAllText((Join-Path $kept.FullName "h"))
+    $refetch = (Get-Content -Raw "libs\bridge\src\refetch.ps1").Replace("@NONCE@", $kept.Name.Substring(4)).Replace("@ASK@", "h0 t2").Replace("@LINE@", "152")
+    # It writes to the console, so it runs in its own PowerShell, whose output is captured.
+    $printed = (& powershell.exe -NoProfile -NonInteractive -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($refetch)))) -join "`n"
+    $first = [regex]::Match($printed, "~h0~([A-Za-z0-9+/=]+)").Groups[1].Value
+    if ($first -ne $head.Substring(0, 152) -or $printed -notmatch "~t2~[A-Za-z0-9+/=]{152}" -or $printed -notmatch "#RIG[0-9a-f]+\.end#") {
+      Fail "the refetch script did not print lines h0 and t2 of $($kept.Name): $printed"
+    }
+    Write-Host "shell: exit 3 from plain output, a time-out, a long output with $($answer.cut_bytes) bytes cut, its report kept and refetched"
   }
 
   # Someone at the PC moves the mouse: the agent's next action waits, reads still work.
