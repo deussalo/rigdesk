@@ -144,8 +144,8 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     seat, asked = call.contract.place.seat, new_id("desk")
     reason = (f"{title} ({agent}, in {graph}) asks for a standing grant to RigDesk PC {given.pc}:\n\n{given.why.strip()}\n\n"
               "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the PCs page.")[:2000]
-    state = await call.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                    Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph}))
+    state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
+                                     Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph}))
     return {"pc": given.pc, "ask": asked, "state": state,
             "said": "Nothing is granted yet: the operator is asked to Accept, and the decision arrives as your next input. Once accepted, any desk/<tool> call joins the PC."}
 
