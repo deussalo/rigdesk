@@ -139,7 +139,7 @@ impl RemoteDesk {
         match tool {
             "screenshot" => {
                 let (index, x, y, w, h) = display(&peer, args)?;
-                let png = self.link.screenshot(&out, index, SCREENSHOT_WAIT)?;
+                let png = opaque(self.link.screenshot(&out, index, SCREENSHOT_WAIT)?);
                 Ok(vec![
                     Content::Text(format!("display {index} of {}, {w}x{h} at {x},{y}, on {} ({})", peer.displays.len(), peer.hostname, peer.platform)),
                     Content::Png(png),
@@ -198,9 +198,61 @@ impl RemoteDesk {
     }
 }
 
+/// Stock RustDesk on Linux (X11) answers an RGBA PNG whose alpha is 0 everywhere, from the X server's unused fourth byte, which
+/// viewers show as blank: such a picture is re-encoded as RGB. Any other PNG, or one that does not decode, passes unchanged.
+fn opaque(png: Vec<u8>) -> Vec<u8> {
+    let Ok(mut reader) = png::Decoder::new(std::io::Cursor::new(&png)).read_info() else { return png };
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let Ok(frame) = reader.next_frame(&mut pixels) else { return png };
+    if frame.color_type != png::ColorType::Rgba || frame.bit_depth != png::BitDepth::Eight {
+        return png;
+    }
+    pixels.truncate(frame.buffer_size());
+    if pixels.chunks_exact(4).any(|px| px[3] != 0) {
+        return png;
+    }
+    let rgb: Vec<u8> = pixels.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
+    let mut out = Vec::with_capacity(png.len());
+    let mut encoder = png::Encoder::new(&mut out, frame.width, frame.height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let written = encoder.write_header().and_then(|mut writer| writer.write_image_data(&rgb).and_then(|()| writer.finish()));
+    match written {
+        Ok(()) => out,
+        Err(_) => png,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::scrolled;
+    use super::{opaque, scrolled};
+
+    fn encoded(color: png::ColorType, pixels: &[u8], width: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, width, 1);
+        encoder.set_color(color);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(pixels).unwrap();
+        out
+    }
+
+    fn decoded(bytes: &[u8]) -> (png::ColorType, Vec<u8>) {
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut pixels).unwrap();
+        pixels.truncate(frame.buffer_size());
+        (frame.color_type, pixels)
+    }
+
+    #[test]
+    fn a_screenshot_with_no_alpha_anywhere_comes_back_opaque_and_one_with_alpha_unchanged() {
+        let blank = encoded(png::ColorType::Rgba, &[10, 20, 30, 0, 40, 50, 60, 0], 2);
+        assert_eq!(decoded(&opaque(blank)), (png::ColorType::Rgb, vec![10, 20, 30, 40, 50, 60]));
+        let seen = encoded(png::ColorType::Rgba, &[10, 20, 30, 255, 40, 50, 60, 0], 2);
+        assert_eq!(opaque(seen.clone()), seen);
+        assert_eq!(opaque(b"not a png".to_vec()), b"not a png".to_vec());
+    }
 
     #[test]
     fn a_scroll_reports_its_notches_and_the_rate() {
