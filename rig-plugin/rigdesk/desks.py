@@ -10,6 +10,8 @@ import base64
 import binascii
 import json
 import re
+import secrets
+import socket
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -35,6 +37,11 @@ CALL_LIMIT_S = 120.0
 FILES_KEPT = 300
 STOP_FRESH_MS = 60_000  # a Stop replayed after Rig was away is told, not acted on: the turn it meant is long gone
 REMOTE_LOG_BYTES = 4 * 1024 * 1024
+HEALTH_EVERY_S = 30.0
+PROBE_LIMIT_S = 5.0
+HBBS_PORT = 21116  # RustDesk's rendezvous port when the host names none; hbbr listens on the next one up
+STOCK_PORTS = range(21120, 21200)
+SECRETS = Path("~/.rig/rigdesk")
 VIEWER_VERBS = frozenset({"mint", "hand", "human", "stop", "block", "unblock", "revoke"})
 LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
 
@@ -77,6 +84,17 @@ class IdServer(Shape):
     model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A self-hosted RustDesk ID server and the public key its PCs were configured with."})
     host: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$"), Field(description="Where hbbs listens, as host or host:port (21116 by default); its relay is the one hbbs names (-r).")]
     key_file: Annotated[str, Field(description="A file holding hbbs's public key (id_ed25519.pub), the Key each PC's RustDesk was given.")]
+
+    def listeners(self) -> tuple[tuple[Literal["hbbs", "hbbr"], str, int], ...]:
+        """hbbs where the host says, and hbbr beside it on the next port, as rustdesk-server runs them."""
+        name, port = self.host, HBBS_PORT
+        if self.host.startswith("["):
+            name, _, rest = self.host[1:].partition("]")
+            port = int(rest[1:]) if rest.startswith(":") else HBBS_PORT
+        elif self.host.count(":") == 1:
+            name, given = self.host.split(":")
+            port = int(given)
+        return (("hbbs", name, port), ("hbbr", name, port + 1))
 
 
 class DeskPc(Shape):
@@ -145,6 +163,22 @@ class PcLink:
     task: asyncio.Task[None] | None = None
     remote: asyncio.Task[None] | None = None
     remote_why: str | None = None
+
+
+@dataclass
+class Listener:
+    """One of the ID server's daemons as the last probe found it: up when it took a TCP connection on its port."""
+    role: Literal["hbbs", "hbbr"]
+    host: str
+    port: int
+    state: Literal["unchecked", "up", "down"] = "unchecked"
+    why: str | None = None
+    since_ms: int | None = None
+    checked_ms: int | None = None
+
+    @property
+    def address(self) -> str:
+        return f"[{self.host}]:{self.port}" if ":" in self.host else f"{self.host}:{self.port}"
 
 
 class PcHolder(TypedDict):
@@ -240,6 +274,9 @@ class Desks:
         self._last: dict[str, int] = {}
         self._http: aiohttp.ClientSession | None = None
         self._watch: asyncio.Task[None] | None = None
+        self._probe: asyncio.Task[None] | None = None
+        self._probe_now = asyncio.Event()
+        self._listeners: tuple[Listener, ...] = ()
         self._grants = Grants()
         self._grants_revision = 0
         self._granting = asyncio.Lock()
@@ -272,9 +309,10 @@ class Desks:
         await self._read_grants()
         self._http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10))
         self._watch = TASKS.spawn("rigdesk-settings", self._watching())
+        self._probe = TASKS.spawn("rigdesk-id-server", self._probing())
 
     async def end(self, _ending: LiveEnding) -> None:
-        tasks = [task for task in (self._watch, *(link.task for link in self._pcs.values()), *(link.remote for link in self._pcs.values())) if task is not None]
+        tasks = [task for task in (self._watch, self._probe, *(link.task for link in self._pcs.values()), *(link.remote for link in self._pcs.values())) if task is not None]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -296,6 +334,9 @@ class Desks:
         self._for_fleet = settings.for_fleet
         moved = (settings.bridge_bin, settings.id_server) != (self._bridge_bin, self._id_server)
         self._bridge_bin = settings.bridge_bin
+        if settings.id_server != self._id_server:
+            self._listeners = () if settings.id_server is None else tuple(Listener(role, host, port) for role, host, port in settings.id_server.listeners())
+            self._probe_now.set()
         self._id_server = settings.id_server
         for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
             link = self._pcs.pop(name)
@@ -365,6 +406,100 @@ class Desks:
                 gone = sorted(set(self._grants.pcs) - set(kept))
                 await self._save_grants(Grants(pcs=kept))
                 _LOG.warning("rigdesk_grants_pruned", f"RigDesk: {', '.join(gone)} left Rig's settings or stopped being stock, so their grants were removed", pcs=", ".join(gone))
+
+    # --- the ID server's health ---
+
+    async def _probing(self) -> None:
+        """Every HEALTH_EVERY_S, and at once when the id_server setting moves, each daemon is asked for a TCP connection."""
+        while True:
+            await asyncio.gather(*(self._probed(listener) for listener in self._listeners))
+            self._probe_now.clear()
+            try:
+                await asyncio.wait_for(self._probe_now.wait(), HEALTH_EVERY_S)
+            except TimeoutError:
+                pass
+
+    @staticmethod
+    async def _probed(listener: Listener) -> None:
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(listener.host, listener.port), PROBE_LIMIT_S)
+        except TimeoutError:
+            state, why = "down", f"no TCP connection within {PROBE_LIMIT_S:.0f} s"
+        except OSError as failed:
+            state, why = "down", failed.strerror or f"{type(failed).__name__}: {failed}"
+        else:
+            writer.close()
+            state, why = "up", None
+        if state != listener.state:
+            listener.since_ms = now_ms()
+            if state == "down":
+                _LOG.warning("rigdesk_id_server_down", f"RigDesk ID server: {listener.role} at {listener.address} is down: {why}", role=listener.role)
+        listener.state, listener.why, listener.checked_ms = state, why, now_ms()
+
+    def id_server(self) -> dict[str, Any] | None:
+        """The ID server and its daemons' health, for the page and rig status; None with no id_server set."""
+        if self._id_server is None:
+            return None
+        return {"host": self._id_server.host, "listeners": [{"role": each.role, "address": each.address, "state": each.state, "why": each.why,
+                                                             "since_ms": each.since_ms, "checked_ms": each.checked_ms} for each in self._listeners]}
+
+    def install_config(self) -> str:
+        """RustDesk's config string for our ID server, as `rustdesk --config` takes it: base64url of {host, key} reversed.
+        Stock RustDesk splits the string at '--' before decoding it, so JSON padding is added until the encoding holds none."""
+        if self._id_server is None:
+            raise DeskRefused("no id_server is set in plugins.rigdesk, so there is no ID server to put a PC on")
+        try:
+            key = Path(self._id_server.key_file).expanduser().read_text().strip()
+        except OSError as unread:
+            raise DeskRefused(f"the ID server's key file {self._id_server.key_file} could not be read: {unread}") from unread
+        shape = json.dumps({"host": self._id_server.host, "key": key, "api": "", "relay": ""}, separators=(",", ":"))
+        for pad in range(16):
+            config = base64.urlsafe_b64encode((shape + " " * pad).encode()).decode().rstrip("=")[::-1]
+            if "--" not in config:
+                return config
+        raise DeskRefused("no config string for this ID server avoids '--', which RustDesk splits on")
+
+    # --- adding a stock PC by its RustDesk ID ---
+
+    @staticmethod
+    def _free(port: int) -> bool:
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                return False
+        return True
+
+    @classmethod
+    def _first_free(cls, taken: set[int | None]) -> int:
+        for port in STOCK_PORTS:
+            if port not in taken and cls._free(port):
+                return port
+        raise DeskRefused(f"no loopback port in {STOCK_PORTS.start}-{STOCK_PORTS.stop - 1} is free for its rigdesk-bridge")
+
+    def _keep_secret(self, name: str, kind: str, value: str) -> str:
+        path = SECRETS / f"{name}.{kind}"
+        real = path.expanduser()
+        real.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        replace_file(real, value.encode(), new_mode=0o600)
+        return str(path)
+
+    async def added(self, name: str, rustdesk_id: str, password: str, client: str) -> DeskPc:
+        """A stock PC on our ID server, ready for settings: its password and a fresh bridge token kept in 0600 files, and a loopback port no PC uses.
+        Settings are the caller's to write; once they hold it, the next reconcile starts its rigdesk-bridge."""
+        settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
+        if settings.id_server is None:
+            raise DeskRefused("no id_server is set in plugins.rigdesk: a PC named by RustDesk ID is reached through it")
+        if name in settings.pcs:
+            raise DeskRefused(f"a PC named {name} is already set up")
+        same = next((other for other, pc in settings.pcs.items() if pc.stock is not None and pc.stock.id == rustdesk_id), None)
+        if same is not None:
+            raise DeskRefused(f"RustDesk ID {rustdesk_id} is already set up as {same}")
+        taken = {urlsplit(pc.url).port for pc in settings.pcs.values()} | {pc.stock.viewer_port for pc in settings.pcs.values() if pc.stock is not None}
+        port = await asyncio.to_thread(self._first_free, taken)
+        password_file = await asyncio.to_thread(self._keep_secret, name, "password", password)
+        token_file = await asyncio.to_thread(self._keep_secret, name, "token", secrets.token_urlsafe(32))
+        return DeskPc(url=f"http://127.0.0.1:{port}", token_file=token_file, client=client, stock=StockRemote(id=rustdesk_id, password_file=password_file))
 
     # --- rigdesk-bridge, for a stock PC ---
 

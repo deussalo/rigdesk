@@ -311,14 +311,55 @@ class PcRow(View):
     assigned: tuple[str, ...] = Field(description='Who holds a standing grant to it, "agent:<id>" or "graph:<name>"; a stock PC only.')
 
 
+class ListenerRow(View):
+    role: Literal["hbbs", "hbbr"]
+    address: str
+    state: Literal["unchecked", "up", "down"] = Field(description="up when it took a TCP connection at the last probe, every 30 s.")
+    why: str | None
+    since_ms: int | None = Field(description="When it entered this state.")
+    checked_ms: int | None
+
+
+class IdServerRow(View):
+    host: str
+    listeners: tuple[ListenerRow, ...]
+    install: str | None = Field(description="The one administrator PowerShell line that puts a Windows PC on this ID server with stock RustDesk; null when the key file is unreadable.")
+    install_why: str | None = Field(description="Why there is no install line.")
+
+
 class PcsView(View):
     pcs: tuple[PcRow, ...]
+    id_server: IdServerRow | None = Field(description="Our RustDesk ID server and its health; null with no id_server set.")
     source: str
+
+
+# The script's own commit on GitHub, so the line runs exactly what was reviewed; a new script is a new commit here and its hash.
+STOCK_SCRIPT = "https://raw.githubusercontent.com/deussalo/rigdesk/d62a30eda697a3cfb734c1cfb10ce72eff769348/install/stock-rustdesk.ps1"
+STOCK_SCRIPT_SHA256 = "991779686CACC64E7D6312184E211E3BD45121C3A49DCF464AFE5226B4B12A3F"
+
+
+def install_line(config: str) -> str:
+    return ("[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f=\"$env:TEMP\\stock-rustdesk.ps1\"; "
+            f"iwr -UseBasicParsing {STOCK_SCRIPT} -OutFile $f; "
+            f"if ((Get-FileHash $f -Algorithm SHA256).Hash -ne '{STOCK_SCRIPT_SHA256}') {{ throw 'stock-rustdesk.ps1 checksum mismatch' }}; "
+            f"& ([scriptblock]::Create((Get-Content -Raw $f))) -Config '{config}'; Remove-Item $f")
+
+
+def _id_server_row(desks: Desks) -> IdServerRow | None:
+    server = desks.id_server()
+    if server is None:
+        return None
+    try:
+        install, why = install_line(desks.install_config()), None
+    except DeskRefused as refused:
+        install, why = None, str(refused)
+    return IdServerRow(host=server["host"], listeners=tuple(ListenerRow(**each) for each in server["listeners"]), install=install, install_why=why)
 
 
 @endpoint(NoParams, OPERATOR)
 async def get_pcs(request: Request[NoParams]) -> PcsView:
-    return PcsView(pcs=tuple(PcRow(**row) for row in request.host().live(Desks).pcs()), source="https://github.com/deussalo/rigdesk")
+    desks = request.host().live(Desks)
+    return PcsView(pcs=tuple(PcRow(**row) for row in desks.pcs()), id_server=await asyncio.to_thread(_id_server_row, desks), source="https://github.com/deussalo/rigdesk")
 
 
 class SessionParams(Params):
@@ -428,9 +469,46 @@ async def post_token(request: Request[TokenParams]) -> TokenKept:
     return TokenKept(token_file=str(path))
 
 
+type RustdeskId = Annotated[str, StringConstraints(pattern=r"^[0-9]{6,32}$")]
+type RustdeskPassword = Annotated[str, StringConstraints(pattern=r"^[\x21-\x7e]{6,128}$")]
+
+
+class AddBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", defer_build=True)
+    name: PcName
+    id: RustdeskId
+    password: RustdeskPassword
+    client: Annotated[str, StringConstraints(max_length=64)] = ""
+
+
+class AddParams(Params):
+    body: AddBody
+
+
+class PcAdded(View):
+    name: str
+    entry: dict[str, Any] = Field(description="Its plugins.rigdesk.pcs entry, to write under its name; once settings hold it, Rig starts its rigdesk-bridge within seconds.")
+
+
+@endpoint(AddParams, OPERATOR)
+async def post_pc(request: Request[AddParams]) -> PcAdded | RefusedOutcome:
+    """Adds a stock RustDesk PC by its ID and permanent password, as its install line printed them: keeps the password and a fresh bridge token in 0600 files
+    and answers its settings entry on a free loopback port. The page writes the entry; the password never reaches settings."""
+    body = request.params.body
+    try:
+        added = await request.host().live(Desks).added(body.name, body.id, body.password, body.client.strip())
+    except DeskRefused as refused:
+        return request.refused(REFUSED, str(refused))
+    return PcAdded(name=body.name, entry=added.model_dump(mode="json", exclude_none=True))
+
+
 async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
-    return tuple(StatusLine(text=f"RigDesk {row['name']}: {row['state']}" + (f" ({row['why']})" if row["why"] else ""))
-                 for row in host.live(Desks).pcs() if row["state"] == "down")
+    desks = host.live(Desks)
+    server = desks.id_server()
+    lines = () if server is None else (StatusLine(text=f"RigDesk ID server {server['host']}: " + ", ".join(
+        f"{each['role']} {each['state']}" + (f" ({each['why']})" if each["why"] else "") for each in server["listeners"])),)
+    return (*lines, *(StatusLine(text=f"RigDesk {row['name']}: {row['state']}" + (f" ({row['why']})" if row["why"] else ""))
+                      for row in desks.pcs() if row["state"] == "down"))
 
 
 async def _provided(host: PluginHost, _asked: None) -> tuple[PcEntry, ...]:
@@ -443,4 +521,5 @@ CONTRIBUTION = ContributionDescriptor(
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN},
     provisions=(provider(PCS, _provided), provider(ASSIGN, _assign), provider(REQUEST_CONFIRMED, _request_confirmed)),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
-            RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign)))
+            RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
+            RouteContribution("POST", "pc", post_pc)))

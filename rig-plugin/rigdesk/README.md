@@ -90,16 +90,26 @@ the address PCs reach it at, and open TCP 21115-21117 and UDP 21116 to the inter
     hbbs -r <public address>:21117 -k _        # writes id_ed25519 and id_ed25519.pub in its working directory
     hbbr -k _                                  # same working directory, so the same key
 
-On the PC, in RustDesk → Settings → Network → ID/Relay server: **ID server** `<public address>`, **Key** the contents
-of `id_ed25519.pub`; leave Relay and API empty. Under Security, **Use permanent password** with a password set. Then
-name the server once and each PC by its ID (digits, no spaces):
+Name the server once in Rig's settings; its address lives there and nowhere in this repo:
 
-    {"id_server": {"host": "<public address>", "key_file": "~/.rig/rustdesk-server/id_ed25519.pub"},
-     "pcs": {"front": {"url": "http://127.0.0.1:21121",
-                       "token_file": "~/.rig/rigdesk/front.token",
-                       "client": "acme",
-                       "stock": {"id": "123456789",
-                                 "password_file": "~/.rig/rigdesk/front.password"}}}}
+    {"id_server": {"host": "<public address>", "key_file": "~/.rig/rustdesk-server/id_ed25519.pub"}}
+
+The **RigDesk** tab then shows the server's health (hbbs and hbbr, each probed with a TCP connection every 30 s, also in
+`rig status`) and **add a PC**:
+
+1. It gives one line for an administrator PowerShell on a Windows PC. The line fetches `install/stock-rustdesk.ps1` at a
+   pinned commit, checks its SHA-256, and runs it with this server's config string: it installs stock RustDesk (pinned,
+   checked), points it at the server, sets a fresh permanent password and prints the PC's ID and that password.
+2. Enter a name, the ID and the password in the form. `POST /x/rigdesk/pc` keeps the password and a fresh bridge token in
+   0600 files under `~/.rig/rigdesk/`, picks a free loopback port, and answers the PC's settings entry, which the page
+   writes under `plugins.rigdesk.pcs`; Rig starts its rigdesk-bridge within seconds. The password never enters settings.
+
+A PC on another OS: in RustDesk → Settings → Network → ID/Relay server, **ID server** `<public address>` and **Key**
+the contents of `id_ed25519.pub`, Relay and API empty; under Security, **Use permanent password**. Then add it with the
+form as above. Settings written by hand take the same shape:
+
+    "pcs": {"front": {"url": "http://127.0.0.1:21122", "token_file": "~/.rig/rigdesk/front.token", "client": "acme",
+                      "stock": {"id": "123456789", "password_file": "~/.rig/rigdesk/front.password"}}}
 
 The bridge always takes the relay (it runs beside hbbr, so a hole punch gains nothing). Its log names why a connection
 failed: the ID never registered, the PC is offline, or the key differs from hbbs's.
