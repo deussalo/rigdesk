@@ -7,6 +7,8 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::desk::{Content, Desk};
+#[cfg(test)]
+use crate::desk::Called;
 use crate::events::EventKind;
 use crate::journal::{Entry, Journal};
 use crate::session::{Holder, Shared};
@@ -102,7 +104,7 @@ impl Mcp {
             }
         };
         let (outcome, iserror, result) = match self.desk.call(name, &args) {
-            Ok(items) => ("ok".to_string(), false, contents(items)),
+            Ok(called) => (called.outcome, false, contents(called.contents)),
             Err(err) => (format!("error: {err}"), true, tool_error(&err)),
         };
         self.journal.record(&Entry::new(owner.who(), format!("call {name}"), outcome, json!({"args": args})));
@@ -147,10 +149,10 @@ mod tests {
                 ToolSpec { name: "type", description: "types text", input_schema: json!({"type": "object"}), read_only: false },
             ]
         }
-        fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
+        fn call(&self, tool: &str, args: &Value) -> Result<Called, String> {
             match tool {
-                "screenshot" => Ok(vec![Content::Png(vec![1, 2, 3])]),
-                "type" => Ok(vec![Content::Text(format!("typed {}", args.get("text").and_then(Value::as_str).unwrap_or("")))]),
+                "screenshot" => Ok(vec![Content::Png(vec![1, 2, 3])].into()),
+                "type" => Ok(vec![Content::Text(format!("typed {}", args.get("text").and_then(Value::as_str).unwrap_or("")))].into()),
                 other => Err(format!("no such tool: {other}")),
             }
         }
@@ -161,7 +163,7 @@ mod tests {
         fn tools(&self) -> Vec<ToolSpec> {
             FakeDesk.tools()
         }
-        fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
+        fn call(&self, tool: &str, args: &Value) -> Result<Called, String> {
             FakeDesk.call(tool, args)
         }
         fn local_input_after(&self, _since_ms: u64) -> bool {

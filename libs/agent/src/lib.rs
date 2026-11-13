@@ -8,8 +8,9 @@ pub mod http;
 pub mod journal;
 pub mod mcp;
 pub mod session;
+pub mod shell;
 
-pub use desk::{Content, Desk, ToolSpec};
+pub use desk::{Called, Content, Desk, ToolSpec};
 pub use events::{Event, EventKind, Events};
 pub use http::Api;
 pub use journal::{Entry, Journal};

@@ -201,7 +201,7 @@ impl Api {
         let desk = self.mcp.desk.clone();
         let shot = tokio::task::spawn_blocking(move || desk.call("screenshot", &args)).await;
         let png = match shot {
-            Ok(Ok(content)) => content.into_iter().find_map(|c| match c {
+            Ok(Ok(content)) => content.contents.into_iter().find_map(|c| match c {
                 crate::desk::Content::Png(png) => Some(png),
                 _ => None,
             }),
@@ -390,7 +390,7 @@ async fn journal_holder_changes(mut rx: tokio::sync::broadcast::Receiver<Event>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desk::{Content, ToolSpec};
+    use crate::desk::{Called, Content, ToolSpec};
     use crate::events::Events;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -399,8 +399,8 @@ mod tests {
         fn tools(&self) -> Vec<ToolSpec> {
             vec![ToolSpec { name: "type", description: "types text", input_schema: json!({"type": "object"}), read_only: false }]
         }
-        fn call(&self, _tool: &str, _args: &Value) -> Result<Vec<Content>, String> {
-            Ok(vec![Content::Text("typed".into())])
+        fn call(&self, _tool: &str, _args: &Value) -> Result<Called, String> {
+            Ok(vec![Content::Text("typed".into())].into())
         }
     }
 

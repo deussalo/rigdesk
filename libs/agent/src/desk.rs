@@ -16,10 +16,23 @@ pub enum Content {
     Png(Vec<u8>),
 }
 
+/// What a call gave: what the agent reads, and the word the journal keeps for it ("ok", or a shell command's "exit 3").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Called {
+    pub contents: Vec<Content>,
+    pub outcome: String,
+}
+
+impl From<Vec<Content>> for Called {
+    fn from(contents: Vec<Content>) -> Self {
+        Called { contents, outcome: "ok".into() }
+    }
+}
+
 /// What the host gives the agent: capture, the UI tree, input, a shell. Calls block; the server runs them off its reactor.
 pub trait Desk: Send + Sync + 'static {
     fn tools(&self) -> Vec<ToolSpec>;
-    fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String>;
+    fn call(&self, tool: &str, args: &Value) -> Result<Called, String>;
     /// Whether someone at the PC itself used mouse or keyboard after `since_ms` (wall clock), not counting the input
     /// this desk injected for the agent. Asked before each action while the agent holds input.
     fn local_input_after(&self, _since_ms: u64) -> bool {

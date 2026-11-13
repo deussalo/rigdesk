@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hbb_common::serde_json::{json, Value};
-use rigdesk_agent::{Content, Desk, ToolSpec};
+use rigdesk_agent::{Called, Content, Desk, ToolSpec};
 
 use crate::keys;
 use crate::link::{Link, Peer};
@@ -110,7 +110,13 @@ impl Desk for RemoteDesk {
         self.link.foreign_move_after(since_ms)
     }
 
-    fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
+    fn call(&self, tool: &str, args: &Value) -> Result<Called, String> {
+        self.run(tool, args).map(Into::into)
+    }
+}
+
+impl RemoteDesk {
+    fn run(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
         if tool == "wait" {
             let ms = args.get("ms").and_then(Value::as_u64).unwrap_or(500).min(10_000);
             std::thread::sleep(Duration::from_millis(ms));

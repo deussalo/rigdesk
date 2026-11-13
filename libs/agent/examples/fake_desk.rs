@@ -9,7 +9,7 @@ use std::io::BufRead;
 use std::sync::Arc;
 
 use base64::Engine;
-use rigdesk_agent::{Api, Content, Desk, Events, Journal, Shared, ToolSpec};
+use rigdesk_agent::{Api, Called, Content, Desk, Events, Journal, Shared, ToolSpec};
 use serde_json::{json, Value};
 
 const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -38,10 +38,10 @@ impl Desk for FakeDesk {
         ]
     }
 
-    fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
+    fn call(&self, tool: &str, args: &Value) -> Result<Called, String> {
         match tool {
-            "screenshot" => Ok(vec![Content::Png(pixel())]),
-            "type" => Ok(vec![Content::Text(format!("typed {}", args.get("text").and_then(Value::as_str).unwrap_or("")))]),
+            "screenshot" => Ok(vec![Content::Png(pixel())].into()),
+            "type" => Ok(vec![Content::Text(format!("typed {}", args.get("text").and_then(Value::as_str).unwrap_or("")))].into()),
             other => Err(format!("no tool {other}")),
         }
     }
