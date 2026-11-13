@@ -302,9 +302,10 @@ mod tests {
         let port = closed.local_addr().expect("addr").port();
         drop(closed);
         let link = Link::new(crate::link::Route::direct(&format!("127.0.0.1:{port}")), "pc-pw".into(), "Rig agent".into(), shared.clone());
+        assert_eq!(shared.down(), Some(format!("127.0.0.1:{port} not checked yet")));
         tokio::spawn(link.run());
         let mut waited = 0;
-        while shared.down().is_none() && waited < 50 {
+        while shared.down().is_some_and(|why| why.ends_with("not checked yet")) && waited < 50 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             waited += 1;
         }

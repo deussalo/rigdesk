@@ -148,6 +148,8 @@ pub fn login_proof(password: &str, hash: &Hash) -> Vec<u8> {
 
 impl Link {
     pub fn new((route, username): (Route, String), password: String, name: String, shared: Arc<rigdesk_agent::Shared>) -> Arc<Self> {
+        // Until the first probe answers, the PC is not known to be reachable; /health says so rather than nothing.
+        shared.set_down(Some(format!("{} not checked yet", route.label())));
         Arc::new(Link {
             shared,
             addr: route.label(),
