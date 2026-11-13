@@ -26,7 +26,7 @@ from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from .desks import ID, NATIVE, Desks, DeskRefused, PcEntry, RigdeskSettings
+from .desks import ID, NATIVE, Desks, DeskRefused, Grantee, PcEntry, RigdeskSettings
 
 BRANCH = "desk"
 CAPABILITY = mcp_capability(BRANCH)
@@ -266,6 +266,7 @@ class PcRow(View):
     holder: str | None = Field(description="human, agent or blocked while an agent owns the session; null with none.")
     owner: dict[str, str | None] | None = Field(description="The agent owning the session: id, title and graph.")
     owned_here: bool = Field(description="The owner joined through this Rig.")
+    assigned: tuple[str, ...] = Field(description='Who holds a standing grant to it, "agent:<id>" or "graph:<name>"; a stock PC only.')
 
 
 class PcsView(View):
@@ -322,6 +323,33 @@ async def post_viewer(request: Request[ViewerParams]) -> ViewerDone | RefusedOut
         return request.refused(DOWN, f"{body.pc}'s rigdesk-bridge did not answer: {type(failed).__name__}: {failed}")
 
 
+class AssignBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", defer_build=True)
+    pc: str
+    grantee: Grantee
+    granted: bool
+
+
+class AssignParams(Params):
+    body: AssignBody
+
+
+class AssignDone(View):
+    changed: bool = Field(description="false when the grant already stood as asked.")
+
+
+@endpoint(AssignParams, OPERATOR)
+async def post_assign(request: Request[AssignParams]) -> AssignDone | RefusedOutcome:
+    """Gives or takes away one standing grant to a stock PC, as the PCs page does: from this page, to the agent sharing it now."""
+    body = request.params.body
+    desks = request.host().live(Desks)
+    try:
+        changed = await (desks.assign if body.granted else desks.unassign)(body.pc, body.grantee)
+    except DeskRefused as refused:
+        return request.refused(REFUSED, str(refused))
+    return AssignDone(changed=changed)
+
+
 TOKENS = Path("~/.rig/rigdesk")
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")]
@@ -373,4 +401,4 @@ CONTRIBUTION = ContributionDescriptor(
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN},
     provisions=(provider(PCS, _provided), provider(ASSIGN, _assign), provider(REQUEST_CONFIRMED, _request_confirmed)),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
-            RouteContribution("POST", "viewer", post_viewer)))
+            RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign)))

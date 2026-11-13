@@ -749,7 +749,7 @@ class Desks:
             rows.append({"name": name, "client": link.spec.client, "url": link.spec.url, "stock": link.spec.stock is not None, "state": link.state, "why": link.remote_why or link.why,
                          "down_since_ms": link.down_since_ms, "holder": standing.get("holder") if owner else None,
                          "owner": None if owner is None else {"id": owner.get("agent_id"), "title": owner.get("title"), "graph": owner.get("graph")},
-                         "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id")})
+                         "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id"), "assigned": self.granted(name)})
         return rows
 
     def entries(self) -> tuple[PcEntry, ...]:
