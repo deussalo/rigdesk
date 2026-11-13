@@ -109,7 +109,7 @@ class DeskPc(Shape):
     url: Annotated[WebAddress, Field(description="Its agent API, published by tailscale serve: https://<pc>.<tailnet>.ts.net; for a stock PC, http://127.0.0.1:<port> where Rig runs rigdesk-bridge.")]
     token_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's agent-API token.")]
     client: Annotated[str, Field(description="The client this PC belongs to.")] = ""
-    stock: Annotated[StockRemote | None, Field(description="Set for a PC running stock RustDesk instead of RigDesk; who may act on it with no share link is set on the PCs page.")] = None
+    stock: Annotated[StockRemote | None, Field(description="Set for a PC running stock RustDesk instead of RigDesk; who may act on it with no share link is set on the RigDesk page.")] = None
 
     @model_validator(mode="after")
     def _stock_is_local(self) -> DeskPc:
@@ -194,10 +194,9 @@ class PcHolder(TypedDict):
     graph: str
 
 
-# One RigDesk PC as another plugin reads it through the provision rigdesk.pcs. assigned is who holds a standing grant to it ("agent:<id>" or
-# "graph:<name>", in rigdesk's grants doc), which only a stock PC has; held_by is the agent that owns its session now, by a link or the grant.
-# The pcs plugin copies PcHolder and PcEntry exactly and matches the schema, so no docstrings and never change one side alone.
 class PcEntry(TypedDict):
+    """One RigDesk PC as desk/pcs and desk/request read it. assigned is who holds a standing grant to it ("agent:<id>" or "graph:<name>", in rigdesk's
+    grants doc), which only a stock PC has; held_by is the agent that owns its session now, by a link or the grant."""
     name: str
     client: str
     stock: bool
@@ -917,6 +916,18 @@ class Desks:
         link.standing = said.get("standing") or link.standing
         return {"changed": bool(said.get("changed"))}
 
+    async def frame(self, pc: str) -> bytes:
+        """A PNG of the PC's screen now, for the operator; the PC journals it."""
+        link = self._link(pc)
+        if link.state != "up":
+            raise DeskRefused(f"RigDesk PC {pc} is down: {link.why or 'not reached yet'}")
+        async with self._client().get(f"{link.spec.url}/frame", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=30)) as answer:
+            if answer.status != 200:
+                said = (await answer.text())[:300]
+                raise DeskRefused(f"{pc} gave no screenshot: HTTP {answer.status}" + (f": {said}" if said else "")
+                                  + ("; its RigDesk is older than the /frame route" if answer.status == 404 else ""))
+            return await answer.read()
+
     # --- what the page and pin show ---
 
     def pcs(self) -> list[dict[str, Any]]:
@@ -932,7 +943,6 @@ class Desks:
         return rows
 
     def entries(self) -> tuple[PcEntry, ...]:
-        """What the provision rigdesk.pcs answers: each PC, its grant and who holds it."""
         rows: list[PcEntry] = []
         for name, link in sorted(self._pcs.items()):
             held = self._sessions.get(name)

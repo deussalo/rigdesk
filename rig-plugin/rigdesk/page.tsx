@@ -1,10 +1,15 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Action, agoOf, AppTab, contribution, Create, editSettings, Field, href, IconButton, Link, Mark, Panel, REREAD_MS, Refusal, Row, Stack, tell, Text, told, useNow, withPath, type Ink, type Refused } from '@rig/host'
+import { ALL_SPACE, get_agent_settings, get_graph_cards, get_graphs, patch_agent_settings } from '@rig/contract'
+import { Action, agoOf, AppTab, contribution, Create, editSettings, Field, href, IconButton, lastOf, Link, Mark, objectOf, Panel, REREAD_MS, Refusal, Row, Stack, store as core, tell, Text,
+  told, useAsked, useNow, withPath, type Ink, type Refused } from '@rig/host'
+import css from './rigdesk.module.css'
 
 const routes = contribution('rigdesk')
 const EVERY_MS = Math.min(REREAD_MS, 5_000)
 
 type Owner = { readonly id: string | null; readonly title: string | null; readonly graph: string | null }
+type Grant = { readonly grantee: string; readonly label: string; readonly graph: string | null; readonly agent_id: string | null }
+type Shot = { readonly mime: string; readonly data: string; readonly taken_ms: number }
 type PcRow = {
   readonly name: string
   readonly client: string
@@ -16,7 +21,7 @@ type PcRow = {
   readonly holder: 'human' | 'agent' | 'blocked' | null
   readonly owner: Owner | null
   readonly owned_here: boolean
-  readonly assigned: readonly string[]
+  readonly assigned: readonly Grant[]
 }
 type Listener = {
   readonly role: 'hbbs' | 'hbbr'
@@ -27,7 +32,7 @@ type Listener = {
   readonly checked_ms: number | null
 }
 type IdServer = { readonly host: string; readonly listeners: readonly Listener[]; readonly install: string | null; readonly install_why: string | null }
-type PcsView = { readonly pcs: readonly PcRow[]; readonly id_server: IdServer | null; readonly source: string }
+type PcsView = { readonly pcs: readonly PcRow[]; readonly id_server: IdServer | null; readonly for_fleet: boolean; readonly source: string }
 type PcAdded = { readonly name: string; readonly entry: Readonly<Record<string, unknown>> }
 
 const INK: Readonly<Record<PcRow['state'], Ink>> = { up: 'live', connecting: 'hold', down: 'fault' }
@@ -36,6 +41,11 @@ const ROLE: Readonly<Record<Listener['role'], string>> = { hbbs: 'ID server (hbb
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/
 const RUSTDESK_ID = /^[0-9]{6,32}$/
 const PASSWORD = /^[\x21-\x7e]{6,128}$/
+const GRAPHS = { route: get_graphs, params: {} } as const
+const AGENTS_OFFERED = 100
+const WHOLE_GRAPH = ''
+const DESK_SERVER = 'desk'
+const textOf = (value: unknown): string => (typeof value === 'string' ? value : '')
 const HOLDER: Readonly<Record<NonNullable<PcRow['holder']>, string>> = { human: 'human holds input', agent: 'agent holds input', blocked: 'agent blocked' }
 
 export function RigdeskTab(): ReactNode {
@@ -68,15 +78,78 @@ const assigning = (pc: string, grantee: string, granted: boolean) => async (): P
   return done.ok ? null : told(granted ? 'assign failed' : 'unassign failed', done.refused)
 }
 
-/** Who holds a standing grant to a stock PC, each with its unassign; the PCs page assigns any agent or graph. */
+/** Who holds a standing grant to a stock PC, each with its unassign. */
 function Grants({ pc }: { readonly pc: PcRow }): ReactNode {
-  if (pc.assigned.length === 0) return <Text text="Assigned to no one: only a share link reaches it. Assign the agent sharing it here, or any agent on the PCs page." />
+  if (pc.assigned.length === 0) return <Text text="Assigned to no one: a share link reaches it, or an agent's desk/request once you accept it. Open the row to assign an agent or a graph." />
   return (
     <Stack gap="sm">
       {pc.assigned.map(each => (
-        <Row key={each} title={each === `agent:${pc.owner?.id ?? ''}` ? `${pc.owner?.title ?? each} · ${each}` : each} word="assigned"
-          actions={<Action label="unassign" tone="danger" pending="unassigning…" onInvoke={assigning(pc.name, each, false)} />} />
+        <Row key={each.grantee} title={each.agent_id !== null && each.graph !== null ? <Link href={href('agent', { graph: each.graph, agent: each.agent_id })}>{each.label}</Link> : each.label}
+          word="assigned" meta={each.grantee}
+          actions={<Action label="unassign" tone="danger" pending="unassigning…" onInvoke={assigning(pc.name, each.grantee, false)} />} />
       ))}
+    </Stack>
+  )
+}
+
+/** Opens the desk server on one agent, as the operator, when desk/* is not open to every agent: an agent never raises its own reach. */
+const openDesk = async (graph: string, agent: string): Promise<Refused | null> => {
+  const read = await core.post({ route: get_agent_settings, params: { name: graph, agent_id: agent } })
+  if (!read.ok) return told('assigned, but desk not opened for it', read.refused)
+  const servers = objectOf(read.value.config['mcp_servers']) ?? null
+  if (servers?.[DESK_SERVER] === 'server') return null
+  const saved = await core.post({ route: patch_agent_settings, params: { name: graph, agent_id: agent },
+    body: { settings: { mcp_servers: { ...servers, [DESK_SERVER]: 'server' } }, expected: { mcp_servers: servers } } })
+  return saved.ok ? null : told('assigned, but desk not opened for it', saved.refused)
+}
+
+/** A standing grant to any agent, or to every agent in a graph, picked by title. */
+function Assign({ pc, forFleet }: { readonly pc: PcRow; readonly forFleet: boolean }): ReactNode {
+  const graphs = (lastOf(useAsked(GRAPHS)) ?? []).flatMap(row => (row.type === 'graph' && !row.flow ? [row.name] : []))
+  const [graph, setGraph] = useState<string | null>(null)
+  const chosen = graph ?? graphs[0] ?? null
+  const agents = (lastOf(useAsked(chosen === null ? null : { route: get_graph_cards, params: { name: chosen }, query: { space: ALL_SPACE, limit: AGENTS_OFFERED } }))?.cards ?? [])
+    .map(card => ({ id: card.agent_id, label: card.title }))
+  const [agent, setAgent] = useState(WHOLE_GRAPH)
+  const picked = agents.some(each => each.id === agent) ? agent : WHOLE_GRAPH
+  const grant = picked === WHOLE_GRAPH ? `graph:${chosen ?? ''}` : `agent:${picked}`
+  const assign = async (): Promise<Refused | null> => {
+    if (chosen === null) return null
+    const failed = await assigning(pc.name, grant, true)()
+    if (failed !== null || picked === WHOLE_GRAPH || forFleet) return failed
+    return openDesk(chosen, picked)
+  }
+  if (graphs.length === 0) return <Text text="No graph to assign it in." />
+  return (
+    <Stack gap="sm">
+      <Field kind="select" label="graph" value={chosen} options={graphs} onChange={value => { setGraph(textOf(value) || null); setAgent(WHOLE_GRAPH) }} />
+      <Field kind="select" label="agent" value={picked} options={[WHOLE_GRAPH, ...agents.map(each => each.id)]}
+        labels={Object.fromEntries<string>([[WHOLE_GRAPH, 'every agent in the graph'], ...agents.map((each): [string, string] => [each.id, each.label || each.id])])}
+        onChange={value => { setAgent(textOf(value)) }}
+        about={`It acts on this PC with no share link, with desk/join(pc), across restarts, until unassigned.${forFleet ? '' : ' An agent is also given the desk server; every agent in a graph needs desk opened for the graph.'}`} />
+      <Stack direction="row" gap="sm" align="center">
+        <Action label="assign" tone="primary" pending="assigning…" disabled={chosen === null || pc.assigned.some(each => each.grantee === grant)} onInvoke={assign} />
+      </Stack>
+    </Stack>
+  )
+}
+
+/** One picture of the PC's screen, taken when asked and held only while the row is open; the PC journals it. */
+function Screenshot({ pc, now }: { readonly pc: PcRow; readonly now: number }): ReactNode {
+  const [shot, setShot] = useState<Shot | null>(null)
+  const take = async (): Promise<Refused | null> => {
+    const taken = await routes('POST', 'screenshot', { pc: pc.name })
+    if (!taken.ok) return told('no screenshot', taken.refused)
+    setShot(taken.value as Shot)
+    return null
+  }
+  return (
+    <Stack gap="sm">
+      {shot === null ? null : <img className={css.shot} src={`data:${shot.mime};base64,${shot.data}`} alt={`${pc.name}'s screen ${agoOf(shot.taken_ms, now)}`} />}
+      <Stack direction="row" gap="sm" align="center">
+        <Action label={shot === null ? 'screenshot' : 'retake'} pending="taking…" disabled={pc.state !== 'up'} onInvoke={take} />
+        {shot === null ? null : <Text text={`taken ${agoOf(shot.taken_ms, now)}`} size="sm" />}
+      </Stack>
     </Stack>
   )
 }
@@ -91,7 +164,7 @@ function StockButtons({ pc, minted }: { readonly pc: PcRow; readonly minted: (li
     const link = (done.value as { readonly link?: string | null }).link
     if (verb === 'mint' && typeof link === 'string') {
       minted(link)
-      void navigator.clipboard?.writeText(link).catch(() => undefined)
+      void navigator.clipboard.writeText(link).catch(() => undefined)
     }
     return null
   }
@@ -100,7 +173,7 @@ function StockButtons({ pc, minted }: { readonly pc: PcRow; readonly minted: (li
   return (
     <>
       <Action label="share with agent" tone="primary" pending="minting…" disabled={pc.state !== 'up'} onInvoke={act('mint')} />
-      {sharer !== null && !pc.assigned.includes(sharer) ? <Action label="assign this agent" pending="assigning…" onInvoke={assigning(pc.name, sharer, true)} /> : null}
+      {sharer !== null && !pc.assigned.some(each => each.grantee === sharer) ? <Action label="assign this agent" pending="assigning…" onInvoke={assigning(pc.name, sharer, true)} /> : null}
       {owned && pc.holder === 'human' ? <Action label="hand to agent" onInvoke={act('hand')} /> : null}
       {owned ? <Action label="stop" tone="danger" onInvoke={act('stop')} /> : null}
       {owned && pc.holder !== 'blocked' ? <Action label="block" tone="danger" onInvoke={act('block')} /> : null}
@@ -123,8 +196,6 @@ function Health({ server, now }: { readonly server: IdServer; readonly now: numb
     </>
   )
 }
-
-const textOf = (value: unknown): string => (typeof value === 'string' ? value : '')
 
 /** A stock RustDesk PC by ID: the install line puts a Windows PC on our ID server and prints its ID and password, which this form hands to Rig. */
 function Adding({ server, taken, close }: { readonly server: IdServer; readonly taken: ReadonlySet<string>; readonly close: () => void }): ReactNode {
@@ -180,6 +251,7 @@ export function RigdeskPage(): ReactNode {
   const now = useNow()
   const [links, setLinks] = useState<Readonly<Record<string, string>>>({})
   const [adding, setAdding] = useState(false)
+  const [open, setOpen] = useState<string | null>(null)
   if (read !== null && 'rendered' in read) return <Refusal refused={read} />
   const pcs = read?.pcs ?? []
   const server = read?.id_server ?? null
@@ -199,7 +271,13 @@ export function RigdeskPage(): ReactNode {
               {links[pc.name] !== undefined && pc.owner === null ? <Text text={`Give this link to an agent (copied; it works once): ${links[pc.name] ?? ''}`} /> : null}
               <Grants pc={pc} />
             </> : undefined}
-            actions={pc.stock ? <StockButtons pc={pc} minted={link => { setLinks(held => ({ ...held, [pc.name]: link })) }} /> : undefined} />
+            actions={pc.stock ? <StockButtons pc={pc} minted={link => { setLinks(held => ({ ...held, [pc.name]: link })) }} /> : undefined}
+            expanded={open === pc.name} onToggle={() => { setOpen(open === pc.name ? null : pc.name) }}
+            drawer={<Stack gap="md">
+              <Screenshot pc={pc} now={now} />
+              {pc.stock ? <Assign pc={pc} forFleet={read !== null && 'for_fleet' in read && read.for_fleet} />
+                : <Text text="A RigDesk PC is shared by its human, with a share link from the RigDesk viewer; assigning is for stock RustDesk PCs." />}
+            </Stack>} />
         ))}
         <Text text={`RigDesk is AGPL-3.0; its source is at ${read?.source ?? 'https://github.com/deussalo/rigdesk'}.`} />
       </Stack>

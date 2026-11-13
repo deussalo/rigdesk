@@ -106,10 +106,13 @@ under `plugins.rigdesk.pcs` as `{name: {url, token_file, client}}`. See [rig-plu
 | `GET /attachments/<id>`, `POST /attachments/<id>/ack` | images sent with human messages |
 | `POST /leave` | the owning agent ends its session |
 | `GET /log?n=N` | the action log |
+| `GET /frame?display=N` | a PNG of the screen now, for the bearer's holder (the viewer's note, Rig's screenshot on demand); journaled |
 | `GET /health` | boot id and current standing |
 
-Tools: `screenshot`, `snapshot` (UI Automation tree with `@x,y` centres), `click`, `type`, `scroll`, `move`, `drag`,
-`key`, `shortcut`, `wait`, `app` (launch/switch), `powershell` (as the signed-in user, never SYSTEM) and `clipboard`.
+Tools: `screenshot`, `click`, `type`, `scroll`, `move`, `drag`, `key`, `shortcut`, `wait`, `clipboard` and `shell`
+(one PowerShell command as the signed-in user, never SYSTEM, with no input and a time limit; it answers the exit code and
+the output, without escape codes, cut in the middle past 32 KiB). A stock PC driven through rigdesk-bridge has the same
+tools, its `shell` through RustDesk's terminal.
 Input goes through the same injection path as viewer input, so viewers see it live.
 
 ## Building

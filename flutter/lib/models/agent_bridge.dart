@@ -84,7 +84,7 @@ class AgentBridge {
           break;
         case 'frame':
           final shot = await _client
-              .get(Uri.parse('${host.url}/viewer/frame?display=$display'), headers: _auth)
+              .get(Uri.parse('${host.url}/frame?display=$display'), headers: _auth)
               .timeout(const Duration(seconds: 20));
           if (shot.statusCode != 200) throw 'the agent host gave no frame: ${shot.body}';
           _emit(frame: shot.bodyBytes);

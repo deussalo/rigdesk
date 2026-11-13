@@ -69,7 +69,7 @@ loopback ports on the tailnet from the bridge's machine:
 In the GUI, connect to `<bridge machine>.<tailnet>.ts.net:21128` with the viewer password. In the remote tab,
 **Set up agent host** takes `https://<bridge machine>.<tailnet>.ts.net:8460`, the PC's token and its name in Rig, kept
 per peer on that device. The panel shares the desktop with an agent, hands input over, blocks, ends the share, shows
-the owning agent and its actions, and sends a note (text plus an annotated still from `/viewer/frame`) to the agent.
+the owning agent and its actions, and sends a note (text plus an annotated still from `/frame`) to the agent.
 
 Every click, wheel turn and key from a GUI passes the bridge: while the agent holds input, the first one takes it
 back before it reaches the PC, and the pointer merely crossing the picture is kept from the PC, so watching never
@@ -128,8 +128,8 @@ Known limits against a RigDesk PC:
   `rigdesk://<pc>/<grant>#<secret>` link. Joining claims the PC's session for that agent alone; a
   link works once.
 * **Standing grant (stock PCs).** rigdesk keeps who holds one, `"agent:<id>"` or `"graph:<name>"` per PC, in its own
-  `grants` doc in Rig's store, and alone writes it: on the PCs page (the `pcs` plugin, through the provision
-  `rigdesk.assign`) or on the operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
+  `grants` doc in Rig's store, and alone writes it: on the RigDesk page, which assigns any agent or every agent in a
+  graph, or on the operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
   link: its first `desk/<tool>` call joins the PC (the plugin mints and claims on the bridge itself), and so does its
   next call after the bridge or Rig restarts. Stop still blocks it; an agent sharing through a link at the time is not
   displaced. A change applies at once and does not restart the bridge; taking a grant away ends a session held through
@@ -163,7 +163,10 @@ work), and while blocked it refuses every call.
 
 ## Pages
 
-* `/x/rigdesk/all` (the **RigDesk** tab): each PC, up or down, who holds input, and the owning agent.
+* `/x/rigdesk/all` (the **RigDesk** tab): each PC, up or down and why, who holds input, and the owning agent. Opening a
+  PC's row takes a screenshot when asked (`POST /x/rigdesk/screenshot {pc}`, through the PC's `/frame`; shown, kept
+  nowhere, journaled on the PC) and, for a stock PC, assigns it to any agent or every agent in a graph, picked by title;
+  each standing grant is listed by the agent's title with its unassign.
 * An agent pin under each owning agent's transcript: its PC, the PC's state and who holds input.
 * `rig status` prints a line for each PC that is down.
 

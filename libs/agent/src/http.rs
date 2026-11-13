@@ -13,7 +13,8 @@
 //!   POST /viewer/mint, /viewer/<hand|human|stop|block|unblock|revoke> - only from `Api::hosted`, where no RigDesk viewer
 //!        carries the human's buttons (a stock RustDesk PC driven from the Rig host), so the bearer's holder presses them
 //!   POST /viewer/note {text, pngs: [base64]} - from `Api::hosted`: the human's message to the owning agent
-//!   GET  /viewer/frame     - from `Api::hosted`: a PNG of the PC's screen now, for the human to clip and draw on
+//!   GET  /frame?display=N  - a PNG of the PC's screen now, for the bearer's holder: the human to clip and draw on, or the operator's
+//!        screenshot on demand; journaled
 //!   GET  /health           - liveness, this process's boot id and the current standing
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 
@@ -129,6 +130,7 @@ impl Api {
                 json_response(StatusCode::OK, &json!({"entries": self.journal.tail(n)}))
             }
             ("GET", "/events") => self.events(request),
+            ("GET", "/frame") => self.frame(request).await,
             ("POST", "/debug/mint") if std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
                 let minted = self.shared.mint();
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
@@ -149,7 +151,6 @@ impl Api {
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
             }
             ("POST", "/viewer/note") if self.viewer_routes => self.note(request).await,
-            ("GET", "/viewer/frame") if self.viewer_routes => self.frame(request).await,
             ("POST", p) if p.starts_with("/viewer/") && self.viewer_routes => {
                 let done = match p.trim_start_matches("/viewer/") {
                     "hand" => self.shared.hand_to_agent(),
@@ -205,9 +206,13 @@ impl Api {
                 crate::desk::Content::Png(png) => Some(png),
                 _ => None,
             }),
-            Ok(Err(why)) => return text(StatusCode::SERVICE_UNAVAILABLE, &why),
+            Ok(Err(why)) => {
+                self.journal.record(&Entry::new("bearer", "frame", format!("failed: {why}"), Value::Null));
+                return text(StatusCode::SERVICE_UNAVAILABLE, &why);
+            }
             Err(_) => None,
         };
+        self.journal.record(&Entry::new("bearer", "frame", if png.is_some() { "ok" } else { "no image" }, json!({"display": display})));
         match png {
             Some(png) => Response::builder()
                 .status(StatusCode::OK)

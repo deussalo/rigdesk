@@ -4,6 +4,7 @@ The fork's source: https://github.com/deussalo/rigdesk (AGPL-3.0); Rig talks to 
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from collections.abc import Mapping
 from http import HTTPStatus
@@ -14,12 +15,12 @@ import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 from core.ask_said import Confirmed, Then
-from core.base import ToolAnswer, View, new_id, replace_file
+from core.base import ToolAnswer, View, new_id, now_ms, replace_file
 from core.boundary import BranchTool, NoParams, Params, StatusLine
 from core.kernel_api import RigReach, mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.endpoint import Request, endpoint
-from core.model import GraphName, NodeId, Refused, RefusedOutcome, SeatId
+from core.model import AgentId, GraphName, NodeId, Refused, RefusedOutcome, SeatId
 from core.mcp_call import Answer, Call, ToolDef, ToolInput, gloss_of
 from core.plugin_host import Live, PluginHost
 from core.provided import Provision, provider
@@ -27,6 +28,7 @@ from core.policy import OPERATOR
 from core.refusal import PluginCode
 
 from .desks import ID, NATIVE, Desks, DeskRefused, Grantee, PcEntry, RigdeskSettings
+from .desks import PcName as DeskName
 
 BRANCH = "desk"
 CAPABILITY = mcp_capability(BRANCH)
@@ -35,29 +37,10 @@ DOWN = PluginCode(f"{ID}.pc_down")
 UNSHARED = PluginCode(f"{ID}.no_session")
 
 
-# The pcs plugin copies PcEntry and PcHolder verbatim; Provided.ask matches the rendered schema exactly, docstring included, so never change one side alone.
-PCS = Provision("rigdesk.pcs", TypeAdapter(type(None)), TypeAdapter(tuple[PcEntry, ...]))
 NO_SESSION = ("you own no RigDesk session and no PC is assigned to you: desk/pcs lists the PCs; ask the operator to let you join one with desk/request(pc, why), "
               "or call desk/join with a share link the human at the PC gives you")
 
 
-class GrantChange(TypedDict):
-    """One grant the pcs plugin's page gives or takes away, for the operator: grantee is "agent:<id>" or "graph:<name>"."""
-    pc: str
-    grantee: str
-    granted: bool
-
-
-class GrantDone(TypedDict):
-    changed: bool
-
-
-class GrantRefused(TypedDict):
-    why: str
-
-
-# The pcs plugin copies GrantChange, GrantDone and GrantRefused verbatim, as it does PcEntry.
-ASSIGN = Provision("rigdesk.assign", TypeAdapter(GrantChange), TypeAdapter(GrantDone | GrantRefused))
 REQUEST_CONFIRMED = Provision("rigdesk.request_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
 
 
@@ -177,7 +160,7 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
         return call.refused(REFUSED, f"you already own the session on {given.pc}")
     seat, asked = call.contract.place.seat, new_id("desk")
     lets = ("Accept joins it to that PC now, for one session: until it leaves, or you end the share." if given.kind == "join" else
-            "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the PCs page.")
+            "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the RigDesk page.")
     wants = "to join" if given.kind == "join" else "a standing grant to"
     reason = f"{title} ({agent}, in {graph}) asks {wants} RigDesk PC {given.pc}:\n\n{given.why.strip()}\n\n{lets}"[:2000]
     state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
@@ -203,16 +186,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
         raise Refused(REFUSED, f"{refused}; nothing was done") from refused
     except (aiohttp.ClientError, TimeoutError, OSError) as failed:
         raise Refused(DOWN, f"{given['pc']} did not answer: {type(failed).__name__}: {failed}; nothing was done") from failed
-    return f"{'Assigned' if changed else 'Already assigned'} {given['pc']} to you: desk/join(pc) joins it, with no share link, until the operator unassigns it on the PCs page."
-
-
-async def _assign(host: PluginHost, change: GrantChange) -> GrantDone | GrantRefused:
-    desks = host.live(Desks)
-    try:
-        changed = await (desks.assign if change["granted"] else desks.unassign)(change["pc"], change["grantee"])
-    except DeskRefused as refused:
-        return GrantRefused(why=str(refused))
-    return GrantDone(changed=changed)
+    return f"{'Assigned' if changed else 'Already assigned'} {given['pc']} to you: desk/join(pc) joins it, with no share link, until the operator unassigns it on the RigDesk page."
 
 
 async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answer:
@@ -297,6 +271,25 @@ async def _decide(_host: PluginHost, _capability: str, _tools_named: tuple[str, 
     return ()
 
 
+class GrantRow(View):
+    grantee: str = Field(description='"agent:<id>" or "graph:<name>", as rigdesk keeps it.')
+    label: str = Field(description="The agent's title, or every agent in the graph; the id when the agent is gone.")
+    graph: str | None = Field(description="The agent's home graph, or the graph granted; null for an agent Rig no longer has.")
+    agent_id: str | None
+
+
+async def _grant_row(host: PluginHost, grantee: str) -> GrantRow:
+    kind, _, name = grantee.partition(":")
+    if kind == "graph":
+        return GrantRow(grantee=grantee, label=f"every agent in {name}", graph=name, agent_id=None)
+    home = await host.agent_home(AgentId(name))
+    if home is None:
+        return GrantRow(grantee=grantee, label=f"{name} (gone)", graph=None, agent_id=name)
+    seat = await host.seat_of(AgentId(name), home, "rigdesk")
+    identity = None if isinstance(seat, RefusedOutcome) else await host.roster.identity(seat)  # type: ignore[arg-type]
+    return GrantRow(grantee=grantee, label=identity.label if identity is not None and identity.label else name, graph=home, agent_id=name)
+
+
 class PcRow(View):
     name: str
     client: str
@@ -308,7 +301,7 @@ class PcRow(View):
     holder: str | None = Field(description="human, agent or blocked while an agent owns the session; null with none.")
     owner: dict[str, str | None] | None = Field(description="The agent owning the session: id, title and graph.")
     owned_here: bool = Field(description="The owner joined through this Rig.")
-    assigned: tuple[str, ...] = Field(description='Who holds a standing grant to it, "agent:<id>" or "graph:<name>"; a stock PC only.')
+    assigned: tuple[GrantRow, ...] = Field(description="Who holds a standing grant to it; a stock PC only.")
 
 
 class ListenerRow(View):
@@ -330,6 +323,7 @@ class IdServerRow(View):
 class PcsView(View):
     pcs: tuple[PcRow, ...]
     id_server: IdServerRow | None = Field(description="Our RustDesk ID server and its health; null with no id_server set.")
+    for_fleet: bool = Field(description="desk/* is open to every agent; when false, an agent assigned a PC also needs desk among its mcp_servers.")
     source: str
 
 
@@ -358,8 +352,12 @@ def _id_server_row(desks: Desks) -> IdServerRow | None:
 
 @endpoint(NoParams, OPERATOR)
 async def get_pcs(request: Request[NoParams]) -> PcsView:
-    desks = request.host().live(Desks)
-    return PcsView(pcs=tuple(PcRow(**row) for row in desks.pcs()), id_server=await asyncio.to_thread(_id_server_row, desks), source="https://github.com/deussalo/rigdesk")
+    host = request.host()
+    desks = host.live(Desks)
+    rows = desks.pcs()
+    labels = {grantee: await _grant_row(host, grantee) for grantee in {each for row in rows for each in row["assigned"]}}
+    return PcsView(pcs=tuple(PcRow.model_validate(row | {"assigned": tuple(labels[each] for each in row["assigned"])}) for row in rows),
+                   id_server=await asyncio.to_thread(_id_server_row, desks), for_fleet=desks.for_fleet, source="https://github.com/deussalo/rigdesk")
 
 
 class SessionParams(Params):
@@ -423,7 +421,7 @@ class AssignDone(View):
 
 @endpoint(AssignParams, OPERATOR)
 async def post_assign(request: Request[AssignParams]) -> AssignDone | RefusedOutcome:
-    """Gives or takes away one standing grant to a stock PC, as the PCs page does: from this page, to the agent sharing it now."""
+    """Gives or takes away one standing grant to a stock PC: to any agent, or every agent in a graph."""
     body = request.params.body
     desks = request.host().live(Desks)
     try:
@@ -431,6 +429,34 @@ async def post_assign(request: Request[AssignParams]) -> AssignDone | RefusedOut
     except DeskRefused as refused:
         return request.refused(REFUSED, str(refused))
     return AssignDone(changed=changed)
+
+
+class ScreenshotBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", defer_build=True)
+    pc: DeskName
+
+
+class ScreenshotParams(Params):
+    body: ScreenshotBody
+
+
+class Screenshot(View):
+    mime: Literal["image/png"]
+    data: str = Field(description="The PNG, base64.")
+    taken_ms: int
+
+
+@endpoint(ScreenshotParams, OPERATOR)
+async def post_screenshot(request: Request[ScreenshotParams]) -> Screenshot | RefusedOutcome:
+    """One picture of a PC's screen, taken when the operator asks and kept nowhere here; the PC journals it."""
+    pc = request.params.body.pc
+    try:
+        png = await request.host().live(Desks).frame(pc)
+    except DeskRefused as refused:
+        return request.refused(REFUSED, str(refused))
+    except (aiohttp.ClientError, TimeoutError, OSError) as failed:
+        return request.refused(DOWN, f"{pc} did not answer: {type(failed).__name__}: {failed}")
+    return Screenshot(mime="image/png", data=base64.b64encode(png).decode("ascii"), taken_ms=now_ms())
 
 
 TOKENS = Path("~/.rig/rigdesk")
@@ -511,15 +537,11 @@ async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
                       for row in desks.pcs() if row["state"] == "down"))
 
 
-async def _provided(host: PluginHost, _asked: None) -> tuple[PcEntry, ...]:
-    return host.live(Desks).entries()
-
-
 CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, status=_status,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN},
-    provisions=(provider(PCS, _provided), provider(ASSIGN, _assign), provider(REQUEST_CONFIRMED, _request_confirmed)),
+    provisions=(provider(REQUEST_CONFIRMED, _request_confirmed),),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
-            RouteContribution("POST", "pc", post_pc)))
+            RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "screenshot", post_screenshot)))
