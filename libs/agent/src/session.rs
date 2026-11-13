@@ -81,6 +81,8 @@ struct Session {
 struct State {
     grant: Option<Grant>,
     session: Option<Session>,
+    /// Why the PC behind this host cannot be reached now; a host on the PC itself never sets it.
+    down: Option<String>,
 }
 
 /// The one share of this desktop: at most one open link, and at most one agent holding it.
@@ -237,6 +239,21 @@ impl Shared {
         let Some(session) = state.session.take() else { return false };
         self.events.push(EventKind::Revoked { agent_id: session.owner.agent_id, reason: reason.into() });
         true
+    }
+
+    /// Why the PC cannot be reached now, as the host last found; `None` while it can.
+    pub fn down(&self) -> Option<String> {
+        self.state.lock().unwrap().down.clone()
+    }
+
+    /// Records whether the PC can be reached; a change is an event.
+    pub fn set_down(&self, why: Option<String>) {
+        let mut state = self.state.lock().unwrap();
+        if state.down != why {
+            state.down = why.clone();
+            drop(state);
+            self.events.push(EventKind::Reach { down: why });
+        }
     }
 
     pub fn standing(&self) -> Standing {

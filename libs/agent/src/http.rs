@@ -120,7 +120,7 @@ impl Api {
         }
         let method = request.method().clone();
         match (method.as_str(), path.as_str()) {
-            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "standing": self.shared.standing()})),
+            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "standing": self.shared.standing(), "down": self.shared.down()})),
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
             ("POST", "/leave") => self.leave(&request),
@@ -379,6 +379,7 @@ async fn journal_holder_changes(mut rx: tokio::sync::broadcast::Receiver<Event>,
                     journal.record(&Entry::new(by, format!("holder {holder}"), "ok", Value::Null));
                 }
                 EventKind::Revoked { agent_id, reason } => journal.record(&Entry::new(reason, "revoke", "ok", json!({"agent_id": agent_id}))),
+                EventKind::Reach { down } => journal.record(&Entry::new("bridge", "reach", down.map_or("up".into(), |why| format!("down: {why}")), Value::Null)),
                 _ => {}
             },
             Err(RecvError::Lagged(missed)) => journal.record(&Entry::new("rigdesk", "journal", format!("missed {missed} events"), Value::Null)),

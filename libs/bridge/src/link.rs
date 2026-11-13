@@ -32,6 +32,9 @@ const CONNECT_TIMEOUT_MS: u64 = 10_000;
 const READ_TIMEOUT_MS: u64 = 30_000;
 /// No tool call for this long and the session is closed.
 const IDLE: Duration = Duration::from_secs(10 * 60);
+/// With no session open, whether the PC can be reached is checked this often, without opening one.
+const PROBE_EVERY: Duration = Duration::from_secs(30);
+const PROBE_WAIT: Duration = Duration::from_secs(5);
 /// A refused login waits this long before trying again, well clear of the PC's lockout after repeated failures.
 const LOGIN_RETRY: Duration = Duration::from_secs(5 * 60);
 /// The PC reports a cursor move this soon after the agent's own input as the tail of it.
@@ -100,6 +103,8 @@ impl Route {
 
 pub struct Link {
     route: Route,
+    /// Where whether the PC can be reached is published, for /health and the plugin.
+    shared: Arc<rigdesk_agent::Shared>,
     addr: String,
     username: String,
     password: String,
@@ -142,8 +147,9 @@ pub fn login_proof(password: &str, hash: &Hash) -> Vec<u8> {
 }
 
 impl Link {
-    pub fn new((route, username): (Route, String), password: String, name: String) -> Arc<Self> {
+    pub fn new((route, username): (Route, String), password: String, name: String, shared: Arc<rigdesk_agent::Shared>) -> Arc<Self> {
         Arc::new(Link {
+            shared,
             addr: route.label(),
             route,
             username,
@@ -168,7 +174,8 @@ impl Link {
     pub async fn run(self: Arc<Self>) {
         loop {
             if !self.wanted() {
-                self.demand.notified().await;
+                self.probe().await;
+                let _ = tokio::time::timeout(PROBE_EVERY, self.demand.notified()).await;
                 continue;
             }
             let started = now_ms();
@@ -180,6 +187,7 @@ impl Link {
                 state.info = None;
                 if let Err(e) = &ended {
                     state.failure = Some((e.to_string(), now_ms()));
+                    self.shared.set_down(Some(e.to_string()));
                 }
             }
             let _ = self.to_viewers.send(ToViewer::Ended);
@@ -216,6 +224,23 @@ impl Link {
             }
             Route::Id { id, server } => crate::rendezvous::dial(server, id).await?,
         })
+    }
+
+    /// Whether the PC answers, found without logging in: its direct-IP port takes a connection, or the ID server has it.
+    async fn probe(&self) {
+        let down = match &self.route {
+            Route::Direct { addr } => match tokio::time::timeout(PROBE_WAIT, tokio::net::TcpStream::connect(addr.as_str())).await {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(format!("nothing answers at {addr}: {e}")),
+                Err(_) => Some(format!("nothing answers at {addr} within {} s", PROBE_WAIT.as_secs())),
+            },
+            Route::Id { id, server } => match crate::rendezvous::online(server, id).await {
+                Ok(true) => None,
+                Ok(false) => Some(format!("the PC {id} is offline (not registered with the ID server now)")),
+                Err(e) => Some(format!("cannot ask the ID server {} about {id}: {e}", server.host)),
+            },
+        };
+        self.shared.set_down(down);
     }
 
     async fn session(&self) -> ResultType<()> {
@@ -291,6 +316,7 @@ impl Link {
                     state.info = Some(pi);
                     state.out = Some(tx.clone());
                     state.failure = None;
+                    self.shared.set_down(None);
                 }
                 _ => {}
             },

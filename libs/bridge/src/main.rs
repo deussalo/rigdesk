@@ -139,13 +139,13 @@ fn main() {
     };
     runtime.block_on(async move {
         let what = args.route.0.label();
-        let link = link::Link::new(args.route, password, args.name.clone());
+        let shared = Arc::new(Shared::new(Events::new(EVENT_RING)));
+        let link = link::Link::new(args.route, password, args.name.clone(), shared.clone());
         tokio::spawn(link.clone().run());
         let journal = match &args.journal {
             Some(path) => Journal::open(path.clone(), JOURNAL_BYTES),
             None => Journal::memory(),
         };
-        let shared = Arc::new(Shared::new(Events::new(EVENT_RING)));
         if let Some((port, password)) = viewer {
             match relay::Relay::new(link.clone(), shared.clone(), password).listen(port).await {
                 Ok(port) => log::info!("rigdesk-bridge: viewers of {what} on 127.0.0.1:{port}"),

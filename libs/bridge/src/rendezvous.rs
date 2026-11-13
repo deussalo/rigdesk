@@ -8,8 +8,8 @@
 use base::message_proto::{message, Message, PublicKey};
 use hbb_common::protobuf::Message as _;
 use hbb_common::rendezvous_proto::{
-    punch_hole_response, rendezvous_message, ConnType, IdPk, NatType, PunchHoleRequest, RendezvousMessage,
-    RequestRelay,
+    punch_hole_response, rendezvous_message, ConnType, IdPk, NatType, OnlineRequest, PunchHoleRequest,
+    RendezvousMessage, RequestRelay,
 };
 use hbb_common::sodiumoxide::crypto::{box_, secretbox, sign};
 use hbb_common::tcp::{FramedStream, KxTranscript};
@@ -62,6 +62,24 @@ fn with_port(host: &str, port: u16) -> String {
         host.to_string()
     } else {
         format!("{host}:{port}")
+    }
+}
+
+/// Whether the PC is registered with hbbs now, which it is while its RustDesk runs and reaches the ID server.
+pub async fn online(server: &Server, id: &str) -> ResultType<bool> {
+    let mut hbbs = FramedStream::new(server.host.as_str(), None, CONNECT_TIMEOUT_MS).await?;
+    let mut ask = RendezvousMessage::new();
+    ask.set_online_request(OnlineRequest { id: "rig".into(), peers: vec![id.to_string()], ..Default::default() });
+    hbbs.send(&ask).await?;
+    loop {
+        let Some(bytes) = hbbs.next_timeout(CONNECT_TIMEOUT_MS).await else {
+            bail!("the ID server {} did not say within {} s whether {id} is online", server.host, CONNECT_TIMEOUT_MS / 1000);
+        };
+        let Ok(msg) = RendezvousMessage::parse_from_bytes(&bytes?) else { continue };
+        if let Some(rendezvous_message::Union::OnlineResponse(answer)) = msg.union {
+            // One bit per asked peer, the first in the high bit of the first byte.
+            return Ok(answer.states.first().is_some_and(|byte| byte & 0x80 != 0));
+        }
     }
 }
 

@@ -20,6 +20,8 @@ pub enum EventKind {
     Dropped { messages: u64 },
     /// One tool call, as it ran: shown in the viewer, not kept for resume.
     Action { agent_title: String, tool: String, summary: String, ok: bool, x: Option<i32>, y: Option<i32> },
+    /// The PC behind a bridge became reachable (`down` null) or not, and why.
+    Reach { down: Option<String> },
 }
 
 #[derive(Clone, Debug, Serialize)]

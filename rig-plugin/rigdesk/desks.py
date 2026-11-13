@@ -610,6 +610,7 @@ class Desks:
                 raise DeskRefused(f"/health answered HTTP {answer.status}" + (": the token is refused" if answer.status == 401 else ""))
             health = await answer.json()
         link.standing = health.get("standing")
+        down = health.get("down")
         boot = str(health.get("boot", ""))
         if boot != self._boots.get(link.name):
             await self._rebooted(link.name, boot)
@@ -619,6 +620,7 @@ class Desks:
             if stream.status != 200:
                 raise DeskRefused(f"/events answered HTTP {stream.status}")
             link.state, link.why, link.down_since_ms = "up", None, None
+            self._reached(link, down if isinstance(down, str) else None)
             data: list[str] = []
             async for raw in stream.content:
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
@@ -653,8 +655,23 @@ class Desks:
             self._catalog = merged
             await asyncio.to_thread(self._write_state)
 
+    def _reached(self, link: PcLink, down: str | None) -> None:
+        """A bridge says whether its stock PC answers: the bridge may be up while the PC is off, and the PC is what counts."""
+        if down is None:
+            if link.state == "down":
+                _LOG.info("rigdesk_pc_up", f"RigDesk PC {link.name} answers again", pc=link.name)
+            link.state, link.why, link.down_since_ms = "up", None, None
+            return
+        if link.state != "down":
+            link.down_since_ms = now_ms()
+            _LOG.warning("rigdesk_pc_down", f"RigDesk PC {link.name} is down: {down}", pc=link.name)
+        link.state, link.why = "down", down
+
     async def _event(self, link: PcLink, event: dict[str, Any]) -> None:
         pc, kind, event_id = link.name, event.get("type"), int(event.get("id") or 0)
+        if kind == "reach":
+            down = event.get("down")
+            self._reached(link, down if isinstance(down, str) else None)
         standing = dict(link.standing or {})
         if kind == "claimed":
             standing |= {"owner": event.get("owner"), "holder": "agent"}

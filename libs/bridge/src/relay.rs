@@ -206,16 +206,23 @@ mod tests {
     }
 
     /// A stand-in stock PC: takes the bridge's login, answers a key-frame request with a frame, and reports each pointer
-    /// event it receives.
-    async fn fake_pc(listener: tokio::net::TcpListener, password: &str, pointer: tokio::sync::mpsc::UnboundedSender<i32>) {
-        let (stream, addr) = listener.accept().await.expect("the bridge dials the PC");
-        let mut pc = FramedStream::from(stream, addr);
+    /// event it receives. Like RustDesk, it takes any number of connections, such as the bridge's reach probes.
+    async fn fake_pc(listener: tokio::net::TcpListener, password: &'static str, pointer: tokio::sync::mpsc::UnboundedSender<i32>) {
+        loop {
+            let (stream, addr) = listener.accept().await.expect("the bridge dials the PC");
+            tokio::spawn(fake_connection(FramedStream::from(stream, addr), password, pointer.clone()));
+        }
+    }
+
+    async fn fake_connection(mut pc: FramedStream, password: &'static str, pointer: tokio::sync::mpsc::UnboundedSender<i32>) {
         let hash = Hash { salt: "s".into(), challenge: "c".into(), ..Default::default() };
         let mut msg = Message::new();
         msg.set_hash(hash.clone());
         pc.send(&msg).await.expect("send");
         loop {
-            match next(&mut pc).await.union {
+            let Some(Ok(bytes)) = pc.next_timeout(10_000).await else { return };
+            let Ok(msg) = Message::parse_from_bytes(&bytes) else { return };
+            match msg.union {
                 Some(message::Union::LoginRequest(login)) => {
                     assert_eq!(login.password.to_vec(), login_proof(password, &hash));
                     let info = base::message_proto::PeerInfo { hostname: "pc".into(), platform: "Windows".into(), ..Default::default() };
@@ -240,9 +247,9 @@ mod tests {
         let pc_port = pc.local_addr().expect("addr").port();
         let (pointer_tx, mut pointer) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(fake_pc(pc, "pc-pw", pointer_tx));
-        let link = Link::new(crate::link::Route::direct(&format!("127.0.0.1:{pc_port}")), "pc-pw".into(), "Rig agent".into());
-        tokio::spawn(link.clone().run());
         let shared = Arc::new(Shared::new(rigdesk_agent::Events::new(64)));
+        let link = Link::new(crate::link::Route::direct(&format!("127.0.0.1:{pc_port}")), "pc-pw".into(), "Rig agent".into(), shared.clone());
+        tokio::spawn(link.clone().run());
         let minted = shared.mint();
         let owner = rigdesk_agent::Owner { agent_id: "a".into(), title: "front desk".into(), graph: "g".into() };
         shared.claim(&minted.grant, &minted.secret, owner).expect("claimed");
@@ -275,8 +282,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_remembered_password_works_on_the_next_connection() {
-        let link = Link::new(crate::link::Route::direct("127.0.0.1:1"), "pc-pw".into(), "Rig agent".into());
         let shared = Arc::new(Shared::new(rigdesk_agent::Events::new(64)));
+        let link = Link::new(crate::link::Route::direct("127.0.0.1:1"), "pc-pw".into(), "Rig agent".into(), shared.clone());
         let port = Relay::new(link, shared, "bridge-pw".into()).listen(0).await.expect("listening");
         let mut salts = Vec::new();
         for _ in 0..2 {
@@ -286,5 +293,22 @@ mod tests {
             salts.push(hash.salt);
         }
         assert_eq!(salts[0], salts[1]);
+    }
+
+    #[tokio::test]
+    async fn with_no_session_open_the_bridge_says_whether_the_pc_answers() {
+        let shared = Arc::new(Shared::new(rigdesk_agent::Events::new(64)));
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = closed.local_addr().expect("addr").port();
+        drop(closed);
+        let link = Link::new(crate::link::Route::direct(&format!("127.0.0.1:{port}")), "pc-pw".into(), "Rig agent".into(), shared.clone());
+        tokio::spawn(link.run());
+        let mut waited = 0;
+        while shared.down().is_none() && waited < 50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            waited += 1;
+        }
+        assert!(shared.down().is_some_and(|why| why.starts_with(&format!("nothing answers at 127.0.0.1:{port}"))), "{:?}", shared.down());
+        assert!(shared.events.since(0).iter().any(|e| matches!(&e.kind, rigdesk_agent::EventKind::Reach { down: Some(_) })));
     }
 }
