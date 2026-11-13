@@ -2,16 +2,13 @@
 //! token (never SYSTEM); the clipboard is the user's own.
 
 use hbb_common::log;
+use rigdesk_agent::shell::{self, Asked};
+use rigdesk_agent::Called;
 
-/// Run a PowerShell script as the signed-in user and return its combined output, truncated to a sane size.
-pub fn powershell(script: &str, timeout_ms: u32) -> Result<String, String> {
-    const CAP: usize = 256 * 1024;
-    let mut out = crate::platform::run_powershell_as_user(script, timeout_ms).map_err(|e| e.to_string())?;
-    if out.len() > CAP {
-        out.truncate(CAP);
-        out.push_str("\n... [output truncated]");
-    }
-    Ok(out)
+/// Run one command as the signed-in user and answer its output and how it ended.
+pub fn run(asked: &Asked) -> Result<Called, String> {
+    let (printed, ended) = crate::platform::run_shell_as_user(&asked.command, asked.timeout).map_err(|e| e.to_string())?;
+    shell::answer(&printed, ended)
 }
 
 pub fn clipboard_get() -> Result<String, String> {

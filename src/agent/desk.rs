@@ -1,12 +1,16 @@
-//! The Windows desktop behind the agent API: the tool catalog of acceptance 6 and the dispatch that runs each call
-//! through capture, input, the UI tree and the user's shell. The share and holder rules sit in front of this in the
+//! The Windows desktop behind the agent API: the tool catalog, the same as a stock PC's, and the dispatch that runs each
+//! call through capture, input, the clipboard and the user's shell. The share and holder rules sit in front of this in the
 //! `rigdesk-agent` crate; by the time `call` runs, the agent is allowed to act.
 
-use rigdesk_agent::{Content, Desk, ToolSpec};
+use rigdesk_agent::{Called, Content, Desk, ToolSpec};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{capture, input, shell, uia};
+use super::{capture, input, shell};
+
+const SHELL: &str = "Run a PowerShell command on the PC as the signed-in user, never as SYSTEM, and get its output and \
+exit status: the code it exits with, 1 for an error it does not catch, else the last program's exit code. It reads no \
+input, so nothing can wait at a prompt; output is plain text, cut from the middle past 32 KiB.";
 
 pub struct WinDesk {
     /// When this desk last finished injecting input for the agent (wall-clock ms).
@@ -75,8 +79,6 @@ impl Desk for WinDesk {
         vec![
             ToolSpec { name: "screenshot", read_only: true, description: "A PNG of the primary display right now.",
                 input_schema: json!({"type": "object", "properties": {}}) },
-            ToolSpec { name: "snapshot", read_only: true, description: "The on-screen UI Automation tree: each element's role, name, automation id and clickable centre as @x,y.",
-                input_schema: json!({"type": "object", "properties": {}}) },
             ToolSpec { name: "move", read_only: false, description: "Move the pointer to absolute screen x,y.",
                 input_schema: obj(xy.clone(), &["x", "y"]) },
             ToolSpec { name: "click", read_only: false, description: "Click at x,y. button is left (default) or right; double true for a double-click.",
@@ -92,13 +94,10 @@ impl Desk for WinDesk {
             ToolSpec { name: "shortcut", read_only: false, description: "Press a chord such as ctrl+c, ctrl+shift+n or alt+f4.",
                 input_schema: obj(json!({"keys": {"type": "string"}}), &["keys"]) },
             ToolSpec { name: "wait", read_only: true, description: "Pause for ms milliseconds (capped at 10000) to let the UI settle.",
-                input_schema: obj(json!({"ms": {"type": "integer"}}), &["ms"]) },
-            ToolSpec { name: "app", read_only: false, description: "launch: start a program by name or path. switch: bring a window whose title contains the text to the front.",
-                input_schema: obj(json!({"action": {"type": "string"}, "name": {"type": "string"}}), &["action", "name"]) },
-            ToolSpec { name: "powershell", read_only: false, description: "Run a PowerShell script as the signed-in user and return its output. Never runs as SYSTEM.",
-                input_schema: obj(json!({"script": {"type": "string"}, "timeout_ms": {"type": "integer"}}), &["script"]) },
+                input_schema: obj(json!({"ms": {"type": "integer"}}), &["ms"]) }, "name": {"type": "string"}}), &["action", "name"]) }, "timeout_ms": {"type": "integer"}}), &["script"]) },
             ToolSpec { name: "clipboard", read_only: false, description: "get the user's clipboard text, or set it when text is given.",
                 input_schema: obj(json!({"text": {"type": "string"}}), &[]) },
+            rigdesk_agent::shell::spec(SHELL),
         ]
     }
 
@@ -107,12 +106,15 @@ impl Desk for WinDesk {
         last_input_ms().map_or(false, |at| at > quiet_from)
     }
 
-    fn call(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
+    fn call(&self, tool: &str, args: &Value) -> Result<Called, String> {
+        if tool == "shell" {
+            return shell::run(&rigdesk_agent::shell::asked(args)?);
+        }
         let result = self.run(tool, args);
-        if !matches!(tool, "screenshot" | "snapshot" | "wait") {
+        if !matches!(tool, "screenshot" | "wait") {
             self.injected_ms.store(rigdesk_agent::now_ms(), Ordering::SeqCst);
         }
-        result
+        result.map(Into::into)
     }
 }
 
@@ -123,7 +125,6 @@ impl WinDesk {
                 let (png, w, h) = capture::primary_png().map_err(|e| e.to_string())?;
                 Ok(vec![Content::Text(format!("primary display {w}x{h}")), Content::Png(png)])
             }
-            "snapshot" => ok(uia::snapshot()?),
             "move" => {
                 input::move_to(int(args, "x")?, int(args, "y")?);
                 ok("moved")
@@ -163,11 +164,6 @@ impl WinDesk {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
                 ok(format!("waited {ms}ms"))
             }
-            "app" => app(&text(args, "action")?, &text(args, "name")?),
-            "powershell" => {
-                let timeout = args.get("timeout_ms").and_then(Value::as_i64).unwrap_or(30_000).clamp(1_000, 120_000) as u32;
-                ok(shell::powershell(&text(args, "script")?, timeout)?)
-            }
             "clipboard" => match args.get("text").and_then(Value::as_str) {
                 Some(t) => {
                     shell::clipboard_set(t)?;
@@ -177,21 +173,5 @@ impl WinDesk {
             },
             other => Err(format!("no such tool: {other}")),
         }
-    }
-}
-
-fn app(action: &str, name: &str) -> Result<Vec<Content>, String> {
-    match action {
-        "launch" => {
-            let safe = name.replace('\'', "''");
-            shell::powershell(&format!("Start-Process '{safe}'"), 15_000)?;
-            ok(format!("launched {name}"))
-        }
-        "switch" => {
-            let safe = name.replace('\'', "''");
-            let out = shell::powershell(&format!("(New-Object -ComObject WScript.Shell).AppActivate('{safe}')"), 10_000)?;
-            ok(format!("switch requested: {}", out.trim()))
-        }
-        other => Err(format!("app action must be launch or switch, not {other}")),
     }
 }

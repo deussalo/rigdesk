@@ -12,6 +12,38 @@ use crate::desk::{Called, Content, ToolSpec};
 pub const OUTPUT_CAP: usize = 32 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(600);
+/// A PC sends at most this much of the start and of the end of a command's output; the middle is counted, not sent.
+pub const PART: usize = 64 * 1024;
+
+/// The script that runs a Windows command, from `c.ps1` beside it (UTF-8 with a byte-order mark), in a fresh PowerShell,
+/// and fixes its status: the code it exits with, 1 for an error it does not catch, else the exit code of the last program
+/// it ran (0 when none).
+pub const POWERSHELL_WRAPPER: &str = r#"[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
+$global:LASTEXITCODE = 0
+try { . "$PSScriptRoot\c.ps1" } catch { [Console]::Error.WriteLine(($_ | Out-String)); exit 1 }
+exit $LASTEXITCODE
+"#;
+
+/// What a command wrote to `path`: all of it, or its first and last `PART` bytes and the count between.
+pub fn printed_file(path: &std::path::Path) -> std::io::Result<Printed> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Printed::default()),
+        Err(e) => return Err(e),
+    };
+    let total = file.metadata()?.len() as usize;
+    let mut head = Vec::new();
+    if total <= 2 * PART {
+        file.read_to_end(&mut head)?;
+        return Ok(Printed::whole(head));
+    }
+    (&mut file).take(PART as u64).read_to_end(&mut head)?;
+    file.seek(SeekFrom::Start((total - PART) as u64))?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail)?;
+    Ok(Printed { dropped: total - head.len() - tail.len(), head, tail })
+}
 
 pub fn spec(shell: &'static str) -> ToolSpec {
     ToolSpec {
@@ -223,6 +255,19 @@ mod tests {
         assert_eq!(failed.contents, vec![Content::Text(json!({"exit_code": 3, "output": "nope", "cut_bytes": 0}).to_string())]);
         let slow = answer(&Printed::whole(b"started\n".to_vec()), Ended::TimedOut(Duration::from_secs(5))).unwrap_err();
         assert!(slow.starts_with("timed out: the command ran past 5 s and was ended") && slow.ends_with("started"));
+    }
+
+    #[test]
+    fn a_long_output_file_gives_its_ends_and_a_count() {
+        let dir = std::env::temp_dir().join(format!("rigdesk-shell-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("o");
+        std::fs::write(&path, [b"a".repeat(PART), b"m".repeat(10), b"z".repeat(PART)].concat()).unwrap();
+        assert_eq!(printed_file(&path).unwrap(), Printed { head: b"a".repeat(PART), dropped: 10, tail: b"z".repeat(PART) });
+        std::fs::write(&path, b"short").unwrap();
+        assert_eq!(printed_file(&path).unwrap(), Printed::whole(b"short".to_vec()));
+        assert_eq!(printed_file(&dir.join("none")).unwrap(), Printed::default());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

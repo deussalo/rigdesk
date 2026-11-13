@@ -116,8 +116,8 @@ failed: the ID never registered, the PC is offline, or the key differs from hbbs
 
 Known limits against a RigDesk PC:
 
-* tools: screenshot, move, click, drag, scroll, type, key, shortcut, wait and clipboard only; no UI tree
-  (snapshot), app or powershell;
+* `shell` runs in RustDesk's own terminal, which the PC must allow (`enable-terminal`, on by default); on Windows it
+  needs a signed-in user, as the user's PowerShell; elsewhere it is the user's shell as RustDesk's user;
 * someone at the PC itself takes input back by moving its mouse; their keyboard use is not seen (a GUI's is);
 * direct IP access has no RustDesk-layer encryption; the tailnet's WireGuard is what protects the session;
 * screenshots come from the PC's own screenshot feature, so each costs a round trip of a full PNG.
@@ -145,9 +145,11 @@ Known limits against a RigDesk PC:
   an unknown PC, a RigDesk PC (its human shares it in the viewer), or one already assigned to the caller.
 * `desk/join(pc)` — joins a stock PC assigned to the caller, by name. A desk call with no session joins the caller's
   assigned PC by itself only when it has exactly one; with more it is refused and lists them.
-* `desk/<tool>` — the PC's own tools (screenshot, snapshot, click, type, scroll, move, drag, key,
-  shortcut, wait, app, powershell, clipboard), sent to the PC the calling agent joined. Images come
-  back as PNG files under the plugin's state directory.
+* `desk/<tool>` — the PC's own tools (screenshot, click, type, scroll, move, drag, key, shortcut, wait, clipboard
+  and shell), the same on every PC, sent to the PC the calling agent joined. Images come back as PNG files under the
+  plugin's state directory. `desk/shell(command, timeout_s)` answers `{exit_code, output, cut_bytes}`: output and
+  errors as plain text, cut from the middle past 32 KiB; a command over its limit (60 s by default, 600 at most) is
+  ended and refused as timed out, with what it printed. The PC's journal keeps each command and its status.
 * `desk/attachment(id)` — an image the human sent with a message.
 * `desk/leave` — ends the session.
 

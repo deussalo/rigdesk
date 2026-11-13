@@ -1,5 +1,5 @@
 //! RigDesk's agent API host (Windows). The pure share/holder logic, the event log and the HTTP surface live in the
-//! `rigdesk-agent` crate; this module fills its one seam -- the [`Desk`] of capture, input, UI tree and shell -- and
+//! `rigdesk-agent` crate; this module fills its one seam -- the [`Desk`] of capture, input, clipboard and shell -- and
 //! starts the server inside the user-session `--server` process, the one that owns capture and input.
 //!
 //! The holder state lives here, on the controlled side, so it holds even when Rig is down. Viewer and local input
@@ -18,7 +18,6 @@ mod desk;
 pub mod enroll;
 mod input;
 mod shell;
-mod uia;
 pub mod viewer;
 
 /// The agent conn id. handle_mouse/handle_key key their per-connection state by it; it is distinct from any real

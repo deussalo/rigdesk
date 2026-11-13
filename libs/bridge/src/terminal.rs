@@ -15,7 +15,7 @@ use hbb_common::base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hbb_common::protobuf::Message as _;
 use hbb_common::tcp::FramedStream;
 use hbb_common::tokio::time::{sleep, timeout, Instant};
-use rigdesk_agent::shell::{self, Asked, Ended, Printed};
+use rigdesk_agent::shell::{self, Asked, Ended, Printed, PART};
 use rigdesk_agent::Called;
 
 use crate::link::Link;
@@ -29,8 +29,6 @@ const PROMPT_QUIET: Duration = Duration::from_millis(500);
 const PROMPT_WAIT: Duration = Duration::from_secs(15);
 /// How long past the command's own limit the PC has to end it and send what it printed.
 const REPORT_GRACE: Duration = Duration::from_secs(20);
-/// The PC sends at most this much of the start and of the end of the output; the middle is counted, not sent.
-const PART: usize = 64 * 1024;
 /// Typed lines stay well under a pseudo-terminal's line buffer (4 KiB on Linux).
 const LINE: usize = 1000;
 
@@ -90,6 +88,7 @@ fn runner(shell: Shell, command: &str, limit: Duration, nonce: &str) -> String {
             script.extend_from_slice(command.as_bytes());
             POWERSHELL_RUNNER
                 .replace("@COMMAND@", &B64.encode(script))
+                .replace("@WRAPPER@", shell::POWERSHELL_WRAPPER)
                 .replace("@LIMIT_MS@", &(secs * 1000).to_string())
                 .replace("@PART@", &PART.to_string())
                 .replace("@NONCE@", nonce)
@@ -123,20 +122,16 @@ printf '#RIG@NONCE@.end#\n'
 rm -rf "$d"
 "##;
 
-// The command runs in a fresh PowerShell from a file in the user's own temp directory, behind cmd, which writes its
-// output and errors to one file in the order they came. Its status: the code it exits with, 1 for an error it does not
-// catch, else the exit code of the last program it ran (0 when none). Over its limit, its whole process tree is ended.
+// The command runs in a fresh PowerShell (see `shell::POWERSHELL_WRAPPER`) from a file in the user's own temp directory,
+// behind cmd, which writes its output and errors to one file in the order they came. Over its limit, its whole process
+// tree is ended.
 const POWERSHELL_RUNNER: &str = r##"try {
 $ErrorActionPreference = 'Stop'
 $d = Join-Path ([IO.Path]::GetTempPath()) 'rig-@NONCE@'
 New-Item -ItemType Directory -Path $d -Force | Out-Null
 [IO.File]::WriteAllBytes("$d\c.ps1", [Convert]::FromBase64String('@COMMAND@'))
 [IO.File]::WriteAllText("$d\w.ps1", @'
-[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
-$global:LASTEXITCODE = 0
-try { . "$PSScriptRoot\c.ps1" } catch { [Console]::Error.WriteLine(($_ | Out-String)); exit 1 }
-exit $LASTEXITCODE
-'@)
+@WRAPPER@'@)
 $exe = (Get-Process -Id $PID).Path
 $a = '/d /c ""' + $exe + '" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $d + '\w.ps1" > "' + $d + '\o" 2>&1"'
 $p = Start-Process -FilePath $env:ComSpec -ArgumentList $a -WindowStyle Hidden -PassThru

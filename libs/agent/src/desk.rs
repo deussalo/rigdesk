@@ -29,7 +29,7 @@ impl From<Vec<Content>> for Called {
     }
 }
 
-/// What the host gives the agent: capture, the UI tree, input, a shell. Calls block; the server runs them off its reactor.
+/// What the host gives the agent: capture, input, the clipboard, a shell. Calls block; the server runs them off its reactor.
 pub trait Desk: Send + Sync + 'static {
     fn tools(&self) -> Vec<ToolSpec>;
     fn call(&self, tool: &str, args: &Value) -> Result<Called, String>;
