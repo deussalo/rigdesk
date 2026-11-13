@@ -94,7 +94,7 @@ impl Desk for WinDesk {
             ToolSpec { name: "shortcut", read_only: false, description: "Press a chord such as ctrl+c, ctrl+shift+n or alt+f4.",
                 input_schema: obj(json!({"keys": {"type": "string"}}), &["keys"]) },
             ToolSpec { name: "wait", read_only: true, description: "Pause for ms milliseconds (capped at 10000) to let the UI settle.",
-                input_schema: obj(json!({"ms": {"type": "integer"}}), &["ms"]) }, "name": {"type": "string"}}), &["action", "name"]) }, "timeout_ms": {"type": "integer"}}), &["script"]) },
+                input_schema: obj(json!({"ms": {"type": "integer"}}), &["ms"]) },
             ToolSpec { name: "clipboard", read_only: false, description: "get the user's clipboard text, or set it when text is given.",
                 input_schema: obj(json!({"text": {"type": "string"}}), &[]) },
             rigdesk_agent::shell::spec(SHELL),
