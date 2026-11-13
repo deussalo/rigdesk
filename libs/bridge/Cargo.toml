@@ -9,3 +9,4 @@ license = "AGPL-3.0"
 base = { path = "../base" }
 hbb_common = { path = "../hbb_common" }
 rigdesk-agent = { path = "../agent" }
+png = "=0.17.13"

@@ -6985,6 +6985,7 @@ version = "0.1.0"
 dependencies = [
  "base",
  "hbb_common",
+ "png 0.17.13",
  "rigdesk-agent",
 ]
 
