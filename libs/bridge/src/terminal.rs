@@ -186,8 +186,16 @@ Lines $h
 [Console]::Out.WriteLine('#RIG@NONCE@.tail#')
 Lines $tl
 [Console]::Out.WriteLine('#RIG@NONCE@.end#')
+function Ask {
+  $q = ''; $by = [DateTime]::Now.AddSeconds(60)
+  while ([DateTime]::Now -lt $by) {
+    while ([Console]::KeyAvailable) { $c = [Console]::ReadKey($true); if ($c.Key -eq 'Enter') { return $q }; $q += $c.KeyChar }
+    Start-Sleep -Milliseconds 50
+  }
+  ''
+}
 for ($k = 0; $k -lt @ROUNDS@; $k++) {
-  $q = [Console]::In.ReadLine()
+  $q = Ask
   if (-not $q -or $q -eq 'ok') { break }
   foreach ($w in ($q -split ' ' | Where-Object { $_.Length -gt 1 })) {
     $b = if ($w[0] -eq 'h') { $h } elseif ($w[0] -eq 't') { $tl } else { '' }
