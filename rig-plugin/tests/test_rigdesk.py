@@ -108,9 +108,9 @@ def test_an_assigned_agent_or_graph_holds_a_standing_grant_to_its_stock_pc_only_
                 pass
             else:
                 raise AssertionError("a RigDesk PC took a standing grant")
-            assert desks.assigned_pc("a1", "g") == "deus"
-            assert desks.assigned_pc("anyone", "clients") == "deus"
-            assert desks.assigned_pc("a3", "g") is None
+            assert desks.assigned_pcs("a1", "g") == ("deus",)
+            assert desks.assigned_pcs("anyone", "clients") == ("deus",)
+            assert desks.assigned_pcs("a3", "g") == ()
             again = _granting(state, docs)
             await again._read_grants()
             assert again.granted("deus") == ("agent:a1", "graph:clients"), "grants outlive the plugin"
@@ -138,6 +138,34 @@ def test_a_second_writer_is_refused_and_an_unreadable_grants_doc_stops_the_plugi
                 pass
             else:
                 raise AssertionError("an unreadable grants doc was read as no grants")
+
+    asyncio.run(run())
+
+
+def test_an_agent_assigned_two_pcs_names_the_one_it_joins_and_is_never_joined_to_either_by_default() -> None:
+    from rigdesk.desks import DeskRefused, StockRemote
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = _granting(state, _Docs())
+            stock = StockRemote(peer="back.tail1234.ts.net", password_file="/dev/null")
+            desks._pcs["back"] = PcLink("back", DeskPc(url="http://127.0.0.1:21122", token_file="/dev/null", stock=stock))
+            await desks.assign("deus", "agent:a1")
+            await desks.assign("back", "agent:a1")
+            for joining in (desks.assigned_join("a1", "g", "n", "A"), desks.join_assigned("front", "a1", "g", "n", "A")):
+                try:
+                    await joining
+                except DeskRefused as refused:
+                    assert "back, deus" in str(refused) or "not assigned to you" in str(refused), refused
+                else:
+                    raise AssertionError("joined a PC the agent did not name, or one not assigned to it")
+            desks._sessions["back"] = Held("back", "a2", "g", "n2", "B", "s", 0, "link")
+            try:
+                await desks.join_assigned("back", "a1", "g", "n", "A")
+            except DeskRefused as refused:
+                assert "B holds it now" in str(refused), refused
+            else:
+                raise AssertionError("joined a PC another agent holds")
 
     asyncio.run(run())
 

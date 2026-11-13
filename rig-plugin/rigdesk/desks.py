@@ -651,9 +651,9 @@ class Desks:
             await self._tell(replaced, f"RigDesk {pc}: the human shared the PC with another agent, so your session there ended.", f"replaced:{held.since_ms}")
         return held
 
-    def assigned_pc(self, agent: str, graph: str) -> str | None:
-        """The stock PC this agent, or its graph, holds a standing grant to."""
-        return next((name for name, link in self._pcs.items() if link.spec.stock is not None and _grants(self.granted(name), agent, graph)), None)
+    def assigned_pcs(self, agent: str, graph: str) -> tuple[str, ...]:
+        """The stock PCs this agent, or its graph, holds a standing grant to, by name."""
+        return tuple(sorted(name for name, link in self._pcs.items() if link.spec.stock is not None and _grants(self.granted(name), agent, graph)))
 
     async def _unassigned(self, pc: str) -> None:
         """The operator took the grant away: its session ends now, and the agent is told by the revoke event."""
@@ -663,10 +663,33 @@ class Desks:
             _LOG.warning("rigdesk_unassign_failed", f"RigDesk {pc}: ending the unassigned session failed: {failed}", pc=pc)
 
     async def assigned_join(self, agent: str, graph: str, node: str, title: str) -> Held | None:
-        """Joins the PC this agent is assigned, as a share link would, unless another agent holds it now; None with no grant."""
-        pc = self.assigned_pc(agent, graph)
-        if pc is None:
-            return None
+        """Joins the one PC this agent is assigned, on any desk call; None with no grant. With several, the agent names one with desk/join(pc)."""
+        match self.assigned_pcs(agent, graph):
+            case ():
+                return None
+            case (only,):
+                return await self.join_assigned(only, agent, graph, node, title)
+            case several:
+                raise DeskRefused(f"you are assigned {', '.join(several)}: name the one you mean with desk/join(pc) first")
+
+    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str) -> Held:
+        """The operator accepted this agent's request to join a stock PC: a share link is minted and claimed for it, as the human would."""
+        mine = self.held_by(agent, graph)
+        if mine is not None:
+            raise DeskRefused(f"{title} already owns the session on {mine.pc}; it must desk/leave it first")
+        other = self._sessions.get(pc)
+        if other is not None and other.agent != agent:
+            raise DeskRefused(f"{other.title} holds {pc} now")
+        minted = await self.viewer(pc, "mint")
+        return await self.join(minted["link"], agent, graph, node, title)
+
+    async def join_assigned(self, pc: str, agent: str, graph: str, node: str, title: str) -> Held:
+        """Joins a PC this agent is assigned, as a share link would, unless another agent holds it now."""
+        if pc not in self.assigned_pcs(agent, graph):
+            raise DeskRefused(f"{pc} is not assigned to you: ask the human there for a share link, or the operator with desk/request(pc, why)")
+        mine = self.held_by(agent, graph)
+        if mine is not None:
+            raise DeskRefused(f"you already own the session on {mine.pc}; desk/leave it before joining another" if mine.pc != pc else f"you already own the session on {pc}")
         other = self._sessions.get(pc)
         if other is not None and other.agent != agent:
             frees = f"they leave or after {IDLE_LEAVE_MS // 60_000} minutes without a desk call" if other.via == "assigned" else "they leave or the human ends that share link"
@@ -771,4 +794,4 @@ class Desks:
                 "since_ms": standing.get("since_ms"), "joined_ms": held.since_ms}
 
 
-NATIVE = frozenset({"join", "leave", "attachment", "request"})
+NATIVE = frozenset({"join", "leave", "attachment", "request", "pcs"})

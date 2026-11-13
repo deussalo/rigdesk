@@ -125,9 +125,13 @@ Known limits against a RigDesk PC:
   displaced. A change applies at once and does not restart the bridge; taking a grant away ends a session held through
   it. A PC removed from settings, or no longer stock, loses its grants. A session held through the grant ends after
   5 minutes without a desk call, so other assigned agents can take the PC; the agent is told, and its next call rejoins.
-* `desk/request(pc, why)` — asks the operator for a standing grant to a stock PC. Refused at once for an unknown PC,
-  a RigDesk PC, or one already granted to the caller; otherwise the operator gets an Accept/Deny, and on Accept the
-  caller is granted the PC and told so.
+* `desk/pcs` — every PC in Rig, with its client, whether it is up, whether it is assigned to the caller, and who holds
+  it now.
+* `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins
+  the caller to it now for one session, as a share link would; `assign` gives it a standing grant. Refused at once for
+  an unknown PC, a RigDesk PC (its human shares it in the viewer), or one already assigned to the caller.
+* `desk/join(pc)` — joins a stock PC assigned to the caller, by name. A desk call with no session joins the caller's
+  assigned PC by itself only when it has exactly one; with more it is refused and lists them.
 * `desk/<tool>` — the PC's own tools (screenshot, snapshot, click, type, scroll, move, drag, key,
   shortcut, wait, app, powershell, clipboard), sent to the PC the calling agent joined. Images come
   back as PNG files under the plugin's state directory.
