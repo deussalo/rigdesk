@@ -37,7 +37,7 @@ jobs:
         run: |
           cargo build --release -p rigdesk-bridge --locked
           ldd target/release/rigdesk-bridge
-          ./target/release/rigdesk-bridge 2>&1 | grep -q -- "--peer is required"
+          ./target/release/rigdesk-bridge 2>&1 | grep -q -- "--peer, or --id with --id-server and --key-file, is required"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rigdesk-bridge-linux-x64

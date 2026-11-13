@@ -1,7 +1,7 @@
 # Stock-PC smoke test (plan S9): unmodified RustDesk runs --server on the runner with direct IP access and a permanent
 # password, as an operator would set up a client's PC; rigdesk-bridge logs in to it over 127.0.0.1 and serves the agent
-# API. Checks a screenshot, a click and typing into Notepad, the clipboard both ways, a takeover by someone at the PC,
-# hand-back, Block, and the action log.
+# API. Checks a screenshot, a click and typing into Notepad, the clipboard both ways, the shell, a takeover by someone at
+# the PC, hand-back, Block, and the action log.
 param([Parameter(Mandatory = $true)][string]$Version, [string]$Remote = ".\target\release\rigdesk-bridge.exe")
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -143,6 +143,26 @@ try {
   if ("$(Get-Clipboard -Raw)".Trim() -ne $set) { Fail "setting the clipboard did not reach the PC: '$(Get-Clipboard -Raw)'" }
   Write-Host "clipboard both ways"
 
+  # The shell runs in RustDesk's own terminal, which stock RustDesk has from 1.4.1.
+  $hasTerminal = [version]$Version -ge [version]"1.4.1"
+  if ($hasTerminal) {
+    $ran = Tool "shell" @{ command = "Write-Host -ForegroundColor Green 'green'; whoami; cmd /c exit 3" }
+    if ($ran.isError) { Fail "shell refused: $(Text $ran)" }
+    $answer = (Text $ran) | ConvertFrom-Json
+    if ($answer.exit_code -ne 3) { Fail "shell answered exit $($answer.exit_code), not 3: $(Text $ran)" }
+    if ($answer.output -notmatch "green" -or $answer.output -notmatch [regex]::Escape($env:USERNAME) -or $answer.output.Contains([string][char]27)) {
+      Fail "shell output lacks its lines or carries terminal codes: $($answer.output)"
+    }
+    $slow = Tool "shell" @{ command = "'begun'; Start-Sleep 30"; timeout_s = 3 }
+    if (-not $slow.isError -or (Text $slow) -notmatch "timed out" -or (Text $slow) -notmatch "begun") { Fail "a slow command was not refused as timed out: $(Text $slow)" }
+    $long = Tool "shell" @{ command = "1..20000 | ForEach-Object { 'line {0:d6}' -f `$_ }" }
+    $answer = (Text $long) | ConvertFrom-Json
+    if ($answer.cut_bytes -le 0 -or $answer.output -notmatch "line 000001" -or $answer.output -notmatch "line 020000") {
+      Fail "a long output was not cut from the middle: cut $($answer.cut_bytes), $(Text $long)"
+    }
+    Write-Host "shell: exit 3 from plain output, a time-out, a long output with $($answer.cut_bytes) bytes cut"
+  }
+
   # Someone at the PC moves the mouse: the agent's next action waits, reads still work.
   Start-Sleep 1
   [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(($ox + 40), ($oy + 40))
@@ -166,6 +186,7 @@ try {
   $log = Invoke-RestMethod -Uri "$base/log?n=50" -Headers $auth
   $what = ($log.entries | ForEach-Object { $_.what }) -join ","
   foreach ($w in @("claim", "click", "type", "block")) { if ($what -notmatch $w) { Fail "the action log lacks $w`: $what" } }
+  if ($hasTerminal -and -not ($log.entries | Where-Object { $_.what -eq "call shell" -and $_.outcome -eq "exit 3" })) { Fail "the action log lacks the shell command's exit 3" }
   if ((Get-Content -Raw (Join-Path $out "remote.err.log")) -match [regex]::Escape($password)) { Fail "the password reached rigdesk-bridge's log" }
   Write-Host "stock $Version smoke passed"
 } finally {
