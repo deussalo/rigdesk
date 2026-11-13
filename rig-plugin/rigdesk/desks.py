@@ -240,8 +240,6 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
             return f"RigDesk {pc}: the human handed input to you at {at}. You may act there again."
         if holder == "blocked":
             return f"RigDesk {pc}: the human blocked you at {at}. Every call there, reads included, is refused until they unblock you."
-    if kind == "revoked" and event.get("reason") != "the agent left":
-        return f"RigDesk {pc}: your session ended at {at}: {event.get('reason', 'revoked')}. Ask the human for a new link to join again."
     if kind == "dropped":
         count = int(event.get("messages") or 0)
         return (f"RigDesk {pc}: {count} of the human's messages were dropped unread at {at}: the PC's queue was full." if count
@@ -635,7 +633,7 @@ class Desks:
         held = self._sessions.pop(pc, None)
         await asyncio.to_thread(self._write_state)
         if known and held is not None and not _grants(self.granted(pc), held.agent, held.graph):
-            await self._tell(held, f"RigDesk {pc}: RigDesk restarted (on the PC or the bridge), so your session there ended. Ask the human for a new link to join again.", f"boot:{boot}")
+            _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: RigDesk restarted, so {held.title}'s session there ended", pc=pc)
 
     async def _listed(self, link: PcLink) -> None:
         """desk/* offers every tool any PC offers: a stock PC has fewer than a RigDesk PC, and refuses the ones it lacks."""
@@ -783,7 +781,7 @@ class Desks:
         link.standing = said.get("standing")
         await asyncio.to_thread(self._write_state)
         if replaced is not None and replaced.agent != agent:
-            await self._tell(replaced, f"RigDesk {pc}: the human shared the PC with another agent, so your session there ended.", f"replaced:{held.since_ms}")
+            _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: shared with {title}, so {replaced.title}'s session there ended", pc=pc)
         return held
 
     def assigned_pcs(self, agent: str, graph: str) -> tuple[str, ...]:
@@ -840,8 +838,7 @@ class Desks:
                 await self.leave(held)
             except (aiohttp.ClientError, TimeoutError, OSError) as failed:
                 _LOG.warning("rigdesk_idle_leave_failed", f"RigDesk {held.pc}: leaving the idle session failed: {failed}", pc=held.pc)
-            await self._tell(held, f"RigDesk {held.pc}: you made no desk call for {IDLE_LEAVE_MS // 60_000} minutes, so you left the PC for other agents; your next desk call joins it again if it is free.",
-                             f"idle:{held.since_ms}")
+            _LOG.info("rigdesk_session_ended", f"RigDesk {held.pc}: {held.title} left after {IDLE_LEAVE_MS // 60_000} idle minutes", pc=held.pc)
 
     async def leave(self, held: Held) -> bool:
         link = self._link(held.pc)

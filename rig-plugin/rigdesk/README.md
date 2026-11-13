@@ -134,7 +134,10 @@ Known limits against a RigDesk PC:
   next call after the bridge or Rig restarts. Stop still blocks it; an agent sharing through a link at the time is not
   displaced. A change applies at once and does not restart the bridge; taking a grant away ends a session held through
   it. A PC removed from settings, or no longer stock, loses its grants. A session held through the grant ends after
-  5 minutes without a desk call, so other assigned agents can take the PC; the agent is told, and its next call rejoins.
+  5 minutes without a desk call, so other assigned agents can take the PC; its next call rejoins.
+* **A session that ends** (RigDesk restarts, the human ends the share or shares with another agent, an idle leave) is not
+  announced to the agent, which is not woken for it; Rig's log has it, and the agent's next `desk/<tool>` call says
+  where it stands.
 * `desk/pcs` — every PC in Rig, with its client, whether it is up, whether it is assigned to the caller, and who holds
   it now.
 * `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins
