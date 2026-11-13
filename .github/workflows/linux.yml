@@ -5,7 +5,7 @@ name: linux
 
 on:
   push:
-    branches: [master, "s*"]
+    branches: [main, "s*"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:

@@ -5,7 +5,7 @@ name: android
 
 on:
   push:
-    branches: ["s*"]
+    branches: [main, "s*"]
   workflow_dispatch:
 
 concurrency:

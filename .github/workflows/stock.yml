@@ -5,7 +5,7 @@ name: stock
 
 on:
   push:
-    branches: [master, "s*"]
+    branches: [main, "s*"]
     tags: ["v*"]
     paths: [libs/bridge/**, libs/agent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/workflows/stock.yml]
   pull_request:
