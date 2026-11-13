@@ -129,7 +129,8 @@ Known limits against a RigDesk PC:
   link works once.
 * **Standing grant (stock PCs).** rigdesk keeps who holds one, `"agent:<id>"` or `"graph:<name>"` per PC, in its own
   `grants` doc in Rig's store, and alone writes it: on the RigDesk page, which assigns any agent or every agent in a
-  graph, or on the operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
+  graph, on Rig's PCs page while the `pcs` plugin remains (through the provision `rigdesk.assign`), or on the
+  operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
   link: its first `desk/<tool>` call joins the PC (the plugin mints and claims on the bridge itself), and so does its
   next call after the bridge or Rig restarts. Stop still blocks it; an agent sharing through a link at the time is not
   displaced. A change applies at once and does not restart the bridge; taking a grant away ends a session held through
