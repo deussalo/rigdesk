@@ -65,15 +65,25 @@ fn with_port(host: &str, port: u16) -> String {
     }
 }
 
+/// hbbs answers OnlineRequest only on its NAT-test port, one below its rendezvous port (rustdesk-server 1.1.16,
+/// handle_listener2), and takes a connection there from a loopback address as an admin command instead.
+fn online_host(host: &str) -> String {
+    match host.rsplit_once(':').and_then(|(name, port)| Some((name, port.parse::<u16>().ok()?))) {
+        Some((name, port)) if port > 1 => format!("{name}:{}", port - 1),
+        _ => host.to_string(),
+    }
+}
+
 /// Whether the PC is registered with hbbs now, which it is while its RustDesk runs and reaches the ID server.
 pub async fn online(server: &Server, id: &str) -> ResultType<bool> {
-    let mut hbbs = FramedStream::new(server.host.as_str(), None, CONNECT_TIMEOUT_MS).await?;
+    let asked = online_host(&server.host);
+    let mut hbbs = FramedStream::new(asked.as_str(), None, CONNECT_TIMEOUT_MS).await?;
     let mut ask = RendezvousMessage::new();
     ask.set_online_request(OnlineRequest { id: "rig".into(), peers: vec![id.to_string()], ..Default::default() });
     hbbs.send(&ask).await?;
     loop {
         let Some(bytes) = hbbs.next_timeout(CONNECT_TIMEOUT_MS).await else {
-            bail!("the ID server {} did not say within {} s whether {id} is online", server.host, CONNECT_TIMEOUT_MS / 1000);
+            bail!("the ID server at {asked} did not say within {} s whether {id} is online", CONNECT_TIMEOUT_MS / 1000);
         };
         let Ok(msg) = RendezvousMessage::parse_from_bytes(&bytes?) else { continue };
         if let Some(rendezvous_message::Union::OnlineResponse(answer)) = msg.union {
@@ -225,6 +235,8 @@ mod tests {
         assert_eq!(with_port("1.2.3.4:4000", 21116), "1.2.3.4:4000");
         assert_eq!(with_port("rd.example.com", 21117), "rd.example.com:21117");
         assert_eq!(with_port("fd7a::1", 21117), "[fd7a::1]:21117");
+        assert_eq!(online_host("1.2.3.4:21116"), "1.2.3.4:21115");
+        assert_eq!(online_host("[fd7a::1]:21116"), "[fd7a::1]:21115");
     }
 
     #[test]
