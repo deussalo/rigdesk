@@ -5981,7 +5981,6 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
 dependencies = [
- "phf_macros",
  "phf_shared 0.11.3",
 ]
 
@@ -6023,19 +6022,6 @@ checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
  "phf_shared 0.11.3",
  "rand 0.8.5",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
-dependencies = [
- "phf_generator 0.11.3",
- "phf_shared 0.11.3",
- "proc-macro2 1.0.93",
- "quote 1.0.47",
- "syn 2.0.98",
 ]
 
 [[package]]
@@ -7222,7 +7208,6 @@ dependencies = [
  "totp-rs",
  "tray-icon",
  "ttf-parser",
- "uiautomation",
  "url",
  "uuid",
  "virtual_display",
@@ -9050,30 +9035,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "uiautomation"
-version = "0.11.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "832a70f932410ca3a859cc9b8243a986e4b3241e050d9796d5f7941d877e706b"
-dependencies = [
- "chrono",
- "phf 0.11.3",
- "uiautomation_derive",
- "windows 0.57.0",
- "windows-core 0.57.0",
-]
-
-[[package]]
-name = "uiautomation_derive"
-version = "0.3.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcda683d69922ba8d3a8b9be76ee74ff31bcea589fb01e4586b17beee5702d17"
-dependencies = [
- "proc-macro2 1.0.93",
- "quote 1.0.47",
- "syn 2.0.98",
-]
-
-[[package]]
 name = "uname"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10043,16 +10004,6 @@ dependencies = [
 
 [[package]]
 name = "windows"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
-dependencies = [
- "windows-core 0.57.0",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows"
 version = "0.61.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5ee8f3d025738cb02bad7868bbb5f8a6327501e870bf51f1b455b0a2454a419"
@@ -10103,18 +10054,6 @@ dependencies = [
 
 [[package]]
 name = "windows-core"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
-dependencies = [
- "windows-implement 0.57.0",
- "windows-interface 0.57.0",
- "windows-result 0.1.2",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
 version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4763c1de310c86d75a878046489e2e5ba02c649d185f21c67d4cf8a56d098980"
@@ -10149,17 +10088,6 @@ dependencies = [
 
 [[package]]
 name = "windows-implement"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
-dependencies = [
- "proc-macro2 1.0.93",
- "quote 1.0.47",
- "syn 2.0.98",
-]
-
-[[package]]
-name = "windows-implement"
 version = "0.60.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a47fddd13af08290e67f4acabf4b459f647552718f683a7b415d290ac744a836"
@@ -10174,17 +10102,6 @@ name = "windows-interface"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d8dc32e0095a7eeccebd0e3f09e9509365ecb3fc6ac4d6f5f14a3f6392942d1"
-dependencies = [
- "proc-macro2 1.0.93",
- "quote 1.0.47",
- "syn 2.0.98",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
 dependencies = [
  "proc-macro2 1.0.93",
  "quote 1.0.47",
