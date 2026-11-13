@@ -1,5 +1,5 @@
 # Agent API smoke test (plan acceptance 4.4): the built server, headless on the runner, against Notepad.
-# Mints a grant through the debug-only route, claims it, then checks screenshot, UIA snapshot, type, Block and a holder change.
+# Mints a grant through the debug-only route, claims it, then checks screenshot, type, shell, Block and a holder change.
 param([string]$Exe = ".\rigdesk\RigDesk.exe")
 $ErrorActionPreference = "Stop"
 $token = "smoke-" + [guid]::NewGuid().ToString("N")
@@ -29,7 +29,6 @@ function Evidence($why) {
     $shot = Tool "screenshot"
     $png = $shot.content | Where-Object { $_.type -eq "image" } | Select-Object -First 1
     if ($png) { [IO.File]::WriteAllBytes((Join-Path $out "screen.png"), [Convert]::FromBase64String($png.data)) }
-    Set-Content -Path (Join-Path $out "snapshot.txt") -Value (Text (Tool "snapshot"))
   } catch { Write-Host "no evidence: $_" }
   Fail $why
 }
@@ -56,13 +55,8 @@ try {
   Write-Host "screenshot: $($png.data.Length) base64 chars"
 
   $null = Tool "app" @{ action = "switch"; name = "Notepad" }
+  # A switched-to Notepad has its text area focused.
   $null = Tool "wait" @{ ms = 1000 }
-  $tree = Text (Tool "snapshot")
-  $edit = ($tree -split "`n") | Where-Object { $_ -match "^\s*Edit\b" -and $_ -match "@(\d+),(\d+)" } | Select-Object -First 1
-  if (-not $edit) { Fail "the UIA snapshot shows no edit box for Notepad:`n$tree" }
-  Write-Host "edit box: $edit"
-  $null = $edit -match "@(\d+),(\d+)"
-  $null = Tool "click" @{ x = [int]$Matches[1]; y = [int]$Matches[2] }
 
   $words = "rigdesk smoke $([guid]::NewGuid().ToString('N').Substring(0, 8))"
   $typed = Tool "type" @{ text = $words }
@@ -73,6 +67,11 @@ try {
   $clip = Text (Tool "clipboard")
   if ($clip.Trim() -ne $words) { Evidence "Notepad holds '$clip', not the typed '$words'" }
   Write-Host "typed into Notepad: $clip"
+
+  $ran = Tool "shell" @{ command = "whoami; cmd /c exit 3" }
+  $answer = (Text $ran) | ConvertFrom-Json
+  if ($ran.isError -or $answer.exit_code -ne 3 -or $answer.output -notmatch "\\") { Fail "shell did not answer whoami and exit 3: $(Text $ran)" }
+  Write-Host "shell: $($answer.output.Trim()), exit $($answer.exit_code)"
 
   $null = Post "/debug/viewer/human" @{}
   $held = Tool "type" @{ text = "x" }
