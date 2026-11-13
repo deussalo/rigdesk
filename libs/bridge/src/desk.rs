@@ -1,15 +1,21 @@
 //! The stock PC behind the agent API. Its tools are what the RustDesk protocol itself carries: screenshots (the PC
-//! renders the PNG), pointer and keyboard input, and the clipboard. A RigDesk PC adds the UI tree, app launching and
-//! PowerShell; a stock PC has no channel for them.
+//! renders the PNG), pointer and keyboard input, the clipboard, and a shell through RustDesk's terminal (see `terminal`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use hbb_common::serde_json::{json, Value};
-use rigdesk_agent::{Called, Content, Desk, ToolSpec};
+use hbb_common::tokio;
+use rigdesk_agent::{shell, Called, Content, Desk, ToolSpec};
 
 use crate::keys;
 use crate::link::{Link, Peer};
+use crate::terminal;
+
+const SHELL: &str = "Run a command on the PC and get its output and exit status. On Windows it is PowerShell as the \
+signed-in user, and the status is the code it exits with, 1 for an error it does not catch, else the last program's exit \
+code; elsewhere it is the user's shell as RustDesk's user. It reads no input, so nothing can wait at a prompt; output \
+is plain text, cut from the middle past 32 KiB.";
 
 const CONNECT_WAIT: Duration = Duration::from_secs(20);
 const SCREENSHOT_WAIT: Duration = Duration::from_secs(15);
@@ -103,6 +109,7 @@ impl Desk for RemoteDesk {
             ToolSpec { name: "clipboard", read_only: false,
                 description: "Without text: the last clipboard text the PC sent since the session opened (copy first with ctrl+c). With text: set the PC's clipboard.",
                 input_schema: obj(json!({"text": {"type": "string"}}), &[]) },
+            shell::spec(SHELL),
         ]
     }
 
@@ -111,6 +118,11 @@ impl Desk for RemoteDesk {
     }
 
     fn call(&self, tool: &str, args: &Value) -> Result<Called, String> {
+        if tool == "shell" {
+            let asked = shell::asked(args)?;
+            // Calls run on the runtime's blocking threads, which may wait on it.
+            return tokio::runtime::Handle::current().block_on(terminal::run(&self.link, &asked));
+        }
         self.run(tool, args).map(Into::into)
     }
 }

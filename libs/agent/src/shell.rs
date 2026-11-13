@@ -57,11 +57,25 @@ pub enum Ended {
     TimedOut(Duration),
 }
 
+/// What a command printed, as the PC sent it: all of it, or its start and end with the middle the PC already dropped.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Printed {
+    pub head: Vec<u8>,
+    /// Bytes the PC left out between `head` and `tail`.
+    pub dropped: usize,
+    pub tail: Vec<u8>,
+}
+
+impl Printed {
+    pub fn whole(raw: Vec<u8>) -> Self {
+        Printed { head: raw, dropped: 0, tail: Vec::new() }
+    }
+}
+
 /// What the agent reads: the output with terminal codes taken out and cut to `OUTPUT_CAP`, and how it ended. A command over
 /// its time limit is refused as timed out, with what it printed until then.
-pub fn answer(raw: &[u8], ended: Ended) -> Result<Called, String> {
-    let text = plain(raw);
-    let (output, cut) = capped(&text, OUTPUT_CAP);
+pub fn answer(printed: &Printed, ended: Ended) -> Result<Called, String> {
+    let (output, cut) = capped(&plain(&printed.head), printed.dropped, &plain(&printed.tail), OUTPUT_CAP);
     match ended {
         Ended::Exited(code) => Ok(Called {
             contents: vec![Content::Text(json!({"exit_code": code, "output": output, "cut_bytes": cut}).to_string())],
@@ -79,9 +93,37 @@ pub fn answer(raw: &[u8], ended: Ended) -> Result<Called, String> {
 /// two-byte ones) and other control characters go, tabs and line ends stay, and a carriage return that redraws a line
 /// keeps only what was drawn last.
 pub fn plain(raw: &[u8]) -> String {
-    let text = String::from_utf8_lossy(raw);
+    let text = without_escapes(&String::from_utf8_lossy(raw));
     let mut out = String::with_capacity(text.len());
     let mut line = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => {
+                out.push_str(line.trim_end());
+                out.push('\n');
+                line.clear();
+            }
+            '\r' => {
+                if chars.peek() != Some(&'\n') {
+                    line.clear();
+                }
+            }
+            '\t' => line.push('\t'),
+            '\u{8}' => {
+                line.pop();
+            }
+            c if c.is_control() => {}
+            c => line.push(c),
+        }
+    }
+    out.push_str(line.trim_end());
+    out.trim_end_matches('\n').to_owned()
+}
+
+/// `text` without its terminal escape sequences: CSI, OSC and the other string sequences, and two-byte ones.
+pub fn without_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -116,43 +158,35 @@ pub fn plain(raw: &[u8]) -> String {
                     }
                 }
             }
-            '\n' => {
-                out.push_str(line.trim_end());
-                out.push('\n');
-                line.clear();
-            }
-            '\r' => {
-                if chars.peek() != Some(&'\n') {
-                    line.clear();
-                }
-            }
-            '\t' => line.push('\t'),
-            '\u{8}' => {
-                line.pop();
-            }
-            c if c.is_control() => {}
-            c => line.push(c),
+            c => out.push(c),
         }
     }
-    out.push_str(line.trim_end());
-    out.trim_end_matches('\n').to_owned()
+    out
 }
 
-/// `text` within `cap` bytes, its middle cut on character bounds and marked, and how many bytes went.
-fn capped(text: &str, cap: usize) -> (String, usize) {
-    if text.len() <= cap {
-        return (text.to_owned(), 0);
+/// The output within about `cap` bytes, its middle cut on character bounds and marked, and how many bytes went, counting
+/// the `dropped` bytes the PC already left out between `head` and `tail`.
+fn capped(head: &str, dropped: usize, tail: &str, cap: usize) -> (String, usize) {
+    if dropped == 0 && head.len() + tail.len() <= cap {
+        return (format!("{head}{tail}"), 0);
     }
-    let floor = |mut at: usize| {
+    let floor = |text: &str, mut at: usize| {
         while !text.is_char_boundary(at) {
             at -= 1;
         }
         at
     };
-    let head = floor(cap / 4);
-    let tail = floor(text.len() - (cap - head));
-    let cut = tail - head;
-    (format!("{}\n[... {cut} bytes cut ...]\n{}", &text[..head], &text[tail..]), cut)
+    if dropped == 0 {
+        let text = format!("{head}{tail}");
+        let kept_head = floor(&text, cap / 4);
+        let from = floor(&text, text.len() - (cap - kept_head));
+        let cut = from - kept_head;
+        return (format!("{}\n[... {cut} bytes cut ...]\n{}", &text[..kept_head], &text[from..]), cut);
+    }
+    let kept_head = floor(head, head.len().min(cap / 4));
+    let from = floor(tail, tail.len().saturating_sub(cap - kept_head));
+    let cut = head.len() - kept_head + dropped + from;
+    (format!("{}\n[... {cut} bytes cut ...]\n{}", &head[..kept_head], &tail[from..]), cut)
 }
 
 #[cfg(test)]
@@ -168,18 +202,26 @@ mod tests {
     #[test]
     fn output_over_the_cap_says_how_much_was_cut() {
         let text = "é".repeat(OUTPUT_CAP);
-        let (kept, cut) = capped(&text, OUTPUT_CAP);
+        let (kept, cut) = capped(&text, 0, "", OUTPUT_CAP);
         assert!(kept.len() < OUTPUT_CAP + 64);
         assert_eq!(cut, text.len() - (kept.len() - format!("\n[... {cut} bytes cut ...]\n").len()));
         assert!(kept.contains(&format!("[... {cut} bytes cut ...]")));
     }
 
     #[test]
+    fn what_the_pc_already_dropped_counts_as_cut() {
+        let (kept, cut) = capped(&"a".repeat(OUTPUT_CAP), 1000, &"z".repeat(OUTPUT_CAP), OUTPUT_CAP);
+        assert_eq!(cut, OUTPUT_CAP + 1000);
+        assert!(kept.starts_with(&"a".repeat(OUTPUT_CAP / 4)) && kept.ends_with(&"z".repeat(OUTPUT_CAP * 3 / 4)));
+        assert_eq!(capped("ab", 3, "yz", OUTPUT_CAP), ("ab\n[... 3 bytes cut ...]\nyz".into(), 3));
+    }
+
+    #[test]
     fn a_failing_command_answers_its_status_and_a_slow_one_is_refused() {
-        let failed = answer(b"nope\r\n", Ended::Exited(3)).unwrap();
+        let failed = answer(&Printed::whole(b"nope\r\n".to_vec()), Ended::Exited(3)).unwrap();
         assert_eq!(failed.outcome, "exit 3");
         assert_eq!(failed.contents, vec![Content::Text(json!({"exit_code": 3, "output": "nope", "cut_bytes": 0}).to_string())]);
-        let slow = answer(b"started\n", Ended::TimedOut(Duration::from_secs(5))).unwrap_err();
+        let slow = answer(&Printed::whole(b"started\n".to_vec()), Ended::TimedOut(Duration::from_secs(5))).unwrap_err();
         assert!(slow.starts_with("timed out: the command ran past 5 s and was ended") && slow.ends_with("started"));
     }
 

@@ -34,6 +34,13 @@ RETRY_S = (1.0, 2.0, 5.0, 10.0, 30.0)
 SETTINGS_EVERY_S = 5.0
 IDLE_LEAVE_MS = 5 * 60_000
 CALL_LIMIT_S = 120.0
+SHELL_LIMIT_S = 600
+
+
+def _call_limit_s(tool: str, arguments: dict[str, Any]) -> float:
+    """A shell command may run up to its own limit, which the PC enforces; the call waits that long on top."""
+    asked = arguments.get("timeout_s") if tool == "shell" else None
+    return CALL_LIMIT_S + (asked if isinstance(asked, int) and 0 < asked <= SHELL_LIMIT_S else 60 if tool == "shell" else 0)
 FILES_KEPT = 300
 STOP_FRESH_MS = 60_000  # a Stop replayed after Rig was away is told, not acted on: the turn it meant is long gone
 REMOTE_LOG_BYTES = 4 * 1024 * 1024
@@ -856,7 +863,7 @@ class Desks:
         if link.state != "up":
             raise DeskRefused(f"RigDesk PC {held.pc} is down: {link.why or 'not reached yet'}")
         body = {"jsonrpc": "2.0", "id": now_ms(), "method": "tools/call", "params": {"name": tool, "arguments": arguments}}
-        async with self._client().post(f"{link.spec.url}/mcp", json=body, headers=self._headers(link, held.session), timeout=aiohttp.ClientTimeout(total=CALL_LIMIT_S)) as answer:
+        async with self._client().post(f"{link.spec.url}/mcp", json=body, headers=self._headers(link, held.session), timeout=aiohttp.ClientTimeout(total=_call_limit_s(tool, arguments))) as answer:
             if answer.status != 200:
                 raise DeskRefused(f"{held.pc} answered HTTP {answer.status}")
             reply = await answer.json()

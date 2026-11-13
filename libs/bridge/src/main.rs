@@ -18,6 +18,7 @@ mod keys;
 mod rendezvous;
 mod link;
 mod relay;
+mod terminal;
 
 use std::path::PathBuf;
 use std::sync::Arc;

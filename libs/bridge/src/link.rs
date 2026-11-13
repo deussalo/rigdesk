@@ -15,7 +15,7 @@ use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use base::message_proto::{
-    login_response, message, misc, option_message::BoolOption, supported_decoding::PreferCodec, ClipboardFormat,
+    login_request, login_response, message, misc, option_message::BoolOption, supported_decoding::PreferCodec, ClipboardFormat,
     DisplayInfo, Hash, ImageQuality, LoginRequest, Message, Misc, OptionMessage, PeerInfo, ScreenshotRequest,
     SupportedDecoding,
 };
@@ -203,8 +203,10 @@ impl Link {
         }
     }
 
-    async fn session(&self) -> ResultType<()> {
-        let mut stream = match &self.route {
+    /// A new connection to the PC, ready for its login challenge. The screen session holds one; each shell command
+    /// opens its own beside it.
+    pub async fn dial(&self) -> ResultType<FramedStream> {
+        Ok(match &self.route {
             Route::Direct { addr } => {
                 let local: SocketAddr = (if addr.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" }).parse()?;
                 let mut stream = FramedStream::new(addr.as_str(), Some(local), CONNECT_TIMEOUT_MS).await?;
@@ -213,7 +215,11 @@ impl Link {
                 stream
             }
             Route::Id { id, server } => crate::rendezvous::dial(server, id).await?,
-        };
+        })
+    }
+
+    async fn session(&self) -> ResultType<()> {
+        let mut stream = self.dial().await?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let mut idle_check = tokio::time::interval(Duration::from_secs(5));
         // next_timeout restarts with every select! round, so the idle tick alone would keep a dead link looking alive.
@@ -252,7 +258,24 @@ impl Link {
             let _ = self.to_viewers.send(ToViewer::Message(Arc::new(msg.clone())));
         }
         match msg.union {
-            Some(message::Union::Hash(hash)) => return Ok(Some(self.login(&hash))),
+            Some(message::Union::Hash(hash)) => {
+                let (image_quality, custom_fps) = self.quality();
+                let option = OptionMessage {
+                    image_quality: image_quality.into(),
+                    custom_fps,
+                    show_remote_cursor: BoolOption::Yes.into(),
+                    disable_audio: BoolOption::Yes.into(),
+                    supported_decoding: MessageField::some(SupportedDecoding {
+                        ability_vp9: 1,
+                        ability_vp8: 1,
+                        ability_av1: 1,
+                        prefer: PreferCodec::VP9.into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                return Ok(Some(self.login(&hash, option, None)));
+            }
             Some(message::Union::LoginResponse(res)) => match res.union {
                 Some(login_response::Union::Error(e)) => bail!("login refused by the PC: {e}"),
                 Some(login_response::Union::PeerInfo(pi)) => {
@@ -343,22 +366,8 @@ impl Link {
         }
     }
 
-    fn login(&self, hash: &Hash) -> Message {
-        let (image_quality, custom_fps) = self.quality();
-        let option = OptionMessage {
-            image_quality: image_quality.into(),
-            custom_fps,
-            show_remote_cursor: BoolOption::Yes.into(),
-            disable_audio: BoolOption::Yes.into(),
-            supported_decoding: MessageField::some(SupportedDecoding {
-                ability_vp9: 1,
-                ability_vp8: 1,
-                ability_av1: 1,
-                prefer: PreferCodec::VP9.into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+    /// The answer to the PC's login challenge: a screen session, or with `kind`, another kind such as a terminal.
+    pub fn login(&self, hash: &Hash, option: OptionMessage, kind: Option<login_request::Union>) -> Message {
         let mut msg = Message::new();
         msg.set_login_request(LoginRequest {
             username: self.username.clone(),
@@ -369,9 +378,14 @@ impl Link {
             option: MessageField::some(option),
             session_id: rand_id(),
             version: CLIENT_VERSION.into(),
+            union: kind,
             ..Default::default()
         });
         msg
+    }
+
+    pub fn label(&self) -> &str {
+        &self.addr
     }
 
     fn on_cursor(&self, x: i32, y: i32) {
