@@ -15,7 +15,7 @@ use hbb_common::base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hbb_common::protobuf::Message as _;
 use hbb_common::tcp::FramedStream;
 use hbb_common::tokio::time::{sleep, timeout, Instant};
-use rigdesk_agent::shell::{self, Asked, Ended, Printed, PART};
+use rigdesk_agent::shell::{self, Asked, Ended, Printed, OUTPUT_CAP};
 use rigdesk_agent::Called;
 
 use crate::link::Link;
@@ -29,6 +29,11 @@ const PROMPT_QUIET: Duration = Duration::from_millis(500);
 const PROMPT_WAIT: Duration = Duration::from_secs(15);
 /// How long past the command's own limit the PC has to end it and send what it printed.
 const REPORT_GRACE: Duration = Duration::from_secs(20);
+/// How much of a long output's start and end the report carries: enough for `shell::answer`'s cap (a quarter from the
+/// start, three from the end) with room for escape codes it strips. A terminal shows a report at only about 2 KB/s
+/// (seen on deus over the tailnet), so it carries no more.
+const HEAD_PART: usize = OUTPUT_CAP * 3 / 8;
+const TAIL_PART: usize = OUTPUT_CAP * 7 / 8;
 /// Typed lines stay well under a pseudo-terminal's line buffer (4 KiB on Linux).
 const LINE: usize = 1000;
 /// The report's base64 comes in numbered lines of this many characters, narrower than the terminal: Windows' console
@@ -53,7 +58,7 @@ impl Shell {
 }
 
 /// The lines typed at the prompt, each followed by Enter: the runner in base64 chunks, then the line that runs it.
-pub fn typed(shell: Shell, command: &str, limit: Duration, nonce: &str) -> Vec<String> {
+pub fn typed_lines(shell: Shell, command: &str, limit: Duration, nonce: &str) -> Vec<String> {
     let encoded = B64.encode(runner(shell, command, limit, nonce));
     let chunks: Vec<&str> = encoded.as_bytes().chunks(LINE).map(|c| std::str::from_utf8(c).unwrap_or_default()).collect();
     let mut lines = Vec::with_capacity(chunks.len() + 2);
@@ -83,7 +88,8 @@ fn runner(shell: Shell, command: &str, limit: Duration, nonce: &str) -> String {
         Shell::Posix => POSIX_RUNNER
             .replace("@COMMAND@", &B64.encode(command))
             .replace("@LIMIT@", &secs.to_string())
-            .replace("@PART@", &PART.to_string())
+            .replace("@HEAD@", &HEAD_PART.to_string())
+            .replace("@TAIL@", &TAIL_PART.to_string())
             .replace("@LINE@", &REPORT_LINE.to_string())
             .replace("@NONCE@", nonce),
         Shell::PowerShell => {
@@ -94,7 +100,8 @@ fn runner(shell: Shell, command: &str, limit: Duration, nonce: &str) -> String {
                 .replace("@COMMAND@", &B64.encode(script))
                 .replace("@WRAPPER@", shell::POWERSHELL_WRAPPER)
                 .replace("@LIMIT_MS@", &(secs * 1000).to_string())
-                .replace("@PART@", &PART.to_string())
+                .replace("@HEAD@", &HEAD_PART.to_string())
+                .replace("@TAIL@", &TAIL_PART.to_string())
                 .replace("@LINE@", &REPORT_LINE.to_string())
                 .replace("@NONCE@", nonce)
         }
@@ -122,8 +129,8 @@ case $s in 124|137|143) [ $(( $(date +%s) - s0 )) -ge @LIMIT@ ] && t=1 ;; esac
 n=$(wc -c <"$d/o" | tr -d ' ')
 lines() { base64 | tr -d '\n' | fold -w @LINE@ | awk '{ printf "~%d~%s\n", NR - 1, $0 }'; }
 printf '\n#RIG@NONCE@.%s.%s.%s#\n' "$s" "$t" "$n"
-if [ "$n" -gt $((2 * @PART@)) ]; then
-  head -c @PART@ "$d/o" | lines; printf '#RIG@NONCE@.tail#\n'; tail -c @PART@ "$d/o" | lines
+if [ "$n" -gt $((@HEAD@ + @TAIL@)) ]; then
+  head -c @HEAD@ "$d/o" | lines; printf '#RIG@NONCE@.tail#\n'; tail -c @TAIL@ "$d/o" | lines
 else
   lines <"$d/o"; printf '#RIG@NONCE@.tail#\n'
 fi
@@ -153,10 +160,10 @@ $n = 0
 if (Test-Path $o) { $n = (Get-Item $o).Length }
 function Part($at, $len) {
   if ($len -le 0) { return '' }
-  $f = [IO.File]::OpenRead($o)
+  $f = [IO.File]::Open($o, 'Open', 'Read', 'ReadWrite')
   try { $b = New-Object byte[] $len; $null = $f.Seek($at, 0); $m = $f.Read($b, 0, $len); [Convert]::ToBase64String($b, 0, $m) } finally { $f.Close() }
 }
-if ($n -gt 2 * @PART@) { $h = Part 0 @PART@; $tl = Part ($n - @PART@) @PART@ } else { $h = Part 0 $n; $tl = '' }
+if ($n -gt @HEAD@ + @TAIL@) { $h = Part 0 @HEAD@; $tl = Part ($n - @TAIL@) @TAIL@ } else { $h = Part 0 $n; $tl = '' }
 $top = "#RIG@NONCE@.$s.$t.$n#"
 } catch {
 $m = [Text.Encoding]::UTF8.GetBytes(($_ | Out-String))
@@ -196,7 +203,7 @@ fn parse_report(body: &str, nonce: &str, limit: Duration) -> Result<(Printed, En
     let mut fields = fields.split('.');
     let (status, timed_out, total) = (fields.next(), fields.next(), fields.next());
     let total: usize = total.and_then(|s| s.parse().ok()).ok_or_else(garbled)?;
-    let (head_bytes, tail_bytes) = if total > 2 * PART { (PART, PART) } else { (total, 0) };
+    let (head_bytes, tail_bytes) = if total > HEAD_PART + TAIL_PART { (HEAD_PART, TAIL_PART) } else { (total, 0) };
     let (head, tail) = (part(head, head_bytes)?, part(tail, tail_bytes)?);
     if status == Some("x") {
         return Err(format!("the PC could not run the command: {}", shell::plain(&head)));
@@ -250,7 +257,7 @@ async fn next(stream: &mut FramedStream, until: Instant) -> Result<Option<Messag
         }
         let bytes = match timeout(left, stream.next()).await {
             Err(_) => return Ok(None),
-            Ok(None) => return Err("the PC closed the terminal connection".into()),
+            Ok(None) => return Err(CLOSED.into()),
             Ok(Some(Err(e))) => return Err(format!("terminal connection error: {e}")),
             Ok(Some(Ok(bytes))) => bytes,
         };
@@ -285,14 +292,33 @@ fn last_shown(shown: &[u8]) -> String {
     text[from..].to_string()
 }
 
+const CLOSED: &str = "the PC closed the terminal connection";
+/// Stock RustDesk 1.4.5 on Windows closes a terminal connection made right after the last one ended (seen on deus: every
+/// second command of a quick pair); a later one is taken. Retried only while nothing has been typed, so no command runs twice.
+const CLOSED_RETRIES: [Duration; 3] = [Duration::from_millis(500), Duration::from_millis(1500), Duration::from_millis(3000)];
+
 /// Run one command in a new terminal on the PC and answer what it printed and how it ended.
 pub async fn run(link: &Link, asked: &Asked) -> Result<Called, String> {
+    let mut waits = CLOSED_RETRIES.iter();
+    loop {
+        let mut typed = false;
+        match attempt(link, asked, &mut typed).await {
+            Err(why) if why == CLOSED && !typed => match waits.next() {
+                Some(wait) => sleep(*wait).await,
+                None => return Err(format!("{CLOSED} {} times before the command was typed", CLOSED_RETRIES.len() + 1)),
+            },
+            done => return done,
+        }
+    }
+}
+
+async fn attempt(link: &Link, asked: &Asked, typed: &mut bool) -> Result<Called, String> {
     let mut stream = link.dial().await.map_err(|e| format!("cannot reach the PC at {}: {e}", link.label()))?;
     let platform = log_in(link, &mut stream).await?;
     send(&mut stream, &terminal(terminal_action::Union::Open(OpenTerminal { terminal_id: TERMINAL_ID, rows: ROWS, cols: COLS, ..Default::default() })))
         .await?;
     let nonce = format!("{:016x}", hbb_common::rand::random::<u64>());
-    let result = converse(&mut stream, Shell::of(&platform), asked, &nonce).await;
+    let result = converse(&mut stream, Shell::of(&platform), asked, &nonce, typed).await;
     let _ = send(&mut stream, &terminal(terminal_action::Union::Close(CloseTerminal { terminal_id: TERMINAL_ID, ..Default::default() }))).await;
     let (printed, ended) = result?;
     shell::answer(&printed, ended)
@@ -321,12 +347,14 @@ async fn log_in(link: &Link, stream: &mut FramedStream) -> Result<String, String
 }
 
 /// Waits for the prompt, types the runner and reads until its report.
-async fn converse(stream: &mut FramedStream, shell: Shell, asked: &Asked, nonce: &str) -> Result<(Printed, Ended), String> {
+async fn converse(stream: &mut FramedStream, shell: Shell, asked: &Asked, nonce: &str, typed: &mut bool) -> Result<(Printed, Ended), String> {
     let mut shown: Vec<u8> = Vec::new();
     let mut opened = false;
     let mut last_data: Option<Instant> = None;
     let prompt_by = Instant::now() + PROMPT_WAIT;
     let mut report_by: Option<Instant> = None;
+    let mut reporting = false;
+    let open = format!("#RIG{nonce}.");
     loop {
         let until = match (report_by, last_data) {
             (Some(by), _) => by,
@@ -345,8 +373,9 @@ async fn converse(stream: &mut FramedStream, shell: Shell, asked: &Asked, nonce:
             if !opened {
                 return Err(format!("the PC did not open a terminal within {} s", PROMPT_WAIT.as_secs()));
             }
-            let lines = typed(shell, &asked.command, asked.timeout, nonce);
+            let lines = typed_lines(shell, &asked.command, asked.timeout, nonce);
             let total = lines.len();
+            *typed = true;
             for (i, line) in lines.into_iter().enumerate() {
                 let data = TerminalData { terminal_id: TERMINAL_ID, data: format!("{line}\r").into_bytes().into(), ..Default::default() };
                 send(stream, &terminal(terminal_action::Union::Data(data))).await?;
@@ -369,6 +398,13 @@ async fn converse(stream: &mut FramedStream, shell: Shell, asked: &Asked, nonce:
                 last_data = Some(Instant::now());
                 let ends_marker = data.contains(&b'#');
                 shown.extend_from_slice(&data);
+                if report_by.is_some() && !reporting && ends_marker {
+                    reporting = bare(&shown).contains(&open);
+                }
+                // The command has ended once its report begins; however slowly the terminal shows the report, it may finish.
+                if reporting {
+                    report_by = Some(Instant::now() + REPORT_GRACE);
+                }
                 if report_by.is_some() && ends_marker {
                     if let Some(found) = report(&shown, nonce, asked.timeout) {
                         return found;
@@ -399,7 +435,7 @@ mod tests {
     fn the_typed_lines_never_hold_a_marker_and_stay_short() {
         let command = "echo #RIGabc.1.0.5# && ".repeat(200);
         for shell in [Shell::Posix, Shell::PowerShell] {
-            let lines = typed(shell, &command, Duration::from_secs(5), "abc");
+            let lines = typed_lines(shell, &command, Duration::from_secs(5), "abc");
             assert!(lines.iter().all(|l| l.len() < LINE + 20));
             assert!(!bare(lines.join("\r\n").as_bytes()).contains("#RIGabc."));
         }
@@ -418,8 +454,8 @@ mod tests {
 
     #[test]
     fn a_long_output_comes_as_its_ends_and_a_count_and_a_time_out_says_so() {
-        let (start, end) = (vec![b's'; PART], vec![b'e'; PART]);
-        let shown = format!("#RIGn.-1.1.{}#{}#RIGn.tail#{}#RIGn.end#", 2 * PART + 7, numbered(&start), numbered(&end));
+        let (start, end) = (vec![b's'; HEAD_PART], vec![b'e'; TAIL_PART]);
+        let shown = format!("#RIGn.-1.1.{}#{}#RIGn.tail#{}#RIGn.end#", HEAD_PART + TAIL_PART + 7, numbered(&start), numbered(&end));
         let (printed, ended) = report(shown.as_bytes(), "n", Duration::from_secs(9)).unwrap().unwrap();
         assert_eq!(ended, Ended::TimedOut(Duration::from_secs(9)));
         assert_eq!(printed, Printed { head: start, dropped: 7, tail: end });
