@@ -31,6 +31,9 @@ const PROMPT_WAIT: Duration = Duration::from_secs(15);
 const REPORT_GRACE: Duration = Duration::from_secs(20);
 /// Typed lines stay well under a pseudo-terminal's line buffer (4 KiB on Linux).
 const LINE: usize = 1000;
+/// The report's base64 comes in numbered lines of this many characters, narrower than the terminal: Windows' console
+/// redraws wrapped lines as it scrolls, repeating parts of them, so each line is taken once, by its number and length.
+const REPORT_LINE: usize = 152;
 
 /// The shell RustDesk opens: PowerShell on Windows, the user's POSIX shell elsewhere.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,6 +84,7 @@ fn runner(shell: Shell, command: &str, limit: Duration, nonce: &str) -> String {
             .replace("@COMMAND@", &B64.encode(command))
             .replace("@LIMIT@", &secs.to_string())
             .replace("@PART@", &PART.to_string())
+            .replace("@LINE@", &REPORT_LINE.to_string())
             .replace("@NONCE@", nonce),
         Shell::PowerShell => {
             // Windows PowerShell reads a script without a byte-order mark in the ANSI code page.
@@ -91,11 +95,15 @@ fn runner(shell: Shell, command: &str, limit: Duration, nonce: &str) -> String {
                 .replace("@WRAPPER@", shell::POWERSHELL_WRAPPER)
                 .replace("@LIMIT_MS@", &(secs * 1000).to_string())
                 .replace("@PART@", &PART.to_string())
+                .replace("@LINE@", &REPORT_LINE.to_string())
                 .replace("@NONCE@", nonce)
         }
     }
 }
 
+// The report gives the status, whether the limit ended the command and the output's size, then the output's start (all
+// of it when short) and its end in base64, in lines numbered from 0 per part.
+//
 // The command runs in the user's shell from a file, so it may be any number of lines. `timeout` (GNU coreutils) ends
 // the command's whole process group; without it, the command alone is ended.
 const POSIX_RUNNER: &str = r##"d=$(mktemp -d) || exit 97
@@ -112,11 +120,12 @@ fi
 t=0
 case $s in 124|137|143) [ $(( $(date +%s) - s0 )) -ge @LIMIT@ ] && t=1 ;; esac
 n=$(wc -c <"$d/o" | tr -d ' ')
-printf '\n#RIG@NONCE@.%s.%s.%s#' "$s" "$t" "$n"
+lines() { base64 | tr -d '\n' | fold -w @LINE@ | awk '{ printf "~%d~%s\n", NR - 1, $0 }'; }
+printf '\n#RIG@NONCE@.%s.%s.%s#\n' "$s" "$t" "$n"
 if [ "$n" -gt $((2 * @PART@)) ]; then
-  head -c @PART@ "$d/o" | base64; printf '#RIG@NONCE@.tail#'; tail -c @PART@ "$d/o" | base64
+  head -c @PART@ "$d/o" | lines; printf '#RIG@NONCE@.tail#\n'; tail -c @PART@ "$d/o" | lines
 else
-  base64 <"$d/o"; printf '#RIG@NONCE@.tail#'
+  lines <"$d/o"; printf '#RIG@NONCE@.tail#\n'
 fi
 printf '#RIG@NONCE@.end#\n'
 rm -rf "$d"
@@ -148,12 +157,20 @@ function Part($at, $len) {
   try { $b = New-Object byte[] $len; $null = $f.Seek($at, 0); $m = $f.Read($b, 0, $len); [Convert]::ToBase64String($b, 0, $m) } finally { $f.Close() }
 }
 if ($n -gt 2 * @PART@) { $h = Part 0 @PART@; $tl = Part ($n - @PART@) @PART@ } else { $h = Part 0 $n; $tl = '' }
-$out = "#RIG@NONCE@.$s.$t.$n#" + $h + '#RIG@NONCE@.tail#' + $tl + '#RIG@NONCE@.end#'
+$top = "#RIG@NONCE@.$s.$t.$n#"
 } catch {
-$out = '#RIG@NONCE@.x.0.0#' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($_ | Out-String))) + '#RIG@NONCE@.tail##RIG@NONCE@.end#'
+$m = [Text.Encoding]::UTF8.GetBytes(($_ | Out-String))
+$top = "#RIG@NONCE@.x.0.$($m.Length)#"; $h = [Convert]::ToBase64String($m); $tl = ''
+}
+function Lines($b64) {
+  for ($i = 0; $i * @LINE@ -lt $b64.Length; $i++) { [Console]::Out.WriteLine('~' + $i + '~' + $b64.Substring($i * @LINE@, [Math]::Min(@LINE@, $b64.Length - $i * @LINE@))) }
 }
 [Console]::Out.WriteLine('')
-for ($i = 0; $i -lt $out.Length; $i += 1000) { [Console]::Out.WriteLine($out.Substring($i, [Math]::Min(1000, $out.Length - $i))) }
+[Console]::Out.WriteLine($top)
+Lines $h
+[Console]::Out.WriteLine('#RIG@NONCE@.tail#')
+Lines $tl
+[Console]::Out.WriteLine('#RIG@NONCE@.end#')
 if ($d) { Remove-Item -Recurse -Force $d -EA 0 }
 "##;
 
@@ -176,18 +193,46 @@ fn parse_report(body: &str, nonce: &str, limit: Duration) -> Result<(Printed, En
     let garbled = || format!("the PC's report came back garbled: {body:.200}");
     let (fields, data) = body.split_once('#').ok_or_else(garbled)?;
     let (head, tail) = data.split_once(&format!("#RIG{nonce}.tail#")).ok_or_else(garbled)?;
-    let decode = |part: &str| B64.decode(part).map_err(|e| format!("the PC's report came back garbled ({e})"));
-    let (head, tail) = (decode(head)?, decode(tail)?);
     let mut fields = fields.split('.');
     let (status, timed_out, total) = (fields.next(), fields.next(), fields.next());
+    let total: usize = total.and_then(|s| s.parse().ok()).ok_or_else(garbled)?;
+    let (head_bytes, tail_bytes) = if total > 2 * PART { (PART, PART) } else { (total, 0) };
+    let (head, tail) = (part(head, head_bytes)?, part(tail, tail_bytes)?);
     if status == Some("x") {
         return Err(format!("the PC could not run the command: {}", shell::plain(&head)));
     }
     let status: i32 = status.and_then(|s| s.parse().ok()).ok_or_else(garbled)?;
-    let total: usize = total.and_then(|s| s.parse().ok()).ok_or_else(garbled)?;
     let dropped = total.saturating_sub(head.len() + tail.len());
     let ended = if timed_out == Some("1") { Ended::TimedOut(limit) } else { Ended::Exited(status) };
     Ok((Printed { head, dropped, tail }, ended))
+}
+
+/// One part of the output from its numbered lines, `~<n>~<base64>`, as the terminal showed them: a line may show more
+/// than once, or cut short by a redraw, so each number takes the first showing of the length that line must have.
+fn part(shown: &str, bytes: usize) -> Result<Vec<u8>, String> {
+    let encoded = 4 * ((bytes + 2) / 3);
+    let count = (encoded + REPORT_LINE - 1) / REPORT_LINE;
+    let want = |n: usize| if n + 1 == count { encoded - REPORT_LINE * n } else { REPORT_LINE };
+    let mut lines: Vec<Option<&str>> = vec![None; count];
+    let tokens: Vec<&str> = shown.split('~').collect();
+    for pair in tokens.windows(2) {
+        let Ok(n) = pair[0].parse::<usize>() else { continue };
+        if n < count && lines[n].is_none() && pair[1].len() == want(n) {
+            lines[n] = Some(pair[1]);
+        }
+    }
+    let mut joined = String::with_capacity(encoded);
+    for (n, line) in lines.iter().enumerate() {
+        joined.push_str(line.ok_or_else(|| format!("the PC's report came back garbled: line {n} of {count} is missing"))?);
+    }
+    B64.decode(joined).map_err(|e| format!("the PC's report came back garbled ({e})"))
+}
+
+/// A part as the runner prints it, for the tests.
+#[cfg(test)]
+fn numbered(bytes: &[u8]) -> String {
+    let encoded = B64.encode(bytes);
+    encoded.as_bytes().chunks(REPORT_LINE).enumerate().map(|(n, c)| format!("~{n}~{}\r\n", std::str::from_utf8(c).unwrap())).collect()
 }
 
 fn terminal(action: terminal_action::Union) -> Message {
@@ -362,23 +407,39 @@ mod tests {
 
     #[test]
     fn the_report_is_read_through_wrapping_and_redrawing() {
-        let out = B64.encode("hello\r\nworld\n");
+        let out = numbered(b"hello\r\nworld\n");
         let (a, b) = out.split_at(5);
-        let shown = format!("$ printf ...\r\n\x1b[?25l#RIGn1.3.0.13#{a}\r\n\x1b[2K{b}#RIGn1.ta\x1b[0mil##RIGn1.end#\r\n$ ");
+        let shown = format!("$ printf ...\r\n\x1b[?25l#RIGn1.3.0.13#\r\n{a}\r\n\x1b[2K{b}#RIGn1.ta\x1b[0mil#\r\n#RIGn1.end#\r\n$ ");
         let (printed, ended) = report(shown.as_bytes(), "n1", Duration::from_secs(9)).unwrap().unwrap();
         assert_eq!(ended, Ended::Exited(3));
         assert_eq!(printed, Printed::whole(b"hello\r\nworld\n".to_vec()));
-        assert!(report(b"#RIGn1.3.0.13#aGk=#RIGn1.tail#", "n1", Duration::from_secs(9)).is_none());
+        assert!(report(b"#RIGn1.3.0.13#~0~aGk=#RIGn1.tail#", "n1", Duration::from_secs(9)).is_none());
     }
 
     #[test]
     fn a_long_output_comes_as_its_ends_and_a_count_and_a_time_out_says_so() {
-        let shown = format!("#RIGn.-1.1.1000#{}#RIGn.tail#{}#RIGn.end#", B64.encode("start"), B64.encode("end"));
+        let (start, end) = (vec![b's'; PART], vec![b'e'; PART]);
+        let shown = format!("#RIGn.-1.1.{}#{}#RIGn.tail#{}#RIGn.end#", 2 * PART + 7, numbered(&start), numbered(&end));
         let (printed, ended) = report(shown.as_bytes(), "n", Duration::from_secs(9)).unwrap().unwrap();
         assert_eq!(ended, Ended::TimedOut(Duration::from_secs(9)));
-        assert_eq!(printed, Printed { head: b"start".to_vec(), dropped: 992, tail: b"end".to_vec() });
-        let failed = format!("#RIGn.x.0.0#{}#RIGn.tail##RIGn.end#", B64.encode("Access denied"));
+        assert_eq!(printed, Printed { head: start, dropped: 7, tail: end });
+        let failed = format!("#RIGn.x.0.13#{}#RIGn.tail##RIGn.end#", numbered(b"Access denied"));
         assert_eq!(report(failed.as_bytes(), "n", Duration::from_secs(9)).unwrap().unwrap_err(), "the PC could not run the command: Access denied");
+    }
+
+    #[test]
+    fn lines_the_console_repeats_or_cuts_short_are_taken_once() {
+        let output: Vec<u8> = (0..2000u32).flat_map(|n| format!("line {n:06}\n").into_bytes()).collect();
+        let lines = numbered(&output);
+        let mut shown: Vec<&str> = lines.split_inclusive('\n').collect();
+        let (third, fifth) = (shown[3], shown[5]);
+        shown.insert(6, &third[..40]);
+        shown.insert(6, fifth);
+        let shown = format!("#RIGr.0.0.{}#{}#RIGr.tail##RIGr.end#", output.len(), shown.concat());
+        let (printed, _) = report(shown.as_bytes(), "r", Duration::from_secs(9)).unwrap().unwrap();
+        assert_eq!(printed, Printed::whole(output));
+        let gap = format!("#RIGr.0.0.{}#{}#RIGr.tail##RIGr.end#", 1000, numbered(&[b'x'; 1000]).replacen("~2~", "~9~", 1));
+        assert!(report(gap.as_bytes(), "r", Duration::from_secs(9)).unwrap().unwrap_err().contains("line 2 of 9 is missing"));
     }
 
     #[test]
@@ -389,6 +450,16 @@ mod tests {
         let (printed, ended) = report(&ran.stdout, "t1", Duration::from_secs(5)).unwrap().unwrap();
         assert_eq!(ended, Ended::Exited(4));
         assert_eq!(shell::plain(&printed.head), "out\nerr\nred");
+    }
+
+    #[test]
+    fn the_posix_runner_sends_the_ends_of_a_long_output() {
+        let script = runner(Shell::Posix, "seq 1 40000", Duration::from_secs(5), "t3");
+        let ran = std::process::Command::new("sh").arg("-c").arg(&script).output().unwrap();
+        let (printed, ended) = report(&ran.stdout, "t3", Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(ended, Ended::Exited(0));
+        assert!(printed.head.starts_with(b"1\n2\n") && printed.tail.ends_with(b"39999\n40000\n"));
+        assert_eq!(printed.head.len() + printed.dropped + printed.tail.len(), (1..=40000).map(|n: u32| n.to_string().len() + 1).sum::<usize>());
     }
 
     #[test]
