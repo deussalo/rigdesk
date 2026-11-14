@@ -176,7 +176,7 @@ function McpServers({ pc, mcp, now }: { readonly pc: PcRow; readonly mcp: Mcp; r
     <>
       <BoardBar>
         <label className={css.switch}><Toggle label={`${pc.name}'s MCP servers`} on={mcp.allowed} onTurn={allowing(pc.name)} />{mcp.allowed ? 'on' : 'off'}</label>
-        {mcp.servers.length > 0 && mcp.why === null ? null : <span className={css.dim}>{none}</span>}
+        <span className={css.dim}>{mcp.servers.length > 0 && mcp.why === null ? 'turning it off closes them for the agent holding the PC, which is not told' : none}</span>
       </BoardBar>
       {mcp.servers.length === 0 ? null : (
         <BoardFacts label="MCP servers" facts={mcp.servers.map((each): Fact => [each.name,
