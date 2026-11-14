@@ -173,7 +173,7 @@ jobs:
       - name: Agent panel tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cd flutter && flutter test test/agent_share_test.dart test/agent_bridge_test.dart
-      - name: Agent API smoke test (screen, input, clipboard, shell, holder, Block)
+      - name: Agent API smoke test (screen, input, clipboard, shell, a stdio MCP server behind --mcp, holder, Block)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: xvfb-run -a -s "-screen 0 1280x800x24" .github/smoke/agent.sh ./rigdesk/rustdesk
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

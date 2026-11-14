@@ -10,6 +10,7 @@ pub mod journal;
 pub mod mcp;
 pub mod session;
 pub mod shell;
+pub mod wrap;
 
 pub use desk::{Called, Content, Desk, ToolSpec};
 pub use events::{Event, EventKind, Events};

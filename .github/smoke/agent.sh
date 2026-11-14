@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Agent API smoke test on Linux: the built server as the user, on an Xvfb display. Mints a grant through the debug-only
 # route, claims it, then checks screenshot, input, clipboard, shell (exit status, time-out, a background job left
-# running), the human holding input, and Block. Run under xvfb-run.
+# running), a stdio MCP server put on a port by `--mcp`, found and called through the API, the human holding input, and
+# Block. Run under xvfb-run.
 set -euo pipefail
 exe=${1:-./rigdesk/rustdesk}
 token="smoke-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -79,6 +80,39 @@ sleep 1
 pgrep -u "$(id -u)" -f "sleep 120" >/dev/null || fail "a background job the command started did not keep running"
 pkill -u "$(id -u)" -f "sleep 120" || true
 echo "background: a job the command started keeps running"
+
+# A stdio MCP server (Python's standard library only), started by the agent through the shell behind `--mcp`.
+cat > "$out/echo_mcp.py" <<'PY'
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m:
+        continue
+    method, i = m.get("method"), m["id"]
+    if method == "initialize":
+        r = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "Smoke Echo", "version": "1"}}
+    elif method == "tools/list":
+        r = {"tools": [{"name": "echo", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]}
+    elif method == "tools/call":
+        r = {"content": [{"type": "text", "text": "echo: " + m["params"]["arguments"]["text"]}], "isError": False}
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": i, "error": {"code": -32601, "message": method}}), flush=True)
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": i, "result": r}), flush=True)
+PY
+wrapped=$(tool shell "$(jq -cn --arg c "nohup '$(realpath "$exe")' --mcp -- python3 '$out/echo_mcp.py' >'$out/wrap.log' 2>&1 & echo started" '{command:$c}')")
+[ "$(jq -r .exit_code <<<"$(text "$wrapped")")" = 0 ] || fail "starting rustdesk --mcp failed: $(text "$wrapped")"
+for _ in $(seq 30); do
+  servers=$(curl -sS -H "Authorization: Bearer $token" "$base/servers")
+  jq -e '.servers | map(select(.name == "smoke-echo")) | length == 1' <<<"$servers" >/dev/null && break || sleep 1
+done
+jq -e '.servers | map(select(.name == "smoke-echo")) | length == 1' <<<"$servers" >/dev/null \
+  || { cat "$out/wrap.log" || true; fail "the server behind --mcp was not found within 30 s: $servers"; }
+post /servers/smoke-echo/mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' >/dev/null
+echoed=$(post /servers/smoke-echo/mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"through rigdesk"}}}')
+[ "$(jq -r '.result.content[0].text' <<<"$echoed")" = "echo: through rigdesk" ] || fail "the wrapped server's tool did not answer through the API: $echoed"
+pkill -u "$(id -u)" -f echo_mcp.py || true
+echo "mcp: $(jq -c '.servers' <<<"$servers"), called through the API: $(jq -r '.result.content[0].text' <<<"$echoed")"
 
 post /debug/viewer/human '{}' >/dev/null
 held=$(tool type '{"text":"x"}')

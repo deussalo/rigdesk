@@ -1,5 +1,6 @@
 # Agent API smoke test (plan acceptance 4.4): the built server, headless on the runner, against Notepad.
-# Mints a grant through the debug-only route, claims it, then checks screenshot, type, shell, Block and a holder change.
+# Mints a grant through the debug-only route, claims it, then checks screenshot, type, shell, a stdio MCP server put on a
+# port by `--mcp` and called through the API, Block and a holder change.
 param([string]$Exe = ".\rigdesk\RigDesk.exe")
 $ErrorActionPreference = "Stop"
 $token = "smoke-" + [guid]::NewGuid().ToString("N")
@@ -72,6 +73,39 @@ try {
   $answer = (Text $ran) | ConvertFrom-Json
   if ($ran.isError -or $answer.exit_code -ne 3 -or $answer.output -notmatch "\\") { Fail "shell did not answer whoami and exit 3: $(Text $ran)" }
   Write-Host "shell: $($answer.output.Trim()), exit $($answer.exit_code)"
+
+  # A stdio MCP server (Python's standard library only) behind `--mcp`, found by the scan and called through the API.
+  $echo = Join-Path $env:RUNNER_TEMP "echo_mcp.py"
+  Set-Content -Path $echo -Encoding ascii -Value @'
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m:
+        continue
+    method, i = m.get("method"), m["id"]
+    if method == "initialize":
+        r = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "Smoke Echo", "version": "1"}}
+    elif method == "tools/call":
+        r = {"content": [{"type": "text", "text": "echo: " + m["params"]["arguments"]["text"]}], "isError": False}
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": i, "error": {"code": -32601, "message": method}}), flush=True)
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": i, "result": r}), flush=True)
+'@
+  $wrapper = Start-Process $Exe -ArgumentList "--mcp", "--", "python", "`"$echo`"" -PassThru
+  $servers = $null
+  foreach ($i in 1..30) {
+    $servers = Invoke-RestMethod -Uri "$base/servers" -Headers $auth
+    if (@($servers.servers | Where-Object { $_.name -eq "smoke-echo" }).Count -eq 1) { break }
+    Start-Sleep 1
+  }
+  if (@($servers.servers | Where-Object { $_.name -eq "smoke-echo" }).Count -ne 1) { Fail "the server behind --mcp was not found within 30 s: $($servers | ConvertTo-Json -Depth 5 -Compress)" }
+  $mcpHeaders = $auth + @{ "X-Desk-Session" = $script:session }
+  $null = Post "/servers/smoke-echo/mcp" @{ jsonrpc = "2.0"; id = 1; method = "initialize"; params = @{ protocolVersion = "2025-06-18"; capabilities = @{}; clientInfo = @{ name = "smoke"; version = "1" } } } $mcpHeaders
+  $echoed = Post "/servers/smoke-echo/mcp" @{ jsonrpc = "2.0"; id = 2; method = "tools/call"; params = @{ name = "echo"; arguments = @{ text = "through rigdesk" } } } $mcpHeaders
+  if ($echoed.result.content[0].text -ne "echo: through rigdesk") { Fail "the wrapped server's tool did not answer through the API: $($echoed | ConvertTo-Json -Depth 8 -Compress)" }
+  Stop-Process -Id $wrapper.Id -Force -ErrorAction SilentlyContinue
+  Write-Host "mcp: $($servers.servers | ConvertTo-Json -Compress), called through the API: $($echoed.result.content[0].text)"
 
   $null = Post "/debug/viewer/human" @{}
   $held = Tool "type" @{ text = "x" }
