@@ -130,6 +130,11 @@ pub fn human_took_over(by: &str) -> bool {
     HOST.shared.human_input(by)
 }
 
+/// A viewer's pointer event: whether it goes on to the PC (see `Shared::viewer_pointer`).
+pub fn viewer_pointer(mask: i32) -> bool {
+    HOST.shared.viewer_pointer(mask, "viewer input")
+}
+
 pub fn hand_to_agent() -> bool {
     HOST.shared.hand_to_agent()
 }

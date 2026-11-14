@@ -37,30 +37,10 @@ DOWN = PluginCode(f"{ID}.pc_down")
 UNSHARED = PluginCode(f"{ID}.no_session")
 
 
-# The pcs plugin copies PcEntry and PcHolder verbatim; Provided.ask matches the rendered schema exactly, docstring included, so never change one side alone.
-# This provision and rigdesk.assign keep the PCs tab working until the pcs plugin is removed from Rig; they go with it.
-PCS = Provision("rigdesk.pcs", TypeAdapter(type(None)), TypeAdapter(tuple[PcEntry, ...]))
-NO_SESSION = ("you own no RigDesk session and no PC is assigned to you: desk/pcs lists the PCs; ask the operator to let you join one with desk/request(pc, why), "
-              "or call desk/join with a share link the human at the PC gives you")
+NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); for another, "
+              "ask the operator with desk/request(pc, why), or call desk/join with a share link the human at the PC gives you. A desk call never joins one by itself")
 
 
-class GrantChange(TypedDict):
-    """One grant the pcs plugin's page gives or takes away, for the operator: grantee is "agent:<id>" or "graph:<name>"."""
-    pc: str
-    grantee: str
-    granted: bool
-
-
-class GrantDone(TypedDict):
-    changed: bool
-
-
-class GrantRefused(TypedDict):
-    why: str
-
-
-# The pcs plugin copies GrantChange, GrantDone and GrantRefused verbatim, as it does PcEntry.
-ASSIGN = Provision("rigdesk.assign", TypeAdapter(GrantChange), TypeAdapter(GrantDone | GrantRefused))
 REQUEST_CONFIRMED = Provision("rigdesk.request_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
 
 
@@ -209,15 +189,6 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
     return f"{'Assigned' if changed else 'Already assigned'} {given['pc']} to you: desk/join(pc) joins it, with no share link, until the operator unassigns it on the RigDesk page."
 
 
-async def _assign(host: PluginHost, change: GrantChange) -> GrantDone | GrantRefused:
-    desks = host.live(Desks)
-    try:
-        changed = await (desks.assign if change["granted"] else desks.unassign)(change["pc"], change["grantee"])
-    except DeskRefused as refused:
-        return GrantRefused(why=str(refused))
-    return GrantDone(changed=changed)
-
-
 async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answer:
     agent, graph, _, _ = _who(call)
     held = desks.held_by(agent, graph)
@@ -239,12 +210,11 @@ def _upstream(tool: str, listed: dict[str, Any]) -> tuple[str, JsonObject, bool]
 
 def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
     async def run(call: Call, given: ToolInput) -> Answer:
-        agent, graph, node, title = _who(call)
+        agent, graph, _, _ = _who(call)
         held = desks.held_by(agent, graph)
+        if held is None:
+            return call.refused(UNSHARED, NO_SESSION)
         try:
-            held = held or await desks.assigned_join(agent, graph, node, title)
-            if held is None:
-                return call.refused(UNSHARED, NO_SESSION)
             return await desks.call(held, tool, dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
             return _refused(call, failed)
@@ -615,10 +585,6 @@ async def post_pc(request: Request[AddParams]) -> PcAdded | RefusedOutcome:
     return PcAdded(name=body.name, entry=added.model_dump(mode="json", exclude_none=True))
 
 
-async def _provided(host: PluginHost, _asked: None) -> tuple[PcEntry, ...]:
-    return host.live(Desks).entries()
-
-
 async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
     desks = host.live(Desks)
     server = desks.id_server()
@@ -632,7 +598,7 @@ CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, status=_status,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN},
-    provisions=(provider(PCS, _provided), provider(ASSIGN, _assign), provider(REQUEST_CONFIRMED, _request_confirmed)),
+    provisions=(provider(REQUEST_CONFIRMED, _request_confirmed),),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
             RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "screenshot", post_screenshot)))

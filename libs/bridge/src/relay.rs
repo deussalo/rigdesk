@@ -168,10 +168,17 @@ impl Relay {
                     if !to_pc(&msg) {
                         continue;
                     }
-                    if is_input(&msg) {
-                        self.shared.human_input("viewer input");
+                    let pass = match &msg.union {
+                        Some(message::Union::MouseEvent(me)) => self.shared.viewer_pointer(me.mask, "viewer input"),
+                        _ if is_input(&msg) => {
+                            self.shared.human_input("viewer input");
+                            true
+                        }
+                        _ => true,
+                    };
+                    if pass {
+                        self.link.forward(msg);
                     }
-                    self.link.forward(msg);
                 }
                 _ = ping.tick() => {
                     let mut msg = Message::new();

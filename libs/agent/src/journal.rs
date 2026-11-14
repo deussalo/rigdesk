@@ -8,6 +8,19 @@ use serde_json::Value;
 
 use crate::now_ms;
 
+/// The journal holds what the agent typed and ran, so it is readable by its owner alone.
+fn open_private(path: &std::path::Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path)?;
+    // A journal made before this rule keeps its old mode unless it is narrowed here.
+    #[cfg(unix)]
+    let _ = file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    Ok(file)
+}
+
 /// One line of the action log: who did what, when, and how it ended.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -37,7 +50,7 @@ impl Journal {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let file = OpenOptions::new().create(true).append(true).open(&path);
+        let file = open_private(&path);
         if let Err(e) = &file {
             log::error!("agent journal {} cannot be opened: {e}", path.display());
         }
@@ -69,7 +82,7 @@ impl Journal {
             if let Some(old) = self.rotated() {
                 let _ = fs::rename(path, old);
             }
-            *file = OpenOptions::new().create(true).append(true).open(path).ok();
+            *file = open_private(path).ok();
         }
         match file.as_mut() {
             Some(f) => {
