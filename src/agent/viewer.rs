@@ -151,7 +151,7 @@ fn forward() {
                         state.action = Some(action).into();
                         broadcast(state);
                     }
-                    EventKind::Message { .. } | EventKind::Dropped { .. } | EventKind::Reach { .. } => {}
+                    EventKind::Message { .. } | EventKind::Dropped { .. } | EventKind::Reach { .. } | EventKind::Server { .. } => {}
                 },
                 Err(RecvError::Lagged(_)) => broadcast(state()),
                 Err(RecvError::Closed) => break,
