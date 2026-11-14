@@ -1,4 +1,4 @@
-//! RigDesk's agent API host (Windows). The pure share/holder logic, the event log and the HTTP surface live in the
+//! RigDesk's agent API host (Windows and Linux). The pure share/holder logic, the event log and the HTTP surface live in the
 //! `rigdesk-agent` crate; this module fills its one seam -- the [`Desk`] of capture, input, clipboard and shell -- and
 //! starts the server inside the user-session `--server` process, the one that owns capture and input.
 //!
@@ -6,7 +6,7 @@
 //! take control back from the agent through [`human_took_over`]; the viewer mints links through [`mint_link`] and
 //! drives block/hand-back through the functions below. Nothing here reaches the network except the bound server.
 
-#![cfg(target_os = "windows")]
+#![cfg(any(target_os = "windows", target_os = "linux"))]
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -15,6 +15,7 @@ use rigdesk_agent::{Events, Journal, Minted, Shared, Standing};
 
 mod capture;
 mod desk;
+#[cfg(target_os = "windows")]
 pub mod enroll;
 mod input;
 mod shell;
@@ -80,7 +81,7 @@ pub fn start() {
         return;
     };
     let host = &*HOST;
-    let desk: Arc<dyn rigdesk_agent::Desk> = Arc::new(desk::WinDesk::new());
+    let desk: Arc<dyn rigdesk_agent::Desk> = Arc::new(desk::PcDesk::new());
     let api = rigdesk_agent::Api::new(host.shared.clone(), desk, host.journal.clone(), &bearer);
     tokio::spawn(async move {
         match api.serve(API_PORT).await {
