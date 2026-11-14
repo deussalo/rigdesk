@@ -69,18 +69,33 @@ struct Grant {
     secret: [u8; 32],
 }
 
+/// Who has the input while the agent is not blocked; a block is the agent's, not the session's (see [`Block`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hands {
+    Human,
+    Agent,
+}
+
 struct Session {
     owner: Owner,
     token: [u8; 32],
-    holder: Holder,
+    hands: Hands,
     since_ms: u64,
     last_input_ms: u64,
+}
+
+/// The human's Block or Stop, on an agent: it outlives that agent's session, so leaving and joining again (a new link,
+/// or Rig's own rejoin of an assigned PC) finds it still blocked. Only the human's unblock lifts it.
+struct Block {
+    agent_id: String,
+    since_ms: u64,
 }
 
 #[derive(Default)]
 struct State {
     grant: Option<Grant>,
     session: Option<Session>,
+    block: Option<Block>,
     /// Why the PC behind this host cannot be reached now; a host on the PC itself never sets it.
     down: Option<String>,
 }
@@ -106,6 +121,21 @@ fn fresh() -> String {
 pub struct Minted {
     pub grant: String,
     pub secret: String,
+}
+
+impl State {
+    /// The session's holder: blocked when its agent is, else whoever has the input; with when it began.
+    fn holder(&self) -> Option<(Holder, u64)> {
+        let session = self.session.as_ref()?;
+        Some(match &self.block {
+            Some(block) if block.agent_id == session.owner.agent_id => (Holder::Blocked, block.since_ms),
+            _ => (if session.hands == Hands::Human { Holder::Human } else { Holder::Agent }, session.since_ms),
+        })
+    }
+
+    fn blocked(&self) -> bool {
+        matches!(self.holder(), Some((Holder::Blocked, _)))
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -142,10 +172,10 @@ impl Shared {
             self.events.push(EventKind::Revoked { agent_id: previous.owner.agent_id, reason: "the desktop was shared with another agent".into() });
         }
         let token = fresh();
-        let since_ms = now_ms();
-        state.session = Some(Session { owner: owner.clone(), token: digest(&token), holder: Holder::Agent, since_ms, last_input_ms: 0 });
+        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0 });
+        let holder = state.holder().map_or(Holder::Agent, |(holder, _)| holder);
         self.events.push(EventKind::Claimed { owner });
-        self.events.push(EventKind::Holder { holder: Holder::Agent, by: "share".into() });
+        self.events.push(EventKind::Holder { holder, by: "share".into() });
         Ok(token)
     }
 
@@ -158,9 +188,13 @@ impl Shared {
     }
 
     /// Input the human took by using the PC goes back to the agent once their input has paused for `QUIET_MS`.
-    fn settle(&self, session: &mut Session) {
-        if session.holder == Holder::Human && now_ms().saturating_sub(session.last_input_ms) >= QUIET_MS {
-            session.holder = Holder::Agent;
+    fn settle(&self, state: &mut State) {
+        if state.blocked() {
+            return;
+        }
+        let Some(session) = state.session.as_mut() else { return };
+        if session.hands == Hands::Human && now_ms().saturating_sub(session.last_input_ms) >= QUIET_MS {
+            session.hands = Hands::Agent;
             session.since_ms = now_ms();
             self.events.push(EventKind::Holder { holder: Holder::Agent, by: "quiet".into() });
         }
@@ -169,12 +203,12 @@ impl Shared {
     /// Whether the session's holder may run a call now: a block stops everything, a human using the PC stops actions.
     pub fn admit(&self, token: &str, read_only: bool) -> Result<Owner, Refusal> {
         let mut state = self.state.lock().unwrap();
-        let session = Self::held(&mut state, token)?;
-        self.settle(session);
-        match session.holder {
-            Holder::Blocked => Err(Refusal::Blocked { since_ms: session.since_ms }),
-            Holder::Human if !read_only => Err(Refusal::HumanHolds { since_ms: session.since_ms }),
-            _ => Ok(session.owner.clone()),
+        let owner = Self::held(&mut state, token)?.owner.clone();
+        self.settle(&mut state);
+        match state.holder() {
+            Some((Holder::Blocked, since_ms)) => Err(Refusal::Blocked { since_ms }),
+            Some((Holder::Human, since_ms)) if !read_only => Err(Refusal::HumanHolds { since_ms }),
+            _ => Ok(owner),
         }
     }
 
@@ -183,15 +217,20 @@ impl Shared {
         Self::held(&mut state, token).map(|session| session.owner.clone())
     }
 
-    fn set(&self, to: Holder, by: &str, allowed: impl Fn(Holder) -> bool) -> bool {
+    /// Moves the input between the human and an agent that is not blocked.
+    fn hand(&self, to: Hands, by: &str) -> bool {
         let mut state = self.state.lock().unwrap();
-        let Some(session) = state.session.as_mut() else { return false };
-        if session.holder == to || !allowed(session.holder) {
+        if state.blocked() {
             return false;
         }
-        session.holder = to;
+        let Some(session) = state.session.as_mut() else { return false };
+        if session.hands == to {
+            return false;
+        }
+        session.hands = to;
         session.since_ms = now_ms();
-        self.events.push(EventKind::Holder { holder: to, by: by.into() });
+        let holder = if to == Hands::Human { Holder::Human } else { Holder::Agent };
+        self.events.push(EventKind::Holder { holder, by: by.into() });
         true
     }
 
@@ -199,38 +238,73 @@ impl Shared {
     pub fn human_input(&self, by: &str) -> bool {
         {
             let mut state = self.state.lock().unwrap();
-            let Some(session) = state.session.as_mut() else { return false };
-            if session.holder == Holder::Blocked {
+            if state.blocked() {
                 return false;
             }
+            let Some(session) = state.session.as_mut() else { return false };
             session.last_input_ms = now_ms();
         }
-        self.set(Holder::Human, by, |now| now == Holder::Agent)
+        self.hand(Hands::Human, by)
+    }
+
+    /// A viewer's pointer event, by RustDesk's mask (button bits over the event type): a press, release, wheel or drag
+    /// takes input from the agent, as `human_input`; a plain move while the agent holds input is kept from the PC, so
+    /// watching never disturbs the agent. Answers whether the event goes on to the PC.
+    pub fn viewer_pointer(&self, mask: i32, by: &str) -> bool {
+        let hover = mask == 0;
+        if !hover {
+            self.human_input(by);
+            return true;
+        }
+        self.state.lock().unwrap().holder().map_or(true, |(holder, _)| holder != Holder::Agent)
+    }
+
+    /// Blocks the session's agent; false with no agent joined, or one already blocked.
+    fn block_by(&self, by: &str) -> Result<bool, ()> {
+        let mut state = self.state.lock().unwrap();
+        let Some(session) = state.session.as_ref() else { return Err(()) };
+        if state.blocked() {
+            return Ok(false);
+        }
+        let agent_id = session.owner.agent_id.clone();
+        state.block = Some(Block { agent_id, since_ms: now_ms() });
+        self.events.push(EventKind::Holder { holder: Holder::Blocked, by: by.into() });
+        Ok(true)
     }
 
     /// The human's Stop: the agent is blocked until they resume it, and is told to stop even if it was already, so the
     /// bridge can cut its turn short. False with no agent joined.
     pub fn stop(&self) -> bool {
-        if self.set(Holder::Blocked, "stop", |now| now != Holder::Blocked) {
-            return true;
+        match self.block_by("stop") {
+            Err(()) => false,
+            Ok(true) => true,
+            Ok(false) => {
+                self.events.push(EventKind::Holder { holder: Holder::Blocked, by: "stop".into() });
+                true
+            }
         }
-        let state = self.state.lock().unwrap();
-        let Some(session) = state.session.as_ref() else { return false };
-        self.events.push(EventKind::Holder { holder: session.holder, by: "stop".into() });
-        true
     }
 
     pub fn hand_to_agent(&self) -> bool {
-        self.set(Holder::Agent, "hand to agent", |now| now == Holder::Human)
+        let human = self.state.lock().unwrap().holder().map_or(false, |(holder, _)| holder == Holder::Human);
+        human && self.hand(Hands::Agent, "hand to agent")
     }
 
     pub fn block(&self) -> bool {
-        self.set(Holder::Blocked, "block", |_| true)
+        self.block_by("block") == Ok(true)
     }
 
-    /// Unblocking resumes the agent; the human's next input still goes first.
+    /// Unblocking resumes the agent; the human's next input still goes first. It lifts a block on an agent that has
+    /// since left too, so it does not come back blocked.
     pub fn unblock(&self) -> bool {
-        self.set(Holder::Agent, "unblock", |now| now == Holder::Blocked)
+        let mut state = self.state.lock().unwrap();
+        let Some(block) = state.block.take() else { return false };
+        if let Some(session) = state.session.as_mut().filter(|s| s.owner.agent_id == block.agent_id) {
+            session.hands = Hands::Agent;
+            session.since_ms = now_ms();
+            self.events.push(EventKind::Holder { holder: Holder::Agent, by: "unblock".into() });
+        }
+        true
     }
 
     pub fn revoke(&self, reason: &str) -> bool {
@@ -258,13 +332,12 @@ impl Shared {
 
     pub fn standing(&self) -> Standing {
         let mut state = self.state.lock().unwrap();
-        if let Some(session) = state.session.as_mut() {
-            self.settle(session);
-        }
+        self.settle(&mut state);
+        let holder = state.holder();
         Standing {
             owner: state.session.as_ref().map(|s| s.owner.clone()),
-            holder: state.session.as_ref().map(|s| s.holder),
-            since_ms: state.session.as_ref().map(|s| s.since_ms),
+            holder: holder.map(|(holder, _)| holder),
+            since_ms: holder.map(|(_, since)| since),
             link_open: state.grant.is_some(),
         }
     }
@@ -346,6 +419,42 @@ mod tests {
         assert_eq!(shared.admit(&old, true), Err(Refusal::NoSession));
         assert_eq!(shared.admit(&new, true).unwrap().agent_id, "a2");
         assert!(shared.events.since(0).iter().any(|e| matches!(&e.kind, EventKind::Revoked { agent_id, .. } if agent_id == "a1")));
+    }
+
+    #[test]
+    fn a_hover_while_the_agent_holds_input_is_kept_from_the_pc_and_a_click_takes_input_back() {
+        let shared = Shared::new(Events::new(64));
+        assert!(shared.viewer_pointer(0, "viewer input"), "no agent: the pointer goes to the PC");
+        let link = shared.mint();
+        let token = shared.claim(&link.grant, &link.secret, owner("a1")).unwrap();
+        assert!(!shared.viewer_pointer(0, "viewer input"), "a hover is kept from the PC");
+        assert!(shared.admit(&token, false).is_ok(), "and leaves the agent its input");
+        assert!(shared.viewer_pointer(1 | (1 << 3), "viewer input"), "a click goes to the PC");
+        assert!(matches!(shared.admit(&token, false), Err(Refusal::HumanHolds { .. })));
+        assert!(shared.viewer_pointer(0, "viewer input"), "while the human holds input, moves go to the PC");
+    }
+
+    #[test]
+    fn a_block_is_the_agents_and_outlives_its_session_until_unblocked() {
+        let shared = Shared::new(Events::new(64));
+        let link = shared.mint();
+        let token = shared.claim(&link.grant, &link.secret, owner("a1")).unwrap();
+        assert!(shared.block());
+        assert!(shared.revoke("the agent left"));
+        let again = shared.mint();
+        let token2 = shared.claim(&again.grant, &again.secret, owner("a1")).unwrap();
+        assert_ne!(token, token2);
+        assert!(matches!(shared.admit(&token2, true), Err(Refusal::Blocked { .. })), "joining again does not lift the block");
+        assert_eq!(shared.standing().holder, Some(Holder::Blocked));
+        assert!(!shared.block(), "already blocked");
+        let other = shared.mint();
+        let token3 = shared.claim(&other.grant, &other.secret, owner("a2")).unwrap();
+        assert!(shared.admit(&token3, false).is_ok(), "another agent is not blocked by a1's block");
+        assert!(shared.unblock(), "the human lifts a1's block though a1 has left");
+        let back = shared.mint();
+        let token4 = shared.claim(&back.grant, &back.secret, owner("a1")).unwrap();
+        assert!(shared.admit(&token4, false).is_ok());
+        assert!(!shared.unblock(), "nothing left to lift");
     }
 
     #[test]

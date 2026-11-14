@@ -3205,9 +3205,12 @@ impl Connection {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
-                    // A viewer's own input takes the desktop back from the agent before its next action.
+                    // A viewer's own input takes the desktop back from the agent before its next action; its hover while
+                    // the agent holds input is kept from the PC. A view-only viewer's input reaches nothing, so counts for nothing.
                     #[cfg(any(target_os = "windows", target_os = "linux"))]
-                    crate::agent::human_took_over("viewer input");
+                    if self.peer_keyboard_enabled() && !crate::agent::viewer_pointer(me.mask) {
+                        return true;
+                    }
                     #[cfg(any(target_os = "android", target_os = "ios"))]
                     if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
                         log::debug!("call_main_service_pointer_input fail:{}", e);
@@ -3345,7 +3348,9 @@ impl Connection {
                         return true;
                     }
                     #[cfg(any(target_os = "windows", target_os = "linux"))]
-                    crate::agent::human_took_over("viewer input");
+                    if self.peer_keyboard_enabled() {
+                        crate::agent::human_took_over("viewer input");
+                    }
                     if self.peer_keyboard_enabled() {
                         if is_enter(&me) {
                             CLICK_TIME.store(get_time(), Ordering::SeqCst);

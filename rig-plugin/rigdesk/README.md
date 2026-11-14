@@ -129,16 +129,16 @@ Known limits against a RigDesk PC:
   link works once.
 * **Standing grant (stock PCs).** rigdesk keeps who holds one, `"agent:<id>"` or `"graph:<name>"` per PC, in its own
   `grants` doc in Rig's store, and alone writes it: on the RigDesk page, which assigns any agent or every agent in a
-  graph, on Rig's PCs page while the `pcs` plugin remains (through the provision `rigdesk.assign`), or on the
-  operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
+  graph, or on the operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
   link: its first `desk/<tool>` call joins the PC (the plugin mints and claims on the bridge itself), and so does its
-  next call after the bridge or Rig restarts. Stop still blocks it; an agent sharing through a link at the time is not
+  next call after the bridge or Rig restarts. Stop and Block hold across that rejoin: they are on the agent, not its
+  session, and only the human's unblock lifts them. An agent sharing through a link at the time is not
   displaced. A change applies at once and does not restart the bridge; taking a grant away ends a session held through
   it. A PC removed from settings, or no longer stock, loses its grants. A session held through the grant ends after
   5 minutes without a desk call, so other assigned agents can take the PC; its next call rejoins.
-* **A session that ends** (RigDesk restarts, the human ends the share or shares with another agent, an idle leave) is not
-  announced to the agent, which is not woken for it; Rig's log has it, and the agent's next `desk/<tool>` call says
-  where it stands.
+* **A session that ends** without the agent's own `desk/leave` (RigDesk restarts, the human ends the share or shares with
+  another agent, an idle leave, the PC leaves Rig's settings) is told to the agent, queued for its next turn rather
+  than waking it; Rig's log has it too. While the PC is down, its MCP servers close for the holder and reopen when it is back.
 * `desk/pcs` — every PC in Rig, with its client, whether it is up, whether it is assigned to the caller, and who holds
   it now.
 * `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins

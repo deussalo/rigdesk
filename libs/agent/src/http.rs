@@ -68,6 +68,13 @@ fn json_response(status: StatusCode, body: &Value) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(full("{}")))
 }
 
+/// Whether a message to a PC's MCP server only reads, so it runs while the human uses the PC: opening, listing, pings,
+/// notifications and the client's answers. Anything else (a tool call, a resource read, a prompt) acts as the agent.
+fn mcp_reads(method: &str, message: &Value) -> bool {
+    let answer = message.get("method").is_none();
+    answer || matches!(method, "initialize" | "ping") || method.starts_with("notifications/") || method.ends_with("/list")
+}
+
 fn text(status: StatusCode, body: &str) -> Response<Body> {
     Response::builder().status(status).body(full(body.to_string())).unwrap_or_else(|_| Response::new(full("")))
 }
@@ -213,10 +220,13 @@ impl Api {
             return text(StatusCode::BAD_REQUEST, "the request body could not be read");
         };
         let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        if !message.is_object() {
+            return text(StatusCode::BAD_REQUEST, "send one JSON-RPC message, not a batch");
+        }
         let method = message.get("method").and_then(Value::as_str).unwrap_or("").to_string();
         let tool = message.pointer("/params/name").and_then(Value::as_str).unwrap_or("").to_string();
         let what = if tool.is_empty() { format!("mcp {name} {method}") } else { format!("mcp {name}/{tool}") };
-        let owner = match self.mcp.admit(&token, method != "tools/call", &what) {
+        let owner = match self.mcp.admit(&token, mcp_reads(&method, &message), &what) {
             Ok(owner) => owner,
             Err(words) => {
                 return match message.get("id") {
@@ -238,7 +248,7 @@ impl Api {
                 return text(StatusCode::GATEWAY_TIMEOUT, &format!("MCP server {name} on this PC gave no answer within {} s", crate::found::CALL_WAIT.as_secs()));
             }
         };
-        if method == "tools/call" {
+        if !mcp_reads(&method, &message) {
             let failed = answer.status != 200 || answer.json_rpc().map_or(true, |r| r.get("error").is_some() || r.pointer("/result/isError") == Some(&Value::Bool(true)));
             self.journal.record(&Entry::new(owner.who(), &what, if failed { "failed" } else { "ok" }, json!({"args": message.pointer("/params/arguments")})));
             self.shared.events.transient(EventKind::Action { agent_title: owner.title.clone(), tool: format!("{name}/{tool}"), summary: what.clone(), ok: !failed, x: None, y: None });
@@ -362,26 +372,36 @@ impl Api {
                 })
             })
             .unwrap_or(0);
-        let (backlog, gap, mut rx) = self.shared.events.resume(after);
+        let shared = self.shared.clone();
         let (tx, body_rx) = mpsc::channel::<Result<hyper::body::Frame<Bytes>, Infallible>>(64);
         tokio::spawn(async move {
-            if gap {
-                let _ = tx.send(Ok(sse(&Event { id: 0, at_ms: crate::now_ms(), kind: EventKind::Dropped { messages: 0 } }))).await;
-            }
-            for event in backlog {
-                if tx.send(Ok(sse(&event))).await.is_err() {
-                    return;
-                }
-            }
+            // A reader that falls behind the live channel is caught up from the ring, as a reconnect would be; only what
+            // the ring itself no longer holds is reported dropped. Transient events (actions) are not kept, so not resent.
+            let mut sent = after;
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if tx.send(Ok(sse(&event))).await.is_err() {
-                            return;
-                        }
+                let (backlog, gap, mut rx) = shared.events.resume(sent);
+                if gap {
+                    let _ = tx.send(Ok(sse(&Event { id: 0, at_ms: crate::now_ms(), kind: EventKind::Dropped { messages: 0 } }))).await;
+                }
+                let after = sent;
+                for event in backlog.into_iter().filter(|e| e.id > after) {
+                    sent = event.id;
+                    if tx.send(Ok(sse(&event))).await.is_err() {
+                        return;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return,
+                }
+                loop {
+                    match rx.recv().await {
+                        Ok(event) if event.id != 0 && event.id <= sent => continue,
+                        Ok(event) => {
+                            sent = sent.max(event.id);
+                            if tx.send(Ok(sse(&event))).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                        Err(_) => return,
+                    }
                 }
             }
         });

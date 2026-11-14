@@ -27,6 +27,7 @@ def test_the_agent_hears_of_stop_and_block_but_not_of_the_humans_passing_input_o
     assert words_of("deus", {"type": "holder", "holder": "agent", "by": "share", "at_ms": 0}) is None
     assert "pressed Stop" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "stop", "at_ms": 0}))
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
+    assert "session there ended" in str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the human ended the share", "at_ms": 0}))
 
 
 def test_a_stock_pc_is_served_on_loopback() -> None:
@@ -220,8 +221,8 @@ def test_an_assigned_session_idle_five_minutes_leaves_the_pc_but_a_link_session_
                 desks._sessions.pop(held.pc)
                 return True
 
-            async def tell(held: Held, words: str, key: str) -> bool:
-                told.append(words)
+            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
+                told.append(f"{timing}: {words}")
                 return True
             desks.leave = leave  # type: ignore[method-assign]
             desks._tell = tell  # type: ignore[method-assign]
@@ -229,7 +230,7 @@ def test_an_assigned_session_idle_five_minutes_leaves_the_pc_but_a_link_session_
 
     asyncio.run(run())
     assert left == ["deus"]
-    assert told == []
+    assert len(told) == 1 and told[0].startswith("queue: RigDesk deus: you left deus after 5 minutes"), told
 
 
 if __name__ == "__main__":

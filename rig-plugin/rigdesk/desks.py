@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import itertools
 import binascii
 import json
 import re
@@ -236,10 +237,10 @@ class PcHolder(TypedDict):
     graph: str
 
 
-# One RigDesk PC as desk/pcs reads it, and the pcs plugin through the provision rigdesk.pcs. assigned is who holds a standing grant to it ("agent:<id>"
-# or "graph:<name>", in rigdesk's grants doc), which only a stock PC has; held_by is the agent that owns its session now, by a link or the grant.
-# The pcs plugin copies PcHolder and PcEntry exactly and matches the schema, so no docstrings and never change one side alone, until pcs goes.
 class PcEntry(TypedDict):
+    """One RigDesk PC as desk/pcs reads it. assigned is who holds a standing grant to it ("agent:<id>" or "graph:<name>", in rigdesk's grants
+    doc), which only a stock PC has; held_by is the agent that owns its session now, by a link or the grant."""
+
     name: str
     client: str
     stock: bool
@@ -294,6 +295,11 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
                 if event.get("on") else
                 f"RigDesk {pc}: the human turned MCP off at {at}; no MCP server there is offered to you until they turn it back on. "
                 "Screen, input and shell are unchanged.")
+    if kind == "revoked":
+        why = str(event.get("reason") or "the share ended")
+        if why == "the agent left":
+            return None
+        return f"RigDesk {pc}: your session there ended at {at} ({why}). Desk calls there are refused until you join it again."
     if kind == "dropped":
         count = int(event.get("messages") or 0)
         return (f"RigDesk {pc}: {count} of the human's messages were dropped unread at {at}: the PC's queue was full." if count
@@ -325,6 +331,11 @@ class Desks:
         self._sessions: dict[str, Held] = {}
         self._boots: dict[str, str] = {}
         self._last: dict[str, int] = {}
+        # The newest event id handled per PC, and the human's messages not yet told to their agent: the resume point
+        # (_last) stays below the oldest of those, so a reconnect or restart brings it back.
+        self._seen: dict[str, int] = {}
+        self._unsent: dict[str, dict[int, dict[str, Any]]] = {}
+        self._ids = itertools.count(1)
         self._http: aiohttp.ClientSession | None = None
         self._watch: asyncio.Task[None] | None = None
         self._probe: asyncio.Task[None] | None = None
@@ -379,6 +390,7 @@ class Desks:
                 self._reconcile(settings)
                 await self._prune_grants()
                 await self._idle_leaves()
+                await self._resend()
             except Exception as failed:  # noqa: BLE001
                 _LOG.warning("rigdesk_settings_unread", f"RigDesk settings could not be read, PCs stay as they are: {type(failed).__name__}: {failed}")
             await asyncio.sleep(SETTINGS_EVERY_S)
@@ -391,6 +403,11 @@ class Desks:
             self._listeners = () if settings.id_server is None else tuple(Listener(role, host, port) for role, host, port in settings.id_server.listeners())
             self._probe_now.set()
         self._id_server = settings.id_server
+        for pc in [pc for pc in self._sessions if pc not in settings.pcs]:
+            held = self._sessions.pop(pc)
+            self._unsent.pop(pc, None)
+            _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: the PC left Rig's settings, so {held.title}'s session there ended", pc=pc)
+            TASKS.spawn(f"rigdesk-gone-{pc}", self._ended(held, f"RigDesk {pc}: the operator removed {pc} from Rig, so your session there ended."))
         carried: dict[str, dict[str, PcServer]] = {}
         for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
             link = self._pcs.pop(name)
@@ -655,6 +672,7 @@ class Desks:
                 link.down_since_ms = now_ms()
                 _LOG.warning("rigdesk_pc_down", f"RigDesk PC {link.name} is down: {why}", pc=link.name)
             link.state, link.why = "down", why
+            self._resync(link)
             await asyncio.sleep(RETRY_S[min(tries, len(RETRY_S) - 1)])
             tries += 1
 
@@ -694,13 +712,15 @@ class Desks:
     async def _rebooted(self, pc: str, boot: str) -> None:
         """A PC whose agent host restarted lost its sessions and numbers its events afresh."""
         known = pc in self._boots
-        self._boots[pc], self._last[pc] = boot, 0
+        self._boots[pc], self._last[pc], self._seen[pc] = boot, 0, 0
+        self._unsent.pop(pc, None)
         held = self._sessions.pop(pc, None)
         if (link := self._pcs.get(pc)) is not None:
             self._resync(link)
         await asyncio.to_thread(self._write_state)
-        if known and held is not None and not _grants(self.granted(pc), held.agent, held.graph):
+        if known and held is not None:
             _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: RigDesk restarted, so {held.title}'s session there ended", pc=pc)
+            await self._ended(held, f"RigDesk {pc}: RigDesk restarted there, so your session ended. Desk calls there are refused until you join it again.")
 
     async def _listed(self, link: PcLink) -> None:
         """desk/* offers every tool any PC offers: a stock PC has fewer than a RigDesk PC, and refuses the ones it lacks."""
@@ -724,6 +744,7 @@ class Desks:
         if link.state != "down":
             link.down_since_ms = now_ms()
             _LOG.warning("rigdesk_pc_down", f"RigDesk PC {link.name} is down: {down}", pc=link.name)
+            self._resync(link)
         link.state, link.why = "down", down
 
     async def _event(self, link: PcLink, event: dict[str, Any]) -> None:
@@ -750,26 +771,61 @@ class Desks:
         if held is not None and (kind != "revoked" or held.agent == event.get("agent_id")):
             key = f"{self._boots.get(pc, '')}:{event_id}" if event_id else f"{self._boots.get(pc, '')}:gap:{now_ms()}"
             if kind == "message":
-                await self._message(link, held, event, key)
+                if await self._message(link, held, event, key):
+                    self._unsent.get(pc, {}).pop(event_id, None)
+                elif event_id:
+                    self._unsent.setdefault(pc, {})[event_id] = event
             elif (said := words_of(pc, event)) is not None:
                 if kind == "holder" and event.get("by") == "stop" and now_ms() - int(event.get("at_ms") or 0) < STOP_FRESH_MS:
                     await self._interrupt(held)
-                await self._tell(held, said, key)
+                await self._tell(held, said, key, "queue" if kind == "revoked" else "steer")
         if event_id:
-            self._last[pc] = max(self._last.get(pc, 0), event_id)
+            self._seen[pc] = max(self._seen.get(pc, 0), event_id)
+            self._resume_at(pc)
             await asyncio.to_thread(self._write_state)
 
-    async def _message(self, link: PcLink, held: Held, event: dict[str, Any], key: str) -> None:
+    def _resume_at(self, pc: str) -> None:
+        """The event id a reconnect resumes after: the newest handled, but never past a message its agent was not told."""
+        unsent = self._unsent.get(pc)
+        self._last[pc] = min([max(self._last.get(pc, 0), self._seen.get(pc, 0))] if not unsent else [self._seen.get(pc, 0), min(unsent) - 1])
+
+    async def _resend(self) -> None:
+        """The human's messages that could not be told (the agent's graph stopped, its seat closed) are told again while its session lasts."""
+        for pc, unsent in list(self._unsent.items()):
+            link, held = self._pcs.get(pc), self._sessions.get(pc)
+            if link is None or held is None:
+                _LOG.warning("rigdesk_message_unsent", f"RigDesk {pc}: {len(unsent)} of the human's messages were never told: the session they were for ended", pc=pc)
+                unsent.clear()
+            for event_id, event in sorted(unsent.items()):
+                if link is None or held is None or link.state != "up":
+                    break
+                if not await self._message(link, held, event, f"{self._boots.get(pc, '')}:{event_id}"):
+                    break
+                unsent.pop(event_id)
+            if not unsent:
+                self._unsent.pop(pc, None)
+            before = self._last.get(pc)
+            self._resume_at(pc)
+            if self._last.get(pc) != before:
+                await asyncio.to_thread(self._write_state)
+
+    async def _ended(self, held: Held, words: str) -> None:
+        """Tells an agent its session ended without its asking, queued for its next turn rather than waking it."""
+        await self._tell(held, words, f"ended:{held.session[:12]}", "queue")
+
+    async def _message(self, link: PcLink, held: Held, event: dict[str, Any], key: str) -> bool:
         images: list[tuple[str, Path | None]] = []
         for image in event.get("attachments") or []:
             try:
                 images.append((image, await self._fetched(link, held, str(image))))
             except DeskRefused:
                 images.append((image, None))
-        if await self._tell(held, message_words(link.name, str(event.get("text") or ""), images), key):
-            ack = f"{link.spec.url}/attachments/-/ack?upto={int(event.get('id') or 0)}"
-            async with self._client().post(ack, headers=self._headers(link, held.session), timeout=aiohttp.ClientTimeout(total=15)):
-                pass
+        if not await self._tell(held, message_words(link.name, str(event.get("text") or ""), images), key):
+            return False
+        ack = f"{link.spec.url}/attachments/-/ack?upto={int(event.get('id') or 0)}"
+        async with self._client().post(ack, headers=self._headers(link, held.session), timeout=aiohttp.ClientTimeout(total=15)):
+            pass
+        return True
 
     async def _seat(self, held: Held) -> SeatId:
         seat = await self.host.seat_of(AgentId(held.agent), GraphName(held.graph), "rigdesk")
@@ -812,15 +868,16 @@ class Desks:
         told of both. Rig's switch turned off closes the holder's servers and tells it; with no holder, or a new one, those opened before go unsaid."""
         async with link.syncing:
             held = self._sessions.get(link.name)
-            stale = [name for name, server in link.servers.items() if held is None or not link.spec.mcp or server.session != held.session]
+            stale = [name for name, server in link.servers.items() if held is None or not link.spec.mcp or link.state == "down" or server.session != held.session]
             closed = [server for server in (link.servers.pop(name) for name in stale) if held is not None and server.session == held.session]
-            if held is None or not link.spec.mcp:
-                link.mcp_on, link.mcp_why = None, None if link.spec.mcp else "off in Rig's settings for this PC"
+            if held is None or not link.spec.mcp or link.state == "down":
+                link.mcp_on, link.mcp_why = None, (None if link.spec.mcp else "off in Rig's settings for this PC") if link.state != "down" else f"the PC is down: {link.why}"
                 self._revision += bool(stale)
                 if held is not None and closed:
                     names = ", ".join(f"{server.key}/*" for server in closed)
-                    await self._tell(held, f"RigDesk {link.name}: the operator turned MCP off for {link.name} in Rig, so its MCP servers closed for you: "
-                                           f"{names} are no longer there.", f"servers-off:{now_ms()}", "queue")
+                    why = (f"{link.name} is down ({link.why}), so its MCP servers closed for you: {names} are not there until it is back"
+                           if link.state == "down" else f"the operator turned MCP off for {link.name} in Rig, so its MCP servers closed for you: {names} are no longer there")
+                    await self._tell(held, f"RigDesk {link.name}: {why}.", f"servers-off:{now_ms()}", "queue")
                 return
             dropped: list[tuple[PcServer, str]] = []
             if gone is not None and (server := link.servers.pop(gone[0], None)) is not None:
@@ -898,7 +955,7 @@ class Desks:
         """One MCP message through the PC to its server: the result, and the server's MCP session id; a notification answers an empty result.
         A streamable HTTP server answers a request as JSON or as an event stream holding the reply."""
         notice = method.startswith("notifications/")
-        asked = now_ms()
+        asked = next(self._ids)
         body: dict[str, Any] = {"jsonrpc": "2.0", "method": method} | ({} if notice else {"id": asked}) | ({} if params is None else {"params": params})
         headers = self._headers(link, held.session) | {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": protocol}
         headers |= {"Mcp-Session-Id": sid} if sid else {}
@@ -1024,8 +1081,10 @@ class Desks:
             said = await answer.json(content_type=None)
             if answer.status != 200:
                 raise DeskRefused(f"{pc} refused the link: {said.get('error', f'HTTP {answer.status}') if isinstance(said, dict) else answer.status}")
+        if not isinstance(said, dict) or not isinstance(said.get("session"), str):
+            raise DeskRefused(f"{pc} accepted the link but sent no session token")
         replaced = self._sessions.get(pc)
-        held = self._sessions[pc] = Held(pc, agent, graph, node, title, str(said["session"]), now_ms(), via)
+        held = self._sessions[pc] = Held(pc, agent, graph, node, title, said["session"], now_ms(), via)
         link.standing = said.get("standing")
         await asyncio.to_thread(self._write_state)
         self._resync(link)
@@ -1085,14 +1144,20 @@ class Desks:
         for held in [held for held in self._sessions.values() if held.via == "assigned" and max(held.used_ms, held.since_ms) < cutoff]:
             try:
                 await self.leave(held)
-            except (aiohttp.ClientError, TimeoutError, OSError) as failed:
+            except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
                 _LOG.warning("rigdesk_idle_leave_failed", f"RigDesk {held.pc}: leaving the idle session failed: {failed}", pc=held.pc)
             _LOG.info("rigdesk_session_ended", f"RigDesk {held.pc}: {held.title} left after {IDLE_LEAVE_MS // 60_000} idle minutes", pc=held.pc)
+            await self._ended(held, f"RigDesk {held.pc}: you left {held.pc} after {IDLE_LEAVE_MS // 60_000} minutes without a desk call, "
+                                    "so other agents assigned to it can use it.")
 
     async def leave(self, held: Held) -> bool:
-        link = self._link(held.pc)
-        self._sessions.pop(held.pc, None)
+        if self._sessions.get(held.pc) is held:
+            self._sessions.pop(held.pc)
+            self._unsent.pop(held.pc, None)
         await asyncio.to_thread(self._write_state)
+        link = self._pcs.get(held.pc)
+        if link is None:
+            return True
         self._resync(link)
         async with self._client().post(f"{link.spec.url}/leave", headers=self._headers(link, held.session), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             return answer.status == 200 and bool((await answer.json(content_type=None)).get("left"))
@@ -1105,7 +1170,7 @@ class Desks:
         held.used_ms = now_ms()
         if link.state != "up":
             raise DeskRefused(f"RigDesk PC {held.pc} is down: {link.why or 'not reached yet'}")
-        body = {"jsonrpc": "2.0", "id": now_ms(), "method": "tools/call", "params": {"name": tool, "arguments": arguments}}
+        body = {"jsonrpc": "2.0", "id": next(self._ids), "method": "tools/call", "params": {"name": tool, "arguments": arguments}}
         async with self._client().post(f"{link.spec.url}/mcp", json=body, headers=self._headers(link, held.session), timeout=aiohttp.ClientTimeout(total=_call_limit_s(tool, arguments))) as answer:
             if answer.status != 200:
                 raise DeskRefused(f"{held.pc} answered HTTP {answer.status}")
