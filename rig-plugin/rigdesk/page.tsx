@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { ALL_SPACE, get_agent_settings, get_graph_cards, get_graphs, patch_agent_settings } from '@rig/contract'
 import { Action, agoOf, AppTab, Board, BoardBar, BoardFacts, BoardForm, BoardNew, BoardPart, BoardProblems, BoardRow, BoardRows, contribution, editSettings, Field, Headed, href, lastOf, Link, Mark,
-  objectOf, Quiet, REREAD_MS, Refusal, store as core, tell, Text, told, useAsked, useNow, useRememberedFold, withPath, type BoardColumns, type Fact, type Ink, type Refused } from '@rig/host'
+  objectOf, Quiet, REREAD_MS, Refusal, store as core, tell, Text, Toggle, told, useAsked, useNow, useRememberedFold, withPath, type BoardColumns, type Fact, type Ink, type Refused } from '@rig/host'
 import css from './rigdesk.module.css'
 
 const routes = contribution('rigdesk')
@@ -10,6 +10,9 @@ const EVERY_MS = Math.min(REREAD_MS, 5_000)
 type Owner = { readonly id: string | null; readonly title: string | null; readonly graph: string | null }
 type Grant = { readonly grantee: string; readonly label: string; readonly graph: string | null; readonly agent_id: string | null }
 type Shot = { readonly mime: string; readonly data: string; readonly taken_ms: number }
+type McpServer = { readonly name: string; readonly key: string; readonly says: string; readonly tools: readonly string[]; readonly since_ms: number }
+/** The PC's own MCP servers: Rig's switch, the PC's as it last said (null while no agent holds it), why none is offered, and those open for the holder. */
+type Mcp = { readonly allowed: boolean; readonly on: boolean | null; readonly why: string | null; readonly servers: readonly McpServer[] }
 type PcRow = {
   readonly name: string
   readonly client: string
@@ -22,6 +25,7 @@ type PcRow = {
   readonly owner: Owner | null
   readonly owned_here: boolean
   readonly assigned: readonly Grant[]
+  readonly mcp?: Mcp | undefined
 }
 type Listener = {
   readonly role: 'hbbs' | 'hbbr'
@@ -162,6 +166,26 @@ function Screenshot({ pc, now }: { readonly pc: PcRow; readonly now: number }): 
   )
 }
 
+/** Rig's switch for a PC's own MCP servers, kept in the PC's settings entry; off, Rig opens none of them. */
+const allowing = (pc: string) => (on: boolean): Promise<Refused | null> => editSettings(document => withPath(document, ['plugins', 'rigdesk', 'pcs', pc, 'mcp'], on))
+
+/** The MCP servers running on the PC, which the agent holding it calls as <pc>.<server>/<tool>: the switch, then each open server, or why there is none. */
+function McpServers({ pc, mcp, now }: { readonly pc: PcRow; readonly mcp: Mcp; readonly now: number }): ReactNode {
+  const none = mcp.why ?? (!mcp.allowed ? 'off: Rig opens none of this PC\'s servers' : mcp.on === null ? 'looked for when an agent holds the PC' : mcp.on ? 'the PC runs none' : 'off on the PC')
+  return (
+    <>
+      <BoardBar>
+        <label className={css.switch}><Toggle label={`${pc.name}'s MCP servers`} on={mcp.allowed} onTurn={allowing(pc.name)} />{mcp.allowed ? 'on' : 'off'}</label>
+        {mcp.servers.length > 0 && mcp.why === null ? null : <span className={css.dim}>{none}</span>}
+      </BoardBar>
+      {mcp.servers.length === 0 ? null : (
+        <BoardFacts label="MCP servers" facts={mcp.servers.map((each): Fact => [each.name,
+          <span key={each.key}>{each.says} <i>{`· ${String(each.tools.length)} ${each.tools.length === 1 ? 'tool' : 'tools'} as ${each.key}/… · opened ${agoOf(each.since_ms, now)}`}</i></span>])} />
+      )}
+    </>
+  )
+}
+
 type Verb = 'mint' | 'hand' | 'human' | 'stop' | 'block' | 'unblock' | 'revoke'
 
 /** What a stock PC's human does to it, from here since it has no RigDesk viewer; a refusal is told with the verb that failed. */
@@ -202,6 +226,7 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
   const ink: Ink = standing === 'blocked' ? 'fault' : INK[pc.state]
   const held = pc.owner === null ? null : <span>held by <OwnerOf owner={pc.owner} />{pc.owned_here ? '' : ' (joined elsewhere)'}</span>
   const assigned = pc.assigned.map(each => each.label)
+  const servers = pc.mcp?.servers.length ?? 0
   const facts: readonly Fact[] = [
     ['client', pc.client || 'none'], ['kind', pc.stock ? 'stock RustDesk' : 'RigDesk'], ['address', pc.url], ['input', pc.holder === null ? 'no agent' : HOLDER[pc.holder]],
     ...(held === null ? [] : [['agent', held] as const]),
@@ -213,7 +238,7 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
       state={{ word: standing, ink: standing === 'up' ? 'idle' : ink }}
       why={pc.down_since_ms !== null ? agoOf(pc.down_since_ms, now) : pc.holder === null ? undefined : HOLDER[pc.holder]}
       telling={pc.state === 'down' ? pc.why ?? 'no reason given' : held ?? 'no agent on it'} tellingDim={pc.state !== 'down' && held === null}
-      figures={!pc.stock ? { main: 'shared by link', dim: true } : assigned.length === 0 ? { main: 'assigned to no one', dim: true }
+      figures={!pc.stock ? { main: 'shared by link', dim: true, under: servers === 0 ? undefined : `${String(servers)} MCP ${servers === 1 ? 'server' : 'servers'}` } : assigned.length === 0 ? { main: 'assigned to no one', dim: true }
         : { main: assigned.length === 1 ? `assigned to ${assigned[0] ?? ''}` : `${String(assigned.length)} assigned`, under: assigned.length === 1 ? undefined : assigned.join(', ') }}
       verbs={pc.stock && pc.owner !== null ? <Action label="stop" tone="danger" onInvoke={acting(pc, 'stop')} /> : undefined}>
       <BoardProblems problems={pc.state === 'down' && pc.why !== null ? [pc.why] : []} />
@@ -226,6 +251,7 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
       )}
       {pc.stock ? <BoardPart name="assign"><Assign pc={pc} forFleet={forFleet} /></BoardPart> : null}
       {pc.assigned.length === 0 ? null : <BoardPart name="assigned"><Grants pc={pc} /></BoardPart>}
+      {pc.stock || pc.mcp === undefined ? null : <BoardPart name="MCP"><McpServers pc={pc} mcp={pc.mcp} now={now} /></BoardPart>}
       <BoardPart name="screen"><Screenshot pc={pc} now={now} /></BoardPart>
       {pc.stock ? <StockButtons pc={pc} minted={setLink} /> : <Quiet>its human shares it from the RigDesk viewer</Quiet>}
     </BoardRow>

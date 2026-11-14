@@ -1,2 +1,3 @@
 .shot { display: block; max-inline-size: min(100%, var(--measure)); border: 1px solid var(--border); }
 .dim { font-size: var(--font-xs); color: var(--text-dim); }
+.switch { display: inline-flex; align-items: center; gap: var(--space-sm); color: var(--text-mid); }
