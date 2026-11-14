@@ -567,6 +567,7 @@ extern "C" {
         session_id: DWORD,
         as_user: BOOL,
         show: BOOL,
+        hidden_console: BOOL,
         token_pid: &mut DWORD,
     ) -> HANDLE;
     fn GetSessionUserTokenWin(
@@ -833,7 +834,7 @@ pub fn launch_privileged_process(session_id: DWORD, cmd: &str) -> ResultType<HAN
         .collect();
     let wstr = wstr.as_ptr();
     let mut token_pid = 0;
-    let h = unsafe { LaunchProcessWin(wstr, session_id, FALSE, FALSE, &mut token_pid) };
+    let h = unsafe { LaunchProcessWin(wstr, session_id, FALSE, FALSE, FALSE, &mut token_pid) };
     if h.is_null() {
         log::error!(
             "Failed to launch privileged process: {}",
@@ -903,6 +904,7 @@ pub fn run_exe_in_session(
             session_id,
             TRUE,
             if show { TRUE } else { FALSE },
+            FALSE,
             &mut token_pid,
         )
     };

@@ -35,6 +35,13 @@ fn grab(display: Display) -> ResultType<(Vec<u8>, u32, u32)> {
             }
             Ok(Frame::Texture(_)) => bail!("capture returned a GPU texture; the agent path wants CPU frames"),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Some GPUs with no monitor attached (an RTX on a headless desktop) never hand DXGI a frame; GDI reads
+                // the screen as it is.
+                #[cfg(windows)]
+                if attempt == 19 && !capturer.is_gdi() && capturer.set_gdi() {
+                    log::info!("agent capture: DXGI gave no frame in 1 s, reading the screen through GDI");
+                    continue;
+                }
                 if attempt % 20 == 19 {
                     log::debug!("agent capture still waiting for a frame");
                 }
