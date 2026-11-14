@@ -155,7 +155,6 @@ remote_printer = { path = "libs/remote_printer" }
 impersonate_system = { git = "https://github.com/rustdesk-org/impersonate-system" }
 shared_memory = "0.12"
 tauri-winrt-notification = "0.1"
-rigdesk-agent = { version = "0.1.0", path = "libs/agent" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
@@ -180,6 +179,7 @@ image = "0.24"
 keepawake = { git = "https://github.com/rustdesk-org/keepawake-rs" }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+rigdesk-agent = { version = "0.1.0", path = "libs/agent" }
 wallpaper = { git = "https://github.com/rustdesk-org/wallpaper.rs" }
 tiny-skia = "0.11"
 softbuffer = "0.4"
