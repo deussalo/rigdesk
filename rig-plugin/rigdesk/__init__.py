@@ -27,7 +27,7 @@ from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, PcEntry, PcServer, RigdeskSettings
+from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, PcEntry, PcServer, RigdeskSettings, failure
 from .desks import PcName as DeskName
 
 BRANCH = "desk"
@@ -98,7 +98,7 @@ def _refused(call: Call, refused: Exception) -> Answer:
     if isinstance(refused, DeskRefused):
         return call.refused(REFUSED, str(refused))
     if isinstance(refused, aiohttp.ClientError | TimeoutError | OSError):
-        return call.refused(DOWN, f"the RigDesk PC did not answer: {type(refused).__name__}: {refused}", None)
+        return call.refused(DOWN, f"the RigDesk PC did not answer: {failure(refused)}", None)
     raise refused
 
 
@@ -185,7 +185,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
     except DeskRefused as refused:
         raise Refused(REFUSED, f"{refused}; nothing was done") from refused
     except (aiohttp.ClientError, TimeoutError, OSError) as failed:
-        raise Refused(DOWN, f"{given['pc']} did not answer: {type(failed).__name__}: {failed}; nothing was done") from failed
+        raise Refused(DOWN, f"{given['pc']} did not answer: {failure(failed)}; nothing was done") from failed
     return f"{'Assigned' if changed else 'Already assigned'} {given['pc']} to you: desk/join(pc) joins it, with no share link, until the operator unassigns it on the RigDesk page."
 
 
@@ -381,7 +381,6 @@ class PcsView(View):
     pcs: tuple[PcRow, ...]
     id_server: IdServerRow | None = Field(description="Our RustDesk ID server and its health; null with no id_server set.")
     for_fleet: bool = Field(description="desk/* is open to every agent; when false, an agent assigned a PC also needs desk among its mcp_servers.")
-    source: str
 
 
 # The script's own commit on GitHub, so the line runs exactly what was reviewed; a new script is a new commit here and its hash.
@@ -414,7 +413,7 @@ async def get_pcs(request: Request[NoParams]) -> PcsView:
     rows = desks.pcs()
     labels = {grantee: await _grant_row(host, grantee) for grantee in {each for row in rows for each in row["assigned"]}}
     return PcsView(pcs=tuple(PcRow.model_validate(row | {"assigned": tuple(labels[each] for each in row["assigned"])}) for row in rows),
-                   id_server=await asyncio.to_thread(_id_server_row, desks), for_fleet=desks.for_fleet, source="https://github.com/deussalo/rigdesk")
+                   id_server=await asyncio.to_thread(_id_server_row, desks), for_fleet=desks.for_fleet)
 
 
 class SessionParams(Params):
@@ -458,7 +457,7 @@ async def post_viewer(request: Request[ViewerParams]) -> ViewerDone | RefusedOut
     except DeskRefused as refused:
         return request.refused(REFUSED, str(refused))
     except (aiohttp.ClientError, TimeoutError, OSError) as failed:
-        return request.refused(DOWN, f"{body.pc}'s rigdesk-bridge did not answer: {type(failed).__name__}: {failed}")
+        return request.refused(DOWN, f"{body.pc}'s rigdesk-bridge did not answer: {failure(failed)}")
 
 
 class AssignBody(BaseModel):
@@ -512,7 +511,7 @@ async def post_screenshot(request: Request[ScreenshotParams]) -> Screenshot | Re
     except DeskRefused as refused:
         return request.refused(REFUSED, str(refused))
     except (aiohttp.ClientError, TimeoutError, OSError) as failed:
-        return request.refused(DOWN, f"{pc} did not answer: {type(failed).__name__}: {failed}")
+        return request.refused(DOWN, f"{pc} did not answer: {failure(failed)}")
     return Screenshot(mime="image/png", data=base64.b64encode(png).decode("ascii"), taken_ms=now_ms())
 
 

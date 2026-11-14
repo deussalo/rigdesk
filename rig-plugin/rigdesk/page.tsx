@@ -36,7 +36,7 @@ type Listener = {
   readonly checked_ms: number | null
 }
 type IdServer = { readonly host: string; readonly listeners: readonly Listener[]; readonly install: string | null; readonly install_why: string | null }
-type PcsView = { readonly pcs: readonly PcRow[]; readonly id_server: IdServer | null; readonly for_fleet: boolean; readonly source: string }
+type PcsView = { readonly pcs: readonly PcRow[]; readonly id_server: IdServer | null; readonly for_fleet: boolean }
 type PcAdded = { readonly name: string; readonly entry: Readonly<Record<string, unknown>> }
 
 const INK: Readonly<Record<PcRow['state'], Ink>> = { up: 'live', connecting: 'hold', down: 'fault' }
@@ -238,7 +238,7 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
       state={{ word: standing, ink: standing === 'up' ? 'idle' : ink }}
       why={pc.down_since_ms !== null ? agoOf(pc.down_since_ms, now) : pc.holder === null ? undefined : HOLDER[pc.holder]}
       telling={pc.state === 'down' ? pc.why ?? 'no reason given' : held ?? 'no agent on it'} tellingDim={pc.state !== 'down' && held === null}
-      figures={!pc.stock ? { main: 'shared by link', dim: true, under: servers === 0 ? undefined : `${String(servers)} MCP ${servers === 1 ? 'server' : 'servers'}` } : assigned.length === 0 ? { main: 'assigned to no one', dim: true }
+      figures={!pc.stock ? (servers === 0 ? undefined : { main: `${String(servers)} MCP ${servers === 1 ? 'server' : 'servers'}` }) : assigned.length === 0 ? { main: 'assigned to no one', dim: true }
         : { main: assigned.length === 1 ? `assigned to ${assigned[0] ?? ''}` : `${String(assigned.length)} assigned`, under: assigned.length === 1 ? undefined : assigned.join(', ') }}
       verbs={pc.stock && pc.owner !== null ? <Action label="stop" tone="danger" onInvoke={acting(pc, 'stop')} /> : undefined}>
       <BoardProblems problems={pc.state === 'down' && pc.why !== null ? [pc.why] : []} />
@@ -348,7 +348,6 @@ export function RigdeskPage(): ReactNode {
           <Headed title="ID server" summary={server.host}><BoardRows label="ID server">{server.listeners.map(each => <ListenerRow key={each.role} each={each} now={now} />)}</BoardRows></Headed>
         </>
       )}
-      <Quiet>{`RigDesk is AGPL-3.0; its source is at ${view?.source ?? 'https://github.com/deussalo/rigdesk'}`}</Quiet>
     </Board>
   )
 }
