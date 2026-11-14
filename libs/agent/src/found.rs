@@ -637,7 +637,6 @@ mod tests {
         assert_eq!(answer.json_rpc(), Some(json!({"a": 1})));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn server_sent_events_are_split_as_they_arrive() {
         let body = b": keep-alive\r\n\r\nevent: endpoint\r\ndata: /messages/?session_id=1\r\n\r\ndata: {\"a\":\ndata: 1}\n\ndata: half";
@@ -661,6 +660,7 @@ mod tests {
         assert_eq!(endpoint_path("/m HTTP/1.1\r\nx: y", 9), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn loopback_addresses_in_kernel_order() {
         assert!(loopback_hex("0100007F"));

@@ -103,7 +103,6 @@ fn command(words: &[String]) -> Result<Command, String> {
 /// Windows starts only an .exe by its bare name; `npx` and its like are .cmd files, found here through PATH and PATHEXT.
 #[cfg(windows)]
 fn command(words: &[String]) -> Result<Command, String> {
-    use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let named = Path::new(&words[0]);
