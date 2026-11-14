@@ -1,9 +1,11 @@
 //! MCP servers already running on the PC, found while an agent is connected and offered to it through the agent API.
 //!
 //! Every few seconds RigDesk lists the TCP ports the user's processes listen on at loopback and asks each new one MCP's
-//! opening question (`initialize`, streamable HTTP, at `/mcp` then `/`). One that answers as MCP is a server, named by
-//! what it calls itself. Calls to it are forwarded from `/servers/<name>/mcp` to its port, under the same holder and
-//! Block rules as the desk tools. No config file is read and nothing is opened beyond loopback.
+//! opening question (`initialize`): over streamable HTTP at `/mcp` then `/`, then over the older HTTP+SSE transport at
+//! `/sse`. One that answers as MCP is a server, named by what it calls itself. Calls to it are forwarded from
+//! `/servers/<name>/mcp` to its port, under the same holder and Block rules as the desk tools; an SSE server's event
+//! stream stays open while it is offered, as its one session (see [`Relay`]). No config file is read and nothing is
+//! opened beyond loopback.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::events::EventKind;
+use crate::relay::{Relay, Upstream};
 use crate::session::Shared;
 
 /// How often the PC's listeners are listed while an agent is connected.
@@ -26,10 +29,12 @@ const PROBE_WAIT: Duration = Duration::from_secs(2);
 /// A forwarded call waits this long for the server's answer.
 pub const CALL_WAIT: Duration = Duration::from_secs(300);
 const PATHS: [&str; 2] = ["/mcp", "/"];
+/// Where the older HTTP+SSE transport opens its event stream: the MCP SDKs' default.
+const SSE_PATH: &str = "/sse";
 /// A server's answer larger than this is refused rather than held in memory.
 const ANSWER_CAP: usize = 64 << 20;
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Server {
     /// What it calls itself, made safe for Rig's server names: [a-z0-9_.-], at most 48 characters.
     pub name: String,
@@ -38,6 +43,41 @@ pub struct Server {
     /// Its own words for itself: serverInfo's name and version.
     pub says: String,
     pub since_ms: u64,
+    /// The session to a server that speaks only HTTP+SSE; none for streamable HTTP, which is asked per message.
+    #[serde(rename = "transport", serialize_with = "transport_of")]
+    relay: Option<Arc<Relay>>,
+}
+
+fn transport_of<S: serde::Serializer>(relay: &Option<Arc<Relay>>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(if relay.is_some() { "sse" } else { "streamable_http" })
+}
+
+impl Server {
+    /// One client message to the server, answered as streamable HTTP would answer it.
+    pub async fn call(&self, headers: &[(&str, &str)], body: &[u8]) -> Result<Answer, String> {
+        let Some(relay) = &self.relay else {
+            return post(self.port, &self.path, headers, body).await;
+        };
+        let message: Value = serde_json::from_slice(body).map_err(|_| "the body is not one JSON-RPC message".to_string())?;
+        if !message.is_object() {
+            return Err("send one JSON-RPC message, not a batch".into());
+        }
+        Ok(match relay.handle(message).await? {
+            Some(answer) => Answer { status: 200, headers: vec![("content-type".into(), "application/json".into())], body: answer.to_string().into_bytes() },
+            None => Answer { status: 202, headers: Vec::new(), body: Vec::new() },
+        })
+    }
+
+    /// Why it is gone though its port still listens: its event stream closed.
+    fn dropped(&self) -> Option<String> {
+        self.relay.as_ref().filter(|r| r.ended()).map(|_| format!("its event stream on port {} closed", self.port))
+    }
+
+    fn close(&self) {
+        if let Some(relay) = &self.relay {
+            relay.end();
+        }
+    }
 }
 
 /// One TCP listener at loopback, with the process that holds it where the OS says.
@@ -89,6 +129,7 @@ impl Found {
     fn forget_all(&self, why: &str, shared: &Shared) {
         let gone = std::mem::take(&mut *self.servers.lock().unwrap_or_else(|p| p.into_inner()));
         for server in gone.into_values() {
+            server.close();
             shared.events.push(EventKind::Server { name: server.name, found: false, says: server.says, why: Some(why.to_string()) });
         }
     }
@@ -120,13 +161,17 @@ impl Found {
 
     async fn scan(&self, listening: &[Listener], shared: &Shared) {
         let ports: HashSet<u16> = listening.iter().map(|l| l.port).collect();
-        let gone: Vec<Server> = {
+        let gone: Vec<(Server, String)> = {
             let mut servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
-            let names: Vec<String> = servers.values().filter(|s| !ports.contains(&s.port)).map(|s| s.name.clone()).collect();
-            names.into_iter().filter_map(|n| servers.remove(&n)).collect()
+            let why: Vec<(String, String)> = servers
+                .values()
+                .filter_map(|s| if ports.contains(&s.port) { s.dropped() } else { Some(format!("nothing listens on port {} now", s.port)) }.map(|w| (s.name.clone(), w)))
+                .collect();
+            why.into_iter().filter_map(|(n, w)| servers.remove(&n).map(|s| (s, w))).collect()
         };
-        for server in gone {
-            shared.events.push(EventKind::Server { name: server.name, found: false, says: server.says, why: Some(format!("nothing listens on port {} now", server.port)) });
+        for (server, why) in gone {
+            server.close();
+            shared.events.push(EventKind::Server { name: server.name, found: false, says: server.says, why: Some(why) });
         }
         let known: HashSet<u16> = self.servers().iter().map(|s| s.port).collect();
         let now = Instant::now();
@@ -136,8 +181,8 @@ impl Found {
                 continue;
             }
             match probe(listener.port).await {
-                Some((path, info)) => {
-                    let server = self.named(listener.port, path, &info);
+                Some((path, info, relay)) => {
+                    let server = self.named(listener.port, path, &info, relay);
                     log::info!("mcp scan: {} on port {} ({})", server.name, server.port, server.says);
                     shared.events.push(EventKind::Server { name: server.name.clone(), found: true, says: server.says.clone(), why: None });
                     self.servers.lock().unwrap_or_else(|p| p.into_inner()).insert(server.name.clone(), server);
@@ -149,7 +194,7 @@ impl Found {
         }
     }
 
-    fn named(&self, port: u16, path: &str, info: &Value) -> Server {
+    fn named(&self, port: u16, path: &str, info: &Value, relay: Option<Arc<Relay>>) -> Server {
         let said = info.get("name").and_then(Value::as_str).unwrap_or("");
         let version = info.get("version").and_then(Value::as_str).unwrap_or("");
         let mut name = server_name(said);
@@ -160,7 +205,7 @@ impl Found {
         if servers.contains_key(&name) {
             name = format!("{name}-{port}");
         }
-        Server { name, port, path: path.to_string(), says: format!("{said} {version}").trim().to_string(), since_ms: crate::now_ms() }
+        Server { name, port, path: path.to_string(), says: format!("{said} {version}").trim().to_string(), since_ms: crate::now_ms(), relay }
     }
 }
 
@@ -177,10 +222,27 @@ pub fn server_name(said: &str) -> String {
     name.trim_matches(|c| c == '-' || c == '.').chars().take(48).collect()
 }
 
-/// Asks a port MCP's opening question; answers the path that answered and the server's serverInfo.
-async fn probe(port: u16) -> Option<(&'static str, Value)> {
-    let ask = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-        "protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "rigdesk-scan", "version": env!("CARGO_PKG_VERSION")}}});
+fn opening() -> Value {
+    json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+        "protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "rigdesk-scan", "version": env!("CARGO_PKG_VERSION")}}})
+}
+
+fn server_info(reply: &Value) -> Option<&Value> {
+    reply.pointer("/result/serverInfo").filter(|_| reply.pointer("/result/protocolVersion").is_some())
+}
+
+/// Asks a port MCP's opening question; answers the path that answered, the server's serverInfo, and for an HTTP+SSE
+/// server the session that stays open.
+async fn probe(port: u16) -> Option<(&'static str, Value, Option<Arc<Relay>>)> {
+    if let Some((path, info)) = probe_http(port).await {
+        return Some((path, info, None));
+    }
+    let (relay, info) = probe_sse(port).await?;
+    Some((SSE_PATH, info, Some(relay)))
+}
+
+async fn probe_http(port: u16) -> Option<(&'static str, Value)> {
+    let ask = opening();
     for path in PATHS {
         let Ok(Ok(answer)) = tokio::time::timeout(PROBE_WAIT, post(port, path, &[], ask.to_string().as_bytes())).await else {
             continue;
@@ -189,7 +251,7 @@ async fn probe(port: u16) -> Option<(&'static str, Value)> {
             continue;
         }
         let Some(reply) = answer.json_rpc() else { continue };
-        if let Some(info) = reply.pointer("/result/serverInfo").filter(|_| reply.pointer("/result/protocolVersion").is_some()) {
+        if let Some(info) = server_info(&reply) {
             if let Some(session) = answer.header("mcp-session-id") {
                 let _ = tokio::time::timeout(PROBE_WAIT, request(port, "DELETE", path, &[("mcp-session-id", session)], b"")).await;
             }
@@ -197,6 +259,199 @@ async fn probe(port: u16) -> Option<(&'static str, Value)> {
         }
     }
     None
+}
+
+/// Opens an HTTP+SSE server's event stream and initializes it; on success the stream is read for as long as the relay
+/// lives, and the relay's `initialize` answer is kept for every client.
+async fn probe_sse(port: u16) -> Option<(Arc<Relay>, Value)> {
+    let (mut events, endpoint) = tokio::time::timeout(PROBE_WAIT, EventStream::open(port)).await.ok()?.ok()?;
+    let relay = Relay::new(Upstream::Posted { port, endpoint });
+    let reading = relay.clone();
+    let reader = tokio::spawn(async move {
+        while let Ok(Some((name, data))) = events.next().await {
+            if name == "message" {
+                if let Ok(message) = serde_json::from_str::<Value>(&data) {
+                    reading.heard(message).await;
+                }
+            }
+        }
+        reading.end();
+    });
+    relay.set_reader(reader.abort_handle());
+    let opened = tokio::time::timeout(PROBE_WAIT, relay.handle(opening())).await;
+    match opened {
+        Ok(Ok(Some(reply))) if server_info(&reply).is_some() => {
+            let info = server_info(&reply).cloned()?;
+            Some((relay, info))
+        }
+        _ => {
+            relay.end();
+            None
+        }
+    }
+}
+
+/// A server-sent event stream from a loopback port, its body read as it comes (chunked or not).
+struct EventStream {
+    stream: TcpStream,
+    /// Bytes read but not yet decoded from the transfer encoding.
+    raw: Vec<u8>,
+    /// The body so far, not yet split into events.
+    body: Vec<u8>,
+    chunked: bool,
+    /// Bytes left in the current chunk, then whether its closing CRLF is still to come.
+    chunk_left: usize,
+    chunk_trail: bool,
+    ended: bool,
+}
+
+impl EventStream {
+    /// GET /sse; answers the stream and the message endpoint its first event names.
+    async fn open(port: u16) -> Result<(EventStream, String), String> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| e.to_string())?;
+        let head = format!("GET {SSE_PATH} HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\naccept: text/event-stream\r\ncache-control: no-cache\r\n\r\n");
+        stream.write_all(head.as_bytes()).await.map_err(|e| e.to_string())?;
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let split = loop {
+            if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at;
+            }
+            if raw.len() > 64 << 10 {
+                return Err("headers too long".into());
+            }
+            let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("closed before its headers".into());
+            }
+            raw.extend_from_slice(&chunk[..n]);
+        };
+        let (status, headers) = parse_head(&raw[..split])?;
+        let event_stream = headers.iter().any(|(n, v)| n == "content-type" && v.starts_with("text/event-stream"));
+        if status != 200 || !event_stream {
+            return Err(format!("{SSE_PATH} answered {status}, not an event stream"));
+        }
+        let chunked = headers.iter().any(|(n, v)| n == "transfer-encoding" && v.to_ascii_lowercase().contains("chunked"));
+        let mut events = EventStream { stream, raw: raw.split_off(split + 4), body: Vec::new(), chunked, chunk_left: 0, chunk_trail: false, ended: false };
+        let (name, data) = events.next().await?.ok_or("the stream ended before it named an endpoint")?;
+        if name != "endpoint" {
+            return Err(format!("the stream's first event is {name:?}, not endpoint"));
+        }
+        let endpoint = endpoint_path(&data, port).ok_or_else(|| format!("the endpoint {data:?} is not on this port"))?;
+        Ok((events, endpoint))
+    }
+
+    /// The next event's name ("message" when unnamed) and data; None once the stream ends.
+    async fn next(&mut self) -> Result<Option<(String, String)>, String> {
+        loop {
+            if let Some((event, rest)) = split_event(&self.body) {
+                self.body.drain(..rest);
+                if let Some(event) = event {
+                    return Ok(Some(event));
+                }
+                continue;
+            }
+            if self.ended {
+                return Ok(None);
+            }
+            if self.body.len() > ANSWER_CAP {
+                return Err(format!("an event is over {} MiB", ANSWER_CAP >> 20));
+            }
+            let mut chunk = [0u8; 16 << 10];
+            let n = self.stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                self.ended = true;
+            }
+            self.raw.extend_from_slice(&chunk[..n]);
+            self.decode()?;
+        }
+    }
+
+    /// Moves what has arrived from `raw` into `body`, undoing chunked transfer encoding as far as it can.
+    fn decode(&mut self) -> Result<(), String> {
+        if !self.chunked {
+            self.body.append(&mut self.raw);
+            return Ok(());
+        }
+        loop {
+            if self.chunk_left > 0 {
+                let n = self.chunk_left.min(self.raw.len());
+                if n == 0 {
+                    return Ok(());
+                }
+                self.body.extend(self.raw.drain(..n));
+                self.chunk_left -= n;
+                self.chunk_trail = self.chunk_left == 0;
+                continue;
+            }
+            if self.chunk_trail {
+                if self.raw.len() < 2 {
+                    return Ok(());
+                }
+                self.raw.drain(..2);
+                self.chunk_trail = false;
+                continue;
+            }
+            let Some(end) = self.raw.windows(2).position(|w| w == b"\r\n") else { return Ok(()) };
+            let line = std::str::from_utf8(&self.raw[..end]).map_err(|_| "a chunk size is not text")?;
+            let size = usize::from_str_radix(line.split(';').next().unwrap_or("").trim(), 16).map_err(|_| format!("bad chunk size {line:?}"))?;
+            self.raw.drain(..end + 2);
+            if size == 0 {
+                self.ended = true;
+                return Ok(());
+            }
+            self.chunk_left = size;
+        }
+    }
+}
+
+/// The first whole event in `body`, and how many bytes it took. A block with no data (a comment, a keep-alive) is None.
+fn split_event(body: &[u8]) -> Option<(Option<(String, String)>, usize)> {
+    let mut start = 0;
+    let mut lines = Vec::new();
+    while let Some(nl) = body[start..].iter().position(|&b| b == b'\n') {
+        let line = &body[start..start + nl];
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        start += nl + 1;
+        if line.is_empty() {
+            let (mut name, mut data, mut has_data) = (String::from("message"), String::new(), false);
+            for line in lines {
+                let text = String::from_utf8_lossy(line);
+                let (field, value) = text.split_once(':').map_or((text.as_ref(), ""), |(f, v)| (f, v.strip_prefix(' ').unwrap_or(v)));
+                match field {
+                    "event" => name = value.to_string(),
+                    "data" => {
+                        if has_data {
+                            data.push('\n');
+                        }
+                        data.push_str(value);
+                        has_data = true;
+                    }
+                    _ => {}
+                }
+            }
+            return Some((has_data.then_some((name, data)), start));
+        }
+        lines.push(line);
+    }
+    None
+}
+
+/// The message endpoint an event stream named, as a path on this port: a path, or a loopback URL on the same port.
+fn endpoint_path(data: &str, port: u16) -> Option<String> {
+    let data = data.trim();
+    let path = if data.starts_with('/') {
+        data.to_string()
+    } else {
+        let rest = data.strip_prefix("http://")?;
+        let (authority, path) = rest.split_at(rest.find('/')?);
+        let local = [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")];
+        if !local.iter().any(|l| l == authority) {
+            return None;
+        }
+        path.to_string()
+    };
+    (!path.chars().any(|c| c.is_whitespace() || c.is_control())).then_some(path)
 }
 
 /// What a local server answered, read whole.
@@ -257,15 +512,19 @@ pub async fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str
 
 fn parse_answer(raw: &[u8]) -> Result<Answer, String> {
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("the answer has no end of headers")?;
-    let head = std::str::from_utf8(&raw[..split]).map_err(|_| "the answer's headers are not text")?;
-    let mut lines = head.split("\r\n");
-    let status = lines.next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).ok_or("the answer has no status")?;
-    let headers: Vec<(String, String)> =
-        lines.filter_map(|l| l.split_once(':')).map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string())).collect();
+    let (status, headers) = parse_head(&raw[..split])?;
     let rest = &raw[split + 4..];
     let chunked = headers.iter().any(|(n, v)| n == "transfer-encoding" && v.to_ascii_lowercase().contains("chunked"));
     let body = if chunked { dechunk(rest)? } else { rest.to_vec() };
     Ok(Answer { status, headers, body })
+}
+
+fn parse_head(head: &[u8]) -> Result<(u16, Vec<(String, String)>), String> {
+    let head = std::str::from_utf8(head).map_err(|_| "the answer's headers are not text")?;
+    let mut lines = head.split("\r\n");
+    let status = lines.next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).ok_or("the answer has no status")?;
+    let headers = lines.filter_map(|l| l.split_once(':')).map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string())).collect();
+    Ok((status, headers))
 }
 
 fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, String> {
@@ -379,6 +638,29 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn server_sent_events_are_split_as_they_arrive() {
+        let body = b": keep-alive\r\n\r\nevent: endpoint\r\ndata: /messages/?session_id=1\r\n\r\ndata: {\"a\":\ndata: 1}\n\ndata: half";
+        let (comment, used) = split_event(body).unwrap();
+        assert_eq!(comment, None);
+        let (endpoint, more) = split_event(&body[used..]).unwrap();
+        assert_eq!(endpoint, Some(("endpoint".into(), "/messages/?session_id=1".into())));
+        let (message, rest) = split_event(&body[used + more..]).unwrap();
+        assert_eq!(message, Some(("message".into(), "{\"a\":\n1}".into())));
+        assert_eq!(split_event(&body[used + more + rest..]), None);
+    }
+
+    #[test]
+    fn an_endpoint_must_be_on_the_same_loopback_port() {
+        assert_eq!(endpoint_path("/messages/?session_id=1", 9), Some("/messages/?session_id=1".into()));
+        assert_eq!(endpoint_path("http://127.0.0.1:9/m?s=1", 9), Some("/m?s=1".into()));
+        assert_eq!(endpoint_path("http://localhost:9/m", 9), Some("/m".into()));
+        assert_eq!(endpoint_path("http://127.0.0.1:10/m", 9), None);
+        assert_eq!(endpoint_path("http://evil.example:9/m", 9), None);
+        assert_eq!(endpoint_path("https://127.0.0.1:9/m", 9), None);
+        assert_eq!(endpoint_path("/m HTTP/1.1\r\nx: y", 9), None);
+    }
+
     #[test]
     fn loopback_addresses_in_kernel_order() {
         assert!(loopback_hex("0100007F"));
