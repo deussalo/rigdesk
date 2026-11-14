@@ -41,12 +41,15 @@ const LINE: usize = 1000;
 /// The report's base64 comes in numbered lines of this many characters, narrower than the terminal: Windows' console
 /// redraws wrapped lines as it scrolls, repeating parts of them, so each line is taken once, by its number and length.
 const REPORT_LINE: usize = 152;
-/// Stock RustDesk 1.4.5 on Windows drops terminal output when its channel is full, and stops sending a long report while
-/// the shell that printed it lives on (seen on deus: line 18 of 252 lost; a runner waiting after its report stalled at
-/// about 20 KB). So the PowerShell runner exits after its report, and lost lines are fetched again from the base64 it
-/// keeps, in another terminal each round, for this many rounds of at most `REPAIR_ASK` lines.
-const REPAIR_ROUNDS: usize = 5;
-const REPAIR_ASK: usize = 60;
+/// Stock RustDesk 1.4.5 on Windows drops terminal output when its channel is full, and stops sending a long report
+/// partway, about 20 KB in, whether or not the runner lives on (seen on deus: line 18 of 252 lost; a report stalled at
+/// tail line 14 of a 150 KB output with the runner gone). So the PowerShell runner exits after its report, and lines lost
+/// or never sent are fetched again from the base64 it keeps, in another terminal each round, for this many rounds of
+/// at most `REPAIR_ASK` lines, each round well under 20 KB.
+const REPAIR_ROUNDS: usize = 8;
+const REPAIR_ASK: usize = 80;
+/// A report that shows nothing new for this long has stalled: what came is read, and the rest fetched again.
+const REPORT_STALL: Duration = Duration::from_secs(10);
 /// How long the PowerShell runner keeps the report's base64 for lost lines to be fetched again.
 const KEPT_SECS: u64 = 300;
 
@@ -254,19 +257,31 @@ impl Unread {
 }
 
 /// The runner's report in what the terminal showed so far, once it is all there, with the lines printed again after it.
+#[cfg(test)]
 fn report(shown: &[u8], nonce: &str, limit: Duration) -> Option<Result<(Printed, Ended), Unread>> {
+    report_with(shown, b"", nonce, limit, false)
+}
+
+/// The runner's report in what its terminal showed, with the lines fetched again since in other terminals. `None` with
+/// no report begun, or one not all there yet; a report the terminal stopped showing (`stalled`) is read as far as it came.
+fn report_with(shown: &[u8], refetched: &[u8], nonce: &str, limit: Duration, stalled: bool) -> Option<Result<(Printed, Ended), Unread>> {
     let shown = bare(shown);
     let open = format!("#RIG{nonce}.");
     let end = format!("#RIG{nonce}.end#");
     let rest = &shown[shown.find(&open)? + open.len()..];
-    let at = rest.find(&end)?;
-    Some(parse_report(&rest[..at], &rest[at..], nonce, limit))
+    let (body, after) = match rest.find(&end) {
+        Some(at) => (&rest[..at], &rest[at..]),
+        None if stalled => (rest, ""),
+        None => return None,
+    };
+    Some(parse_report(body, &format!("{after}{}", bare(refetched)), nonce, limit))
 }
 
 fn parse_report(body: &str, again: &str, nonce: &str, limit: Duration) -> Result<(Printed, Ended), Unread> {
     let garbled = || Unread::Failed(format!("the PC's report came back garbled: {body:.200}"));
     let (fields, data) = body.split_once('#').ok_or_else(garbled)?;
-    let (head, tail) = data.split_once(&format!("#RIG{nonce}.tail#")).ok_or_else(garbled)?;
+    // A report cut short before its tail shows none of it: every tail line is fetched again.
+    let (head, tail) = data.split_once(&format!("#RIG{nonce}.tail#")).unwrap_or((data, ""));
     let mut fields = fields.split('.');
     let (status, timed_out, total) = (fields.next(), fields.next(), fields.next());
     let total: usize = total.and_then(|s| s.parse().ok()).ok_or_else(garbled)?;
@@ -385,19 +400,25 @@ pub async fn run(link: &Link, asked: &Asked) -> Result<Called, String> {
     let nonce = format!("{:016x}", hbb_common::rand::random::<u64>());
     let (command, limit) = (asked.command.clone(), asked.timeout);
     let open = format!("#RIG{nonce}.");
-    let (shell, mut shown) =
+    let (shell, shown) =
         session(link, &nonce, &open, limit + REPORT_GRACE, &|shell| runner(shell, &command, limit, &nonce)).await?;
+    if shown.stalled {
+        log::info!("terminal to {} stopped showing the report after {} bytes", link.label(), shown.bytes.len());
+    }
+    let mut refetched: Vec<u8> = Vec::new();
     for round in 0..=REPAIR_ROUNDS {
-        match report(&shown, &nonce, limit) {
-            None => return Err(format!("the PC's shell ended before the command reported back; the terminal last showed:\n{}", last_shown(&shown))),
+        match report_with(&shown.bytes, &refetched, &nonce, limit, shown.stalled) {
+            None => {
+                return Err(format!("the PC's shell ended before the command reported back; the terminal last showed:\n{}", last_shown(&shown.bytes)))
+            }
             Some(Ok((printed, ended))) => return shell::answer(&printed, ended),
             Some(Err(Unread::Missing(lines))) if shell == Shell::PowerShell && round < REPAIR_ROUNDS => {
                 let ask = Unread::ask(&lines);
                 log::info!("terminal to {} lost {} report lines; fetching them again ({})", link.label(), lines.len(), round + 1);
                 match session(link, &nonce, "~", REPORT_GRACE, &|_| refetch_runner(&nonce, &ask)).await {
                     Ok((_, again)) => {
-                        shown.push(b'\n');
-                        shown.extend_from_slice(&again);
+                        refetched.push(b'\n');
+                        refetched.extend_from_slice(&again.bytes);
                     }
                     Err(why) => return Err(format!("{}; fetching them again failed: {why}", Unread::Missing(lines).said())),
                 }
@@ -408,10 +429,16 @@ pub async fn run(link: &Link, asked: &Asked) -> Result<Called, String> {
     unreachable!("the last round answers")
 }
 
+/// What a terminal showed, up to the end marker, or up to where it stopped showing a report it had begun.
+struct Shown {
+    bytes: Vec<u8>,
+    stalled: bool,
+}
+
 /// One terminal on the PC that runs a script: answers the shell and all the terminal showed, up to the end marker. Waits
-/// `wait` after typing, and `REPORT_GRACE` past the last output once `begun` shows. A connection the PC drops before
-/// anything was typed is tried again.
-async fn session(link: &Link, nonce: &str, begun: &str, wait: Duration, script: &dyn Fn(Shell) -> String) -> Result<(Shell, Vec<u8>), String> {
+/// `wait` after typing; once `begun` shows, `REPORT_GRACE` past the last output, or `REPORT_STALL` with none. A
+/// connection the PC drops before anything was typed is tried again.
+async fn session(link: &Link, nonce: &str, begun: &str, wait: Duration, script: &dyn Fn(Shell) -> String) -> Result<(Shell, Shown), String> {
     let mut waits = CLOSED_RETRIES.iter();
     loop {
         let mut typed = false;
@@ -435,7 +462,7 @@ async fn attempt(
     wait: Duration,
     script: &dyn Fn(Shell) -> String,
     typed: &mut bool,
-) -> Result<(Shell, Vec<u8>), String> {
+) -> Result<(Shell, Shown), String> {
     let mut stream = link.dial().await.map_err(|e| format!("cannot reach the PC at {}: {e}", link.label()))?;
     let shell = Shell::of(&log_in(link, &mut stream).await?);
     send(&mut stream, &terminal(terminal_action::Union::Open(OpenTerminal { terminal_id: TERMINAL_ID, rows: ROWS, cols: COLS, ..Default::default() })))
@@ -468,7 +495,7 @@ async fn log_in(link: &Link, stream: &mut FramedStream) -> Result<String, String
 }
 
 /// Waits for the prompt, types `lines` and reads until the end marker shows or the shell ends.
-async fn converse(stream: &mut FramedStream, lines: &[String], nonce: &str, begun: &str, wait: Duration, typed: &mut bool) -> Result<Vec<u8>, String> {
+async fn converse(stream: &mut FramedStream, lines: &[String], nonce: &str, begun: &str, wait: Duration, typed: &mut bool) -> Result<Shown, String> {
     let mut shown: Vec<u8> = Vec::new();
     let mut opened = false;
     let mut last_data: Option<Instant> = None;
@@ -478,11 +505,15 @@ async fn converse(stream: &mut FramedStream, lines: &[String], nonce: &str, begu
     let end = format!("#RIG{nonce}.end#");
     loop {
         let until = match (report_by, last_data) {
+            (Some(by), Some(at)) if reporting => by.min(at + REPORT_STALL),
             (Some(by), _) => by,
             (None, Some(at)) if opened => (at + PROMPT_QUIET).min(prompt_by),
             (None, _) => prompt_by,
         };
         let Some(msg) = next(stream, until).await? else {
+            if reporting {
+                return Ok(Shown { bytes: shown, stalled: true });
+            }
             if report_by.is_some() {
                 return Err(format!(
                     "the PC did not report back within {} s; the terminal last showed:\n{}",
@@ -525,12 +556,12 @@ async fn converse(stream: &mut FramedStream, lines: &[String], nonce: &str, begu
                     report_by = Some(report_by.unwrap_or(until).max(Instant::now() + REPORT_GRACE));
                 }
                 if seen.contains(&end) {
-                    return Ok(shown);
+                    return Ok(Shown { bytes: shown, stalled: false });
                 }
             }
             Some(terminal_response::Union::Closed(c)) => {
                 if bare(&shown).contains(&end) {
-                    return Ok(shown);
+                    return Ok(Shown { bytes: shown, stalled: false });
                 }
                 return Err(format!(
                     "the PC's shell ended (exit {}) before reporting back; the terminal last showed:\n{}",
@@ -619,6 +650,31 @@ mod tests {
         let again = format!("{lost}h3 t0\r\n~h3~{}\r\n~t0~{}#RIGn.end#\r\n", line(&head, 3), line(&tail, 0));
         let (printed, _) = report(again.as_bytes(), "n", Duration::from_secs(9)).unwrap().unwrap();
         assert_eq!(printed, Printed { head: start, dropped: 7, tail: end });
+    }
+
+    #[test]
+    fn a_report_the_terminal_stopped_showing_is_read_as_far_as_it_came_and_the_rest_fetched_again() {
+        let (start, end) = (vec![b's'; HEAD_PART], vec![b'e'; TAIL_PART]);
+        let (head, tail) = (numbered(&start), numbered(&end));
+        let total = HEAD_PART + TAIL_PART + 7;
+        let kept: Vec<&str> = tail.split_inclusive('\n').collect();
+        // Seen on deus: the terminal stopped at tail line 14, cut partway, and never showed the end marker.
+        let shown = format!("#RIGs.0.0.{total}#{head}#RIGs.tail#{}{}", kept[..14].concat(), &kept[14][..30]);
+        assert!(report_with(shown.as_bytes(), b"", "s", Duration::from_secs(9), false).is_none());
+        let unread = report_with(shown.as_bytes(), b"", "s", Duration::from_secs(9), true).unwrap().unwrap_err();
+        let Unread::Missing(missing) = unread else { panic!("{unread:?}") };
+        assert_eq!(missing, (14..kept.len()).map(|n| (Part::Tail, n)).collect::<Vec<_>>());
+        let again: String = missing
+            .chunks(REPAIR_ASK)
+            .map(|round| {
+                let lines: String = round.iter().map(|&(_, n)| format!("~t{n}~{}\r\n", kept[n].split('~').nth(2).unwrap().trim_end())).collect();
+                format!("{}\r\n{lines}#RIGs.end#\r\n", Unread::ask(round))
+            })
+            .collect();
+        let (printed, _) = report_with(shown.as_bytes(), again.as_bytes(), "s", Duration::from_secs(9), true).unwrap().unwrap();
+        assert_eq!(printed, Printed { head: start, dropped: 7, tail: end });
+        // Cut before its header ends, a report says it is garbled.
+        assert!(matches!(report_with(b"#RIGs.0.0.12", b"", "s", Duration::from_secs(9), true), Some(Err(Unread::Failed(_)))));
     }
 
     #[test]
