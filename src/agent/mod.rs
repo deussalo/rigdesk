@@ -82,7 +82,9 @@ pub fn start() {
     };
     let host = &*HOST;
     let desk: Arc<dyn rigdesk_agent::Desk> = Arc::new(desk::PcDesk::new());
-    let api = rigdesk_agent::Api::new(host.shared.clone(), desk, host.journal.clone(), &bearer);
+    // The MCP servers already running on the PC come with the share; RustDesk's own ports and this API are never asked.
+    let found = rigdesk_agent::Found::new([API_PORT].into_iter().chain(21114..=21119));
+    let api = rigdesk_agent::Api::new(host.shared.clone(), desk, host.journal.clone(), &bearer, Some(found));
     tokio::spawn(async move {
         match api.serve(API_PORT).await {
             Ok(port) => log::info!("agent API listening on 127.0.0.1:{port}"),

@@ -22,6 +22,8 @@ pub enum EventKind {
     Action { agent_title: String, tool: String, summary: String, ok: bool, x: Option<i32>, y: Option<i32> },
     /// The PC behind a bridge became reachable (`down` null) or not, and why.
     Reach { down: Option<String> },
+    /// An MCP server on the PC was found (`found`) or went (`why`), named as the agent API serves it.
+    Server { name: String, found: bool, says: String, why: Option<String> },
 }
 
 #[derive(Clone, Debug, Serialize)]
