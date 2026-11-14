@@ -176,11 +176,14 @@ impl Found {
         let known: HashSet<u16> = self.servers().iter().map(|s| s.port).collect();
         let now = Instant::now();
         self.not_mcp.lock().unwrap_or_else(|p| p.into_inner()).retain(|l, at| ports.contains(&l.port) && now.duration_since(*at) < NOT_MCP_FOR);
-        for listener in listening {
-            if self.skip.contains(&listener.port) || known.contains(&listener.port) || self.not_mcp.lock().unwrap_or_else(|p| p.into_inner()).contains_key(listener) {
-                continue;
-            }
-            match probe(listener.port).await {
+        let asked: Vec<Listener> = {
+            let not_mcp = self.not_mcp.lock().unwrap_or_else(|p| p.into_inner());
+            listening.iter().filter(|l| !self.skip.contains(&l.port) && !known.contains(&l.port) && !not_mcp.contains_key(l)).copied().collect()
+        };
+        // Together, so a port that never answers costs one wait, not one per port.
+        let heard = futures_util::future::join_all(asked.iter().map(|l| probe(l.port))).await;
+        for (listener, probed) in asked.iter().zip(heard) {
+            match probed {
                 Some((path, info, relay)) => {
                     let server = self.named(listener.port, path, &info, relay);
                     log::info!("mcp scan: {} on port {} ({})", server.name, server.port, server.says);
@@ -234,19 +237,33 @@ fn server_info(reply: &Value) -> Option<&Value> {
 /// Asks a port MCP's opening question; answers the path that answered, the server's serverInfo, and for an HTTP+SSE
 /// server the session that stays open.
 async fn probe(port: u16) -> Option<(&'static str, Value, Option<Arc<Relay>>)> {
-    if let Some((path, info)) = probe_http(port).await {
-        return Some((path, info, None));
+    match probe_http(port).await {
+        Heard::Mcp(path, info) => Some((path, info, None)),
+        Heard::Http => {
+            let (relay, info) = probe_sse(port).await?;
+            Some((SSE_PATH, info, Some(relay)))
+        }
+        Heard::Silent => None,
     }
-    let (relay, info) = probe_sse(port).await?;
-    Some((SSE_PATH, info, Some(relay)))
 }
 
-async fn probe_http(port: u16) -> Option<(&'static str, Value)> {
+/// What a port said to MCP's opening question over streamable HTTP.
+enum Heard {
+    Mcp(&'static str, Value),
+    /// It answered as HTTP, not as MCP: it may still speak the older HTTP+SSE transport.
+    Http,
+    /// No HTTP answer at all.
+    Silent,
+}
+
+async fn probe_http(port: u16) -> Heard {
     let ask = opening();
+    let mut spoke = false;
     for path in PATHS {
         let Ok(Ok(answer)) = tokio::time::timeout(PROBE_WAIT, post(port, path, &[], ask.to_string().as_bytes())).await else {
             continue;
         };
+        spoke = true;
         if answer.status != 200 {
             continue;
         }
@@ -255,10 +272,14 @@ async fn probe_http(port: u16) -> Option<(&'static str, Value)> {
             if let Some(session) = answer.header("mcp-session-id") {
                 let _ = tokio::time::timeout(PROBE_WAIT, request(port, "DELETE", path, &[("mcp-session-id", session)], b"")).await;
             }
-            return Some((path, info.clone()));
+            return Heard::Mcp(path, info.clone());
         }
     }
-    None
+    if spoke {
+        Heard::Http
+    } else {
+        Heard::Silent
+    }
 }
 
 /// Opens an HTTP+SSE server's event stream and initializes it; on success the stream is read for as long as the relay
