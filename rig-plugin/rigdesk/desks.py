@@ -386,16 +386,21 @@ class Desks:
             self._listeners = () if settings.id_server is None else tuple(Listener(role, host, port) for role, host, port in settings.id_server.listeners())
             self._probe_now.set()
         self._id_server = settings.id_server
+        carried: dict[str, dict[str, PcServer]] = {}
         for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
             link = self._pcs.pop(name)
             for task in (link.task, link.remote):
                 if task is not None:
                     task.cancel()
             if link.servers:
+                carried[name] = link.servers
                 self._revision += 1
         for name, spec in settings.pcs.items():
             if name not in self._pcs:
-                link = self._pcs[name] = PcLink(name, spec)
+                # A PC whose entry changed keeps the servers its holder has open, so the next sync tells the holder what the change closed.
+                link = self._pcs[name] = PcLink(name, spec, servers=carried.get(name, {}))
+                if name in carried:
+                    self._resync(link)
                 if spec.stock is not None:
                     link.remote = TASKS.spawn(f"rigdesk-bridge-{name}", self._remote(link, spec.stock))
                 link.task = TASKS.spawn(f"rigdesk-{name}", self._held(link))
@@ -797,15 +802,18 @@ class Desks:
 
     async def _sync_servers(self, link: PcLink, gone: tuple[str, str] | None) -> None:
         """Makes the holder's view of the PC's MCP servers current: each new one opened under its session, each gone one dropped, and the holder
-        told of both. With no holder, Rig's switch off, or a new holder, the servers opened before are dropped unsaid."""
+        told of both. Rig's switch turned off closes the holder's servers and tells it; with no holder, or a new one, those opened before go unsaid."""
         async with link.syncing:
             held = self._sessions.get(link.name)
             stale = [name for name, server in link.servers.items() if held is None or not link.spec.mcp or server.session != held.session]
-            for name in stale:
-                link.servers.pop(name)
+            closed = [server for server in (link.servers.pop(name) for name in stale) if held is not None and server.session == held.session]
             if held is None or not link.spec.mcp:
                 link.mcp_on, link.mcp_why = None, None if link.spec.mcp else "off in Rig's settings for this PC"
                 self._revision += bool(stale)
+                if held is not None and closed:
+                    names = ", ".join(f"{server.key}/*" for server in closed)
+                    await self._tell(held, f"RigDesk {link.name}: the operator turned MCP off for {link.name} in Rig, so its MCP servers closed for you: "
+                                           f"{names} are no longer there.", f"servers-off:{now_ms()}", "queue")
                 return
             dropped: list[tuple[PcServer, str]] = []
             if gone is not None and (server := link.servers.pop(gone[0], None)) is not None:

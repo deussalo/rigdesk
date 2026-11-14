@@ -157,8 +157,8 @@ Known limits against a RigDesk PC:
   opens each under the holder's session (initialize, then tools/list) and tells the holder each one's tools by exact
   name, and when one goes. They are `hidden`: in no seat's session notice, loadable by name, refused to any agent but
   the holder. A call goes through the PC under its holder and Block rules, as a desk call does, and is journaled there;
-  a server that forgot its MCP session is opened again once. A PC's `mcp: false` in settings opens none; the person at
-  the PC has a switch of their own. A stock PC, through its bridge, offers none.
+  a server that forgot its MCP session is opened again once. A PC's `mcp: false` in settings opens none, and turned off
+  closes those open and tells the holder; the person at the PC has a switch of their own. A stock PC, through its bridge, offers none.
 * `desk/leave` — ends the session.
 
 What the human does reaches the owning agent as Rig messages (steered into its turn): taking input
