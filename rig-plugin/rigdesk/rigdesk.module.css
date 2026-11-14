@@ -1,1 +1,2 @@
-.shot { display: block; max-inline-size: 100%; border: 1px solid var(--border); }
+.shot { display: block; max-inline-size: min(100%, var(--measure)); border: 1px solid var(--border); }
+.dim { font-size: var(--font-xs); color: var(--text-dim); }
