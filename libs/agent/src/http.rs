@@ -226,7 +226,7 @@ impl Api {
             }
         };
         let headers: Vec<(&str, &str)> = passed.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
-        let answered = tokio::time::timeout(crate::found::CALL_WAIT, crate::found::post(server.port, &server.path, &headers, &body)).await;
+        let answered = tokio::time::timeout(crate::found::CALL_WAIT, server.call(&headers, &body)).await;
         let answer = match answered {
             Ok(Ok(answer)) => answer,
             Ok(Err(why)) => {

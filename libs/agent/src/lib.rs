@@ -8,6 +8,7 @@ pub mod found;
 pub mod http;
 pub mod journal;
 pub mod mcp;
+pub mod relay;
 pub mod session;
 pub mod shell;
 pub mod wrap;

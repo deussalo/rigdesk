@@ -92,14 +92,20 @@ for line in sys.stdin:
         continue
     print(json.dumps({"jsonrpc": "2.0", "id": i, "result": r}), flush=True)
 '@
-  $wrapper = Start-Process $Exe -ArgumentList "--mcp", "--", "python", "`"$echo`"" -PassThru
+  $wrapLog = Join-Path $env:RUNNER_TEMP "wrap.log"
+  $wrapper = Start-Process $Exe -ArgumentList "--mcp", "--", "python", "`"$echo`"" -PassThru -RedirectStandardError $wrapLog
   $servers = $null
   foreach ($i in 1..30) {
     $servers = Invoke-RestMethod -Uri "$base/servers" -Headers $auth
     if (@($servers.servers | Where-Object { $_.name -eq "smoke-echo" }).Count -eq 1) { break }
     Start-Sleep 1
   }
-  if (@($servers.servers | Where-Object { $_.name -eq "smoke-echo" }).Count -ne 1) { Fail "the server behind --mcp was not found within 30 s: $($servers | ConvertTo-Json -Depth 5 -Compress)" }
+  if (@($servers.servers | Where-Object { $_.name -eq "smoke-echo" }).Count -ne 1) {
+    Get-Content $wrapLog -ErrorAction SilentlyContinue | Write-Host
+    Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Sort-Object LocalPort | ForEach-Object { Write-Host "listening: $($_.LocalAddress):$($_.LocalPort) pid $($_.OwningProcess)" }
+    Write-Host "wrapper pid $($wrapper.Id), exited: $($wrapper.HasExited)"
+    Fail "the server behind --mcp was not found within 30 s: $($servers | ConvertTo-Json -Depth 5 -Compress)"
+  }
   $mcpHeaders = $auth + @{ "X-Desk-Session" = $script:session }
   $null = Post "/servers/smoke-echo/mcp" @{ jsonrpc = "2.0"; id = 1; method = "initialize"; params = @{ protocolVersion = "2025-06-18"; capabilities = @{}; clientInfo = @{ name = "smoke"; version = "1" } } } $mcpHeaders
   $echoed = Post "/servers/smoke-echo/mcp" @{ jsonrpc = "2.0"; id = 2; method = "tools/call"; params = @{ name = "echo"; arguments = @{ text = "through rigdesk" } } } $mcpHeaders
