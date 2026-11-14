@@ -75,7 +75,10 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
     if (mounted) setState(() {});
   }
 
-  void _ask(String verb) => _bridge?.ask(verb);
+  void _ask(String verb) => agentAsk(ffi, verb);
+
+  /// A RigDesk PC drives its share over the session; a stock PC needs its bridge set up first.
+  bool get _ready => AgentModel.of(ffi.sessionId).fromPc || _bridge != null;
 
   Future<void> _setUp() async {
     final saved = AgentHost.fromJson(bind.mainGetLocalOption(key: _hostKey));
@@ -91,11 +94,10 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
   }
 
   void _message() {
-    final bridge = _bridge;
-    if (bridge == null) return;
+    if (!_ready) return;
     Navigator.of(context).push(MaterialPageRoute(
         fullscreenDialog: true,
-        builder: (_) => MobileAgentNotePage(ffi: ffi, bridge: bridge)));
+        builder: (_) => MobileAgentNotePage(ffi: ffi)));
   }
 
   @override
@@ -148,7 +150,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
 
   Widget _badge(AgentModel agent) {
     final String label;
-    if (_bridge == null) {
+    if (!_ready) {
       label = 'Set up bridge';
     } else if (agent.isShared) {
       label = '${agent.ownerTitle} · ${_holds(agent)}';
@@ -163,7 +165,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
       borderRadius: BorderRadius.circular(20),
       child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        onTap: _bridge == null ? _setUp : _openSheet,
+        onTap: _ready ? _openSheet : _setUp,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -273,6 +275,18 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                       title: const Text('End share'),
                       onTap: () => run(() => _ask('revoke')),
                     ),
+                  if (agent.fromPc)
+                    SwitchListTile(
+                      secondary: const Icon(Icons.extension),
+                      title: const Text('MCP servers'),
+                      subtitle: Text(!agent.mcpOn
+                          ? 'Off: the agent sees no MCP server on this PC'
+                          : agent.mcpServers.isEmpty
+                              ? 'Offered to the agent; none running now'
+                              : 'Offered to the agent: ${agent.mcpServers.join(', ')}'),
+                      value: agent.mcpOn,
+                      onChanged: (on) => run(() => _ask(on ? 'mcp_on' : 'mcp_off')),
+                    ),
                   ListTile(
                     leading: const Icon(Icons.settings),
                     title: const Text('Bridge settings'),
@@ -369,10 +383,8 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
 /// and drawing tools of the desktop box (agent_note.dart), and the words for the agent.
 class MobileAgentNotePage extends StatefulWidget {
   final FFI ffi;
-  final AgentBridge bridge;
 
-  const MobileAgentNotePage({Key? key, required this.ffi, required this.bridge})
-      : super(key: key);
+  const MobileAgentNotePage({Key? key, required this.ffi}) : super(key: key);
 
   @override
   State<MobileAgentNotePage> createState() => _MobileAgentNotePageState();
@@ -410,8 +422,8 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
     final waiter = Completer<Uint8List?>();
     agent.frameWaiter = waiter;
     final display = widget.ffi.ffiModel.pi.currentDisplay;
-    await widget.bridge
-        .ask('frame', display: display == kAllDisplayValue ? 0 : display);
+    await agentAsk(widget.ffi, 'frame',
+        display: display == kAllDisplayValue ? 0 : display);
     Uint8List? png;
     try {
       png = await waiter.future.timeout(const Duration(seconds: 15));
@@ -526,7 +538,7 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
     final png = frame == null
         ? Uint8List(0)
         : await bakeNote(frame, _clip, _marks, strokeScale: 1 / _viewScale);
-    await widget.bridge.ask('note', text: words, png: png);
+    await agentAsk(widget.ffi, 'note', text: words, png: png);
     if (mounted) Navigator.of(context).pop();
   }
 

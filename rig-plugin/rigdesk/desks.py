@@ -289,6 +289,11 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
             return f"RigDesk {pc}: the human handed input to you at {at}. You may act there again."
         if holder == "blocked":
             return f"RigDesk {pc}: the human blocked you at {at}. Every call there, reads included, is refused until they unblock you."
+    if kind == "mcp":
+        return (f"RigDesk {pc}: the human turned MCP back on at {at}; the MCP servers running there are offered to you again as they are found."
+                if event.get("on") else
+                f"RigDesk {pc}: the human turned MCP off at {at}; no MCP server there is offered to you until they turn it back on. "
+                "Screen, input and shell are unchanged.")
     if kind == "dropped":
         count = int(event.get("messages") or 0)
         return (f"RigDesk {pc}: {count} of the human's messages were dropped unread at {at}: the PC's queue was full." if count
@@ -740,6 +745,8 @@ class Desks:
             self._resync(link)
         if kind == "server":
             self._resync(link, None if event.get("found") else (str(event.get("name") or ""), str(event.get("why") or "it stopped")))
+        if kind == "mcp":
+            self._resync(link)
         if held is not None and (kind != "revoked" or held.agent == event.get("agent_id")):
             key = f"{self._boots.get(pc, '')}:{event_id}" if event_id else f"{self._boots.get(pc, '')}:gap:{now_ms()}"
             if kind == "message":

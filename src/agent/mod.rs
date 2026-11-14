@@ -83,7 +83,8 @@ pub fn start() {
     let host = &*HOST;
     let desk: Arc<dyn rigdesk_agent::Desk> = Arc::new(desk::PcDesk::new());
     // The MCP servers already running on the PC come with the share; RustDesk's own ports and this API are never asked.
-    let found = rigdesk_agent::Found::new([API_PORT].into_iter().chain(21114..=21119));
+    let found = rigdesk_agent::Found::new([API_PORT].into_iter().chain(21114..=21119), !mcp_off_marker().map_or(false, |m| m.exists()));
+    let _ = FOUND.set(found.clone());
     let api = rigdesk_agent::Api::new(host.shared.clone(), desk, host.journal.clone(), &bearer, Some(found));
     tokio::spawn(async move {
         match api.serve(API_PORT).await {
@@ -91,6 +92,31 @@ pub fn start() {
             Err(e) => log::error!("agent API failed to bind {API_PORT}: {e}"),
         }
     });
+}
+
+/// The MCP servers found on this PC, once the agent API has started.
+static FOUND: std::sync::OnceLock<Arc<rigdesk_agent::Found>> = std::sync::OnceLock::new();
+
+pub fn found() -> Option<&'static Arc<rigdesk_agent::Found>> {
+    FOUND.get()
+}
+
+/// Kept beside api.token while the person at the PC has MCP off, so the switch outlives a restart.
+fn mcp_off_marker() -> Option<std::path::PathBuf> {
+    Some(data_dir()?.join("mcp.off"))
+}
+
+/// The PC's own MCP switch, from the viewer. False when the agent API is off on this PC.
+pub fn set_mcp(on: bool) -> bool {
+    let Some(found) = found() else { return false };
+    if let Some(marker) = mcp_off_marker() {
+        let kept = if on { std::fs::remove_file(&marker).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) } else { std::fs::write(&marker, b"") };
+        if let Err(e) = kept {
+            log::warn!("agent: the MCP switch is not kept across a restart: {e}");
+        }
+    }
+    found.set_on(on, &HOST.shared);
+    true
 }
 
 /// Mint a share link for the viewer's "Share with agent". The caller shows it as rigdesk://<host>/<grant>#<secret>.
@@ -110,6 +136,10 @@ pub fn hand_to_agent() -> bool {
 
 pub fn block_agent() -> bool {
     HOST.shared.block()
+}
+
+pub fn stop_agent() -> bool {
+    HOST.shared.stop()
 }
 
 pub fn unblock_agent() -> bool {

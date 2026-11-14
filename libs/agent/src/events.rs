@@ -24,6 +24,8 @@ pub enum EventKind {
     Reach { down: Option<String> },
     /// An MCP server on the PC was found (`found`) or went (`why`), named as the agent API serves it.
     Server { name: String, found: bool, says: String, why: Option<String> },
+    /// The PC's own MCP switch was turned on or off by the person there.
+    Mcp { on: bool },
 }
 
 #[derive(Clone, Debug, Serialize)]

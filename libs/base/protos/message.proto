@@ -1019,6 +1019,10 @@ message AgentRequest {
     AgentNote note = 7;
     // A still of this display index, for the message box.
     int32 frame = 8;
+    // Stop: the agent stops at once and every call is refused until the human resumes it (unblock).
+    bool stop = 9;
+    // The PC's own MCP switch: true offers the MCP servers running on the PC to the agent, false offers none.
+    bool mcp = 10;
   }
 }
 
@@ -1045,6 +1049,9 @@ message AgentState {
   AgentAction action = 8;
   string note = 9;
   bytes frame = 10;
+  // The PC's MCP switch, and the MCP servers it offers the agent now, by name.
+  bool mcp_on = 11;
+  repeated string mcp_servers = 12;
 }
 
 message Message {

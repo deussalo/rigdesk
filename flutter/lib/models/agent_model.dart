@@ -51,6 +51,14 @@ class AgentModel with ChangeNotifier {
   final List<AgentAction> actions = [];
   AgentAction? pointer;
 
+  /// Set once the PC itself has spoken over the session: a RigDesk PC, whose share is driven through the session
+  /// rather than through an agent host.
+  bool fromPc = false;
+
+  /// The PC's own MCP switch, and the MCP servers it offers the agent now (RigDesk PCs only).
+  bool mcpOn = false;
+  List<String> mcpServers = const [];
+
   /// Set while the message box waits for a still of the screen.
   Completer<Uint8List?>? frameWaiter;
 
@@ -68,6 +76,8 @@ class AgentModel with ChangeNotifier {
     ownerGraph = (s['owner_graph'] ?? '') as String;
     linkOpen = (s['link_open'] ?? false) as bool;
     host = (s['host'] ?? '') as String;
+    mcpOn = (s['mcp_on'] ?? false) as bool;
+    mcpServers = ((s['mcp_servers'] ?? const []) as List).whereType<String>().toList();
     if (!isShared) {
       actions.clear();
       pointer = null;

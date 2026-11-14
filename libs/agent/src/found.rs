@@ -56,8 +56,9 @@ pub struct Found {
 }
 
 impl Found {
-    pub fn new(skip: impl IntoIterator<Item = u16>) -> Arc<Self> {
-        Arc::new(Found { servers: Mutex::default(), not_mcp: Mutex::default(), on: AtomicBool::new(true), skip: skip.into_iter().collect() })
+    /// `on` is the PC's MCP switch as it was left; on unless the person there turned it off.
+    pub fn new(skip: impl IntoIterator<Item = u16>, on: bool) -> Arc<Self> {
+        Arc::new(Found { servers: Mutex::default(), not_mcp: Mutex::default(), on: AtomicBool::new(on), skip: skip.into_iter().collect() })
     }
 
     pub fn on(&self) -> bool {
@@ -65,10 +66,16 @@ impl Found {
     }
 
     /// The PC's MCP switch. Off, no port is asked and no server is offered; screen, input and shell stay on.
-    pub fn set_on(&self, on: bool, shared: &Shared) {
-        if self.on.swap(on, Ordering::SeqCst) != on && !on {
+    /// Answers whether it changed; a change is an `Mcp` event, after the servers it closed.
+    pub fn set_on(&self, on: bool, shared: &Shared) -> bool {
+        if self.on.swap(on, Ordering::SeqCst) == on {
+            return false;
+        }
+        if !on {
             self.forget_all("MCP was turned off on the PC", shared);
         }
+        shared.events.push(EventKind::Mcp { on });
+        true
     }
 
     pub fn servers(&self) -> Vec<Server> {
