@@ -9,13 +9,13 @@ import os
 from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict, cast
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 from core.ask_said import Confirmed, Then
-from core.base import ToolAnswer, View, new_id, now_ms, replace_file
+from core.base import JsonObject, ToolAnswer, View, as_object, new_id, now_ms, replace_file
 from core.boundary import BranchTool, NoParams, Params, StatusLine
 from core.kernel_api import RigReach, mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
@@ -27,7 +27,7 @@ from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from .desks import ID, NATIVE, Desks, DeskRefused, Grantee, PcEntry, RigdeskSettings
+from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, PcEntry, PcServer, RigdeskSettings
 from .desks import PcName as DeskName
 
 BRANCH = "desk"
@@ -230,6 +230,13 @@ async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answe
     return {"pc": held.pc, "id": given.id, "file": str(path), "bytes": path.stat().st_size, "mime": "image/png"}
 
 
+def _upstream(tool: str, listed: dict[str, Any]) -> tuple[str, JsonObject, bool]:
+    """An MCP tool as its server lists it: its words, its input schema, and whether it says it only reads."""
+    schema, notes = listed.get("inputSchema"), listed.get("annotations")
+    read_only = isinstance(notes, dict) and cast(dict[str, Any], notes).get("readOnlyHint") is True
+    return str(listed.get("description") or tool), as_object(cast(JsonObject, schema)) if isinstance(schema, dict) else {"type": "object"}, read_only
+
+
 def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
     async def run(call: Call, given: ToolInput) -> Answer:
         agent, graph, node, title = _who(call)
@@ -241,11 +248,29 @@ def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
             return await desks.call(held, tool, dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
             return _refused(call, failed)
-    words = str(listed.get("description") or tool)
-    schema = listed.get("inputSchema") if isinstance(listed.get("inputSchema"), dict) else {"type": "object"}
-    read_only = bool((listed.get("annotations") or {}).get("readOnlyHint"))
+    words, schema, read_only = _upstream(tool, listed)
     return ToolDef(f"{BRANCH}/{tool}", f"On the RigDesk PC you joined: {words}", PassInput, DeskAnswer, run, run, read_only=read_only, plugin=plugin_capability(ID),
-                   denied_alone=(CAPABILITY, mcp_capability(BRANCH, tool)), upstream_schema=schema, gloss=gloss_of(words))
+                   denied_alone=(CAPABILITY, mcp_capability(BRANCH, tool)), upstream_schema=schema, gloss=gloss_of(words),
+                   limit_s=CALL_LIMIT_S + SHELL_LIMIT_S + 10 if tool == "shell" else CALL_LIMIT_S + 10)
+
+
+def _served(desks: Desks, server: PcServer, listed: dict[str, Any]) -> ToolDef:
+    """One tool of an MCP server running on a PC: only the agent holding that PC may call it, under the PC's own holder and Block rules."""
+    tool, key = str(listed["name"]), server.key
+
+    async def run(call: Call, given: ToolInput) -> Answer:
+        agent, graph, _, _ = _who(call)
+        held = desks.held_by(agent, graph)
+        if held is None or held.pc != server.pc:
+            return call.refused(UNSHARED, f"{key}/{tool} runs on RigDesk PC {server.pc}, which you do not hold: only the agent holding it may call its MCP servers")
+        try:
+            return await desks.mcp_call(held, key, tool, dict(given.model_extra or {}))
+        except Exception as failed:  # noqa: BLE001
+            return _refused(call, failed)
+    words, schema, read_only = _upstream(tool, listed)
+    return ToolDef(f"{key}/{tool}", f"On RigDesk PC {server.pc}, MCP server {server.name} ({server.says}): {words}", PassInput, DeskAnswer, run, run,
+                   read_only=read_only, plugin=plugin_capability(ID), denied_alone=(mcp_capability(key), mcp_capability(key, tool)), upstream_schema=schema,
+                   gloss=gloss_of(words), limit_s=MCP_CALL_LIMIT_S + 10)
 
 
 def _native[I: ToolInput](desks: Desks, tool: str, words: str, shape: type[I], handler: Any, read_only: bool = False) -> ToolDef:
@@ -264,16 +289,25 @@ def _built(desks: Desks) -> tuple[ToolDef, ...]:
             _native(desks, "pcs", "Every RigDesk PC in Rig: its client, whether it is up, whether it is assigned to you, and who holds it now.", PcsInput, _pcs, read_only=True),
             _native(desks, "request", "Ask the operator to let you join a stock RustDesk PC now (kind join), or to assign it to you (kind assign).", RequestInput, _request),
             _native(desks, "attachment", "An image the human sent you from the RigDesk viewer, as a PNG file you can read.", AttachmentInput, _attachment, read_only=True),
-            *(_passed(desks, name, listed) for name, listed in desks.catalog().items() if name not in NATIVE))
+            *(_passed(desks, name, listed) for name, listed in desks.catalog().items() if name not in NATIVE),
+            *(_served(desks, server, listed) for server in desks.pc_servers() for listed in server.tools))
 
 
 def _tools(host: PluginHost) -> tuple[ToolDef, ...]:
-    """A branch tool's run is given the Call alone, so each closes over the live Desks it reaches; rebuilt only when the catalog changes."""
+    """A branch tool's run is given the Call alone, so each closes over the live Desks it reaches; rebuilt only when the catalog or a PC's servers change."""
     return host.live(Desks).tools(_built)
 
 
 def _why_missing(host: PluginHost, name: str, listed: bool) -> str | None:
     branch, slash, tool = name.partition("/")
+    desks = host.live(Desks)
+    pc, dot, server = branch.partition(".")
+    if dot and slash and pc in {entry["name"] for entry in desks.entries()}:
+        opened = desks.pc_server(branch)
+        if opened is None:
+            return (f"no MCP server {server} is open on RigDesk PC {pc}: its servers reach only the agent holding it, while they run there, "
+                    "and that agent is told each one's tools by name")
+        return f"MCP server {server} on {pc} has no tool {tool!r}; it has " + ", ".join(each["name"] for each in opened.tools)
     if branch != BRANCH or not slash:
         return None
     if not host.live(Desks).catalog():
@@ -282,18 +316,26 @@ def _why_missing(host: PluginHost, name: str, listed: bool) -> str | None:
 
 
 def _capabilities(host: PluginHost) -> Mapping[str, str]:
-    return {CAPABILITY: "Join a RigDesk PC with a share link and use its tools."}
+    servers = {mcp_capability(server.key): f"MCP server {server.name} ({server.says}) on RigDesk PC {server.pc}, for the agent holding it."
+               for server in host.live(Desks).pc_servers()}
+    return {CAPABILITY: "Join a RigDesk PC with a share link and use its tools."} | servers
 
 
 def _reach(host: PluginHost) -> Mapping[str, RigReach]:
-    return {BRANCH: "listed" if host.live(Desks).for_fleet else "withheld"}
+    """A PC's servers are named in no seat's notice: the agent holding the PC is told their tools by name, and any other is refused."""
+    desks = host.live(Desks)
+    reach: dict[str, RigReach] = {BRANCH: "listed" if desks.for_fleet else "withheld"}
+    for server in desks.pc_servers():
+        reach[server.key] = "hidden"
+    return reach
 
 
 def _listing(host: PluginHost, capability: str) -> tuple[BranchTool, ...]:
-    if capability != CAPABILITY:
+    branch = capability.removeprefix("mcp:")
+    if capability not in _capabilities(host):
         return ()
-    return tuple(BranchTool(capability=mcp_capability(BRANCH, defined.name.split("/", 1)[1]), name=defined.name.split("/", 1)[1], about=defined.description,
-                            says_read_only=defined.read_only, held=None) for defined in _tools(host))
+    return tuple(BranchTool(capability=mcp_capability(branch, defined.name.split("/", 1)[1]), name=defined.name.split("/", 1)[1], about=defined.description,
+                            says_read_only=defined.read_only, held=None) for defined in _tools(host) if defined.name.split("/", 1)[0] == branch)
 
 
 async def _decide(_host: PluginHost, _capability: str, _tools_named: tuple[str, ...]) -> tuple[str, ...]:
@@ -319,6 +361,21 @@ async def _grant_row(host: PluginHost, grantee: str) -> GrantRow:
     return GrantRow(grantee=grantee, label=identity.label if identity is not None and identity.label else name, graph=home, agent_id=name)
 
 
+class PcServerRow(View):
+    name: str
+    key: str = Field(description="Its tools' branch for the holding agent: <pc>.<server>/<tool>.")
+    says: str = Field(description="Its own words for itself: serverInfo's name and version.")
+    tools: tuple[str, ...]
+    since_ms: int = Field(description="When the holding agent's session opened it.")
+
+
+class PcMcpRow(View):
+    allowed: bool = Field(description="Rig's switch, the PC's mcp setting: off, Rig opens none of its servers.")
+    on: bool | None = Field(description="The PC's own switch, as it last said; null while no agent holds the PC, since it looks for servers only then.")
+    why: str | None = Field(description="Why no server is offered, or the last one that could not be opened.")
+    servers: tuple[PcServerRow, ...] = Field(description="The servers open for the agent holding the PC now.")
+
+
 class PcRow(View):
     name: str
     client: str
@@ -331,6 +388,7 @@ class PcRow(View):
     owner: dict[str, str | None] | None = Field(description="The agent owning the session: id, title and graph.")
     owned_here: bool = Field(description="The owner joined through this Rig.")
     assigned: tuple[GrantRow, ...] = Field(description="Who holds a standing grant to it; a stock PC only.")
+    mcp: PcMcpRow = Field(description="The MCP servers running on the PC, as they reach the agent holding it.")
 
 
 class ListenerRow(View):

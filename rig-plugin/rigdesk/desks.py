@@ -14,9 +14,9 @@ import secrets
 import socket
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict, cast
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -50,11 +50,26 @@ HBBS_PORT = 21116  # RustDesk's rendezvous port when the host names none; hbbr l
 STOCK_PORTS = range(21120, 21200)
 SECRETS = Path("~/.rig/rigdesk")
 VIEWER_VERBS = frozenset({"mint", "hand", "human", "stop", "block", "unblock", "revoke"})
+MCP_LIMIT_S = 15.0
+MCP_CALL_LIMIT_S = 310.0  # the PC waits 300 s on its server's answer
+MCP_PROTOCOL = "2025-06-18"
+MCP_TOOL = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+MCP_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
 type Grantee = Annotated[str, StringConstraints(pattern=r"^(agent|graph):[A-Za-z0-9_.:-]{1,128}$")]
 GRANTS_DOC = "grants"
+
+
+def _object(value: object) -> dict[str, Any]:
+    """A JSON object from a PC or its server, or an empty one for anything else."""
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+
+
+def _objects(value: object) -> list[dict[str, Any]]:
+    items: list[object] = cast(list[object], value) if isinstance(value, list) else []
+    return [cast(dict[str, Any], each) for each in items if isinstance(each, dict)]
 
 
 def _web_address(url: str) -> str:
@@ -110,6 +125,7 @@ class DeskPc(Shape):
     token_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's agent-API token.")]
     client: Annotated[str, Field(description="The client this PC belongs to.")] = ""
     stock: Annotated[StockRemote | None, Field(description="Set for a PC running stock RustDesk instead of RigDesk; who may act on it with no share link is set on the RigDesk page.")] = None
+    mcp: Annotated[bool, Field(description="The MCP servers running on the PC reach the agent holding it, as <pc>.<server>/<tool>; off, Rig opens none. The person at the PC has a switch of their own.")] = True
 
     @model_validator(mode="after")
     def _stock_is_local(self) -> DeskPc:
@@ -153,10 +169,32 @@ class DeskRefused(Exception):
     """A call that cannot go through, with the words the agent reads."""
 
 
+class McpSessionGone(Exception):
+    """A PC's MCP server no longer knows the session it gave: MCP's answer is HTTP 404, and the client opens a new one."""
+
+
 class Grants(BaseModel):
     """Who holds a standing grant to each stock PC: rigdesk's own doc, written only by Desks.assign and Desks.unassign, on an operator's act."""
     model_config = ConfigDict(frozen=True, extra="forbid")
     pcs: dict[PcName, tuple[Grantee, ...]] = {}
+
+
+@dataclass(frozen=True)
+class PcServer:
+    """One MCP server on a PC, as the holding agent's session opened it: its own words, its tools, and the MCP session it gave.
+    Opened under one PC session; a new holder opens it afresh."""
+    pc: str
+    name: str
+    says: str
+    tools: tuple[dict[str, Any], ...]
+    sid: str | None
+    protocol: str
+    session: str
+    since_ms: int
+
+    @property
+    def key(self) -> str:
+        return f"{self.pc}.{self.name}"
 
 
 @dataclass
@@ -170,6 +208,10 @@ class PcLink:
     task: asyncio.Task[None] | None = None
     remote: asyncio.Task[None] | None = None
     remote_why: str | None = None
+    servers: dict[str, PcServer] = field(default_factory=dict[str, PcServer])
+    mcp_on: bool | None = None
+    mcp_why: str | None = None
+    syncing: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass
@@ -273,7 +315,8 @@ class Desks:
         self._id_server: IdServer | None = None
         self._catalog: dict[str, dict[str, Any]] = {}
         self._tools: tuple[Any, ...] = ()
-        self._tools_of: object = None
+        self._tools_of = -1
+        self._revision = 0
         self._sessions: dict[str, Held] = {}
         self._boots: dict[str, str] = {}
         self._last: dict[str, int] = {}
@@ -348,6 +391,8 @@ class Desks:
             for task in (link.task, link.remote):
                 if task is not None:
                     task.cancel()
+            if link.servers:
+                self._revision += 1
         for name, spec in settings.pcs.items():
             if name not in self._pcs:
                 link = self._pcs[name] = PcLink(name, spec)
@@ -621,6 +666,7 @@ class Desks:
                 raise DeskRefused(f"/events answered HTTP {stream.status}")
             link.state, link.why, link.down_since_ms = "up", None, None
             self._reached(link, down if isinstance(down, str) else None)
+            self._resync(link)
             data: list[str] = []
             async for raw in stream.content:
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
@@ -640,6 +686,8 @@ class Desks:
         known = pc in self._boots
         self._boots[pc], self._last[pc] = boot, 0
         held = self._sessions.pop(pc, None)
+        if (link := self._pcs.get(pc)) is not None:
+            self._resync(link)
         await asyncio.to_thread(self._write_state)
         if known and held is not None and not _grants(self.granted(pc), held.agent, held.graph):
             _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: RigDesk restarted, so {held.title}'s session there ended", pc=pc)
@@ -653,6 +701,7 @@ class Desks:
         merged = self._catalog | fresh
         if fresh and merged != self._catalog:
             self._catalog = merged
+            self._revision += 1
             await asyncio.to_thread(self._write_state)
 
     def _reached(self, link: PcLink, down: str | None) -> None:
@@ -683,6 +732,9 @@ class Desks:
         held = self._sessions.get(pc)
         if kind == "revoked" and held is not None and held.agent == event.get("agent_id"):
             self._sessions.pop(pc, None)
+            self._resync(link)
+        if kind == "server":
+            self._resync(link, None if event.get("found") else (str(event.get("name") or ""), str(event.get("why") or "it stopped")))
         if held is not None and (kind != "revoked" or held.agent == event.get("agent_id")):
             key = f"{self._boots.get(pc, '')}:{event_id}" if event_id else f"{self._boots.get(pc, '')}:gap:{now_ms()}"
             if kind == "message":
@@ -726,10 +778,10 @@ class Desks:
         if isinstance(done, RefusedOutcome):
             _LOG.warning("rigdesk_stop_refused", f"RigDesk {held.pc}: {held.graph}/{held.node} was not interrupted: {done.rendered}", pc=held.pc)
 
-    async def _tell(self, held: Held, words: str, key: str) -> bool:
+    async def _tell(self, held: Held, words: str, key: str, timing: Literal["steer", "queue"] = "steer") -> bool:
         seat = await self._seat(held)
         try:
-            verdict = await self.host.admit(seat, PluginWords(words, f"rigdesk:{held.pc}", key=f"{held.pc}:{key}", timing="steer", headline=f"RigDesk {held.pc}"))
+            verdict = await self.host.admit(seat, PluginWords(words, f"rigdesk:{held.pc}", key=f"{held.pc}:{key}", timing=timing, headline=f"RigDesk {held.pc}"))
         except Exception as failed:  # noqa: BLE001
             _LOG.warning("rigdesk_tell_failed", f"RigDesk {held.pc}: telling {held.graph}/{held.node} failed: {type(failed).__name__}: {failed}", pc=held.pc)
             return False
@@ -737,6 +789,156 @@ class Desks:
             _LOG.warning("rigdesk_tell_refused", f"RigDesk {held.pc}: {held.graph}/{held.node} was not told: {verdict.rendered}", pc=held.pc)
             return False
         return True
+
+    # --- the PC's own MCP servers, for the agent holding it ---
+
+    def _resync(self, link: PcLink, gone: tuple[str, str] | None = None) -> None:
+        TASKS.spawn(f"rigdesk-servers-{link.name}", self._sync_servers(link, gone))
+
+    async def _sync_servers(self, link: PcLink, gone: tuple[str, str] | None) -> None:
+        """Makes the holder's view of the PC's MCP servers current: each new one opened under its session, each gone one dropped, and the holder
+        told of both. With no holder, Rig's switch off, or a new holder, the servers opened before are dropped unsaid."""
+        async with link.syncing:
+            held = self._sessions.get(link.name)
+            stale = [name for name, server in link.servers.items() if held is None or not link.spec.mcp or server.session != held.session]
+            for name in stale:
+                link.servers.pop(name)
+            if held is None or not link.spec.mcp:
+                link.mcp_on, link.mcp_why = None, None if link.spec.mcp else "off in Rig's settings for this PC"
+                self._revision += bool(stale)
+                return
+            dropped: list[tuple[PcServer, str]] = []
+            if gone is not None and (server := link.servers.pop(gone[0], None)) is not None:
+                dropped.append((server, gone[1]))
+            try:
+                listed = await self._listed_servers(link)
+            except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError, ValueError) as failed:
+                link.mcp_on, link.mcp_why = None, f"its MCP servers could not be listed: {failed}"
+                listed = {name: server.says for name, server in link.servers.items()}
+            dropped += [(link.servers.pop(name), "the PC no longer offers it") for name in [name for name in link.servers if name not in listed]]
+            opened: list[PcServer] = []
+            for name, says in listed.items():
+                if name in link.servers:
+                    continue
+                try:
+                    server = await self._open_server(link, held, name, says)
+                except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError, ValueError) as failed:
+                    link.mcp_why = f"MCP server {name} could not be opened: {failed}"
+                    _LOG.warning("rigdesk_server_unopened", f"RigDesk {link.name}: {link.mcp_why}", pc=link.name)
+                    continue
+                link.servers[name] = server
+                opened.append(server)
+            self._revision += bool(stale or dropped or opened)
+        for server, why in dropped:
+            await self._tell(held, f"RigDesk {link.name}: the MCP server {server.name} is gone ({why}); its tools {server.key}/* are no longer there.",
+                             f"server-gone:{server.name}:{server.since_ms}", "queue")
+        for server in opened:
+            await self._tell(held, self._server_words(server), f"server:{server.name}:{server.since_ms}", "queue")
+
+    @staticmethod
+    def _server_words(server: PcServer) -> str:
+        names = ", ".join(f"{server.key}/{tool['name']}" for tool in server.tools) or "none yet"
+        return (f"RigDesk {server.pc}: the MCP server {server.name} ({server.says}) runs there, and its tools are yours while you hold {server.pc}, "
+                f"by these exact names (tool_load gives one in full, call_tool runs it): {names}. A call acts on the PC as your desk calls do: "
+                "the person there goes first, and Block refuses it.")
+
+    async def _listed_servers(self, link: PcLink) -> dict[str, str]:
+        """The servers the PC offers now, by name, with their own words; a RigDesk without the route, or a bridge, offers none."""
+        async with self._client().get(f"{link.spec.url}/servers", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=MCP_LIMIT_S)) as answer:
+            if answer.status == 404:
+                link.mcp_on, link.mcp_why = False, "this PC's RigDesk is older than MCP servers"
+                return {}
+            if answer.status != 200:
+                raise DeskRefused(f"/servers answered HTTP {answer.status}")
+            said = _object(await answer.json(content_type=None))
+        link.mcp_on = said.get("on") is True
+        link.mcp_why = said.get("why") if isinstance(said.get("why"), str) else None if link.mcp_on else "MCP is off on the PC, by its own switch"
+        listed: dict[str, str] = {}
+        for server in _objects(said.get("servers")):
+            name = server.get("name")
+            if not isinstance(name, str) or not MCP_KEY.match(f"{link.name}.{name}"):
+                _LOG.warning("rigdesk_server_unnamed", f"RigDesk {link.name}: skipped an MCP server whose name {name!r} cannot be a Rig server name", pc=link.name)
+                continue
+            listed[name] = str(server.get("says") or name)
+        return listed
+
+    async def _open_server(self, link: PcLink, held: Held, name: str, says: str) -> PcServer:
+        """MCP's opening: initialize, initialized, then every page of tools/list, all under the holder's PC session."""
+        hello = {"protocolVersion": MCP_PROTOCOL, "capabilities": {}, "clientInfo": {"name": "rig-rigdesk", "version": "0.1.0"}}
+        reply, sid = await self._mcp_post(link, held, name, None, MCP_PROTOCOL, "initialize", hello, MCP_LIMIT_S)
+        protocol = str(reply.get("protocolVersion") or MCP_PROTOCOL)
+        await self._mcp_post(link, held, name, sid, protocol, "notifications/initialized", None, MCP_LIMIT_S)
+        tools: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(20):
+            page, _ = await self._mcp_post(link, held, name, sid, protocol, "tools/list", {"cursor": cursor} if cursor else {}, MCP_LIMIT_S)
+            tools += [tool for tool in _objects(page.get("tools")) if isinstance(tool.get("name"), str) and MCP_TOOL.match(tool["name"])]
+            cursor = page.get("nextCursor") if isinstance(page.get("nextCursor"), str) else None
+            if cursor is None:
+                break
+        return PcServer(link.name, name, says, tuple(tools), sid, protocol, held.session, now_ms())
+
+    async def _mcp_post(self, link: PcLink, held: Held, name: str, sid: str | None, protocol: str, method: str, params: dict[str, Any] | None,
+                        limit_s: float) -> tuple[dict[str, Any], str | None]:
+        """One MCP message through the PC to its server: the result, and the server's MCP session id; a notification answers an empty result.
+        A streamable HTTP server answers a request as JSON or as an event stream holding the reply."""
+        notice = method.startswith("notifications/")
+        asked = now_ms()
+        body: dict[str, Any] = {"jsonrpc": "2.0", "method": method} | ({} if notice else {"id": asked}) | ({} if params is None else {"params": params})
+        headers = self._headers(link, held.session) | {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": protocol}
+        headers |= {"Mcp-Session-Id": sid} if sid else {}
+        async with self._client().post(f"{link.spec.url}/servers/{name}/mcp", json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=limit_s)) as answer:
+            text = await answer.text()
+            sid = answer.headers.get("Mcp-Session-Id") or sid
+            if answer.status == 404 and sid and "no MCP server" not in text:
+                raise McpSessionGone(text[:300])
+            if answer.status not in (200, 202):
+                raise DeskRefused(f"{link.name}.{name} answered HTTP {answer.status}" + (f": {text[:300]}" if text else ""))
+            streamed = answer.content_type == "text/event-stream"
+        if notice:
+            return {}, sid
+        replies = [json.loads(line[5:].strip()) for line in text.splitlines() if line.startswith("data:") and line[5:].strip()] if streamed else [json.loads(text)]
+        reply = next((each for each in _objects(replies) if each.get("id") == asked), None)
+        if reply is None:
+            raise DeskRefused(f"{link.name}.{name} sent no answer to {method}")
+        if "error" in reply:
+            raise DeskRefused(f"{link.name}.{name}: {_object(reply['error']).get('message', 'error')}")
+        return _object(reply.get("result")), sid
+
+    async def mcp_call(self, held: Held, key: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """A tool of one of the held PC's MCP servers; a server that forgot its MCP session is opened again once, and the call retried."""
+        link = self._link(held.pc)
+        held.used_ms = now_ms()
+        server = link.servers.get(key.removeprefix(f"{held.pc}."))
+        if server is None or server.key != key or server.session != held.session:
+            raise DeskRefused(f"{key} is not open on {held.pc} now; the MCP servers there reach you when they run")
+        params = {"name": tool, "arguments": arguments}
+        try:
+            result, _ = await self._mcp_post(link, held, server.name, server.sid, server.protocol, "tools/call", params, MCP_CALL_LIMIT_S)
+        except McpSessionGone:
+            async with link.syncing:
+                server = link.servers[server.name] = await self._open_server(link, held, server.name, server.says)
+            result, _ = await self._mcp_post(link, held, server.name, server.sid, server.protocol, "tools/call", params, MCP_CALL_LIMIT_S)
+        return await self._answered(held.pc, f"{server.name}-{tool}", result) | {"server": server.name}
+
+    async def _answered(self, pc: str, what: str, result: dict[str, Any]) -> dict[str, Any]:
+        """An MCP tool result as the agent reads it: text joined, images kept here as files, any other block as its JSON."""
+        texts: list[str] = []
+        images: list[dict[str, Any]] = []
+        for index, block in enumerate(_objects(result.get("content"))):
+            if block.get("type") == "text":
+                texts.append(str(block.get("text", "")))
+            elif block.get("type") == "image" and isinstance(block.get("data"), str):
+                try:
+                    data = base64.b64decode(block["data"], validate=False)
+                except binascii.Error:
+                    continue
+                path = await asyncio.to_thread(self._kept, "shots", f"{pc}-{what}-{now_ms()}-{index}.png", data)
+                images.append({"file": str(path), "bytes": len(data)})
+            else:
+                texts.append(json.dumps(block))
+        structured = result.get("structuredContent")
+        return {"pc": pc, "text": "\n".join(texts), "images": images, "is_error": result.get("isError") is True} | ({"structured": structured} if structured is not None else {})
 
     # --- files ---
 
@@ -768,9 +970,16 @@ class Desks:
         return self._catalog
 
     def tools(self, build: Callable[[Desks], tuple[Any, ...]]) -> tuple[Any, ...]:
-        if self._tools_of is not self._catalog:
-            self._tools, self._tools_of = build(self), self._catalog
+        """Rebuilt when the desk catalog or any PC's MCP servers move, each of which bumps the revision."""
+        if self._tools_of != self._revision:
+            self._tools, self._tools_of = build(self), self._revision
         return self._tools
+
+    def pc_servers(self) -> tuple[PcServer, ...]:
+        return tuple(server for link in self._pcs.values() for server in link.servers.values())
+
+    def pc_server(self, key: str) -> PcServer | None:
+        return next((server for server in self.pc_servers() if server.key == key), None)
 
     @property
     def for_fleet(self) -> bool:
@@ -804,6 +1013,7 @@ class Desks:
         held = self._sessions[pc] = Held(pc, agent, graph, node, title, str(said["session"]), now_ms(), via)
         link.standing = said.get("standing")
         await asyncio.to_thread(self._write_state)
+        self._resync(link)
         if replaced is not None and replaced.agent != agent:
             _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: shared with {title}, so {replaced.title}'s session there ended", pc=pc)
         return held
@@ -868,6 +1078,7 @@ class Desks:
         link = self._link(held.pc)
         self._sessions.pop(held.pc, None)
         await asyncio.to_thread(self._write_state)
+        self._resync(link)
         async with self._client().post(f"{link.spec.url}/leave", headers=self._headers(link, held.session), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             return answer.status == 200 and bool((await answer.json(content_type=None)).get("left"))
 
@@ -886,20 +1097,7 @@ class Desks:
             reply = await answer.json()
         if "error" in reply:
             raise DeskRefused(f"{held.pc}: {reply['error'].get('message', 'error')}")
-        result = reply.get("result", {})
-        texts: list[str] = []
-        images: list[dict[str, Any]] = []
-        for index, block in enumerate(result.get("content", [])):
-            if block.get("type") == "text":
-                texts.append(str(block.get("text", "")))
-            elif block.get("type") == "image" and isinstance(block.get("data"), str):
-                try:
-                    data = base64.b64decode(block["data"], validate=False)
-                except binascii.Error:
-                    continue
-                path = await asyncio.to_thread(self._kept, "shots", f"{held.pc}-{tool}-{now_ms()}-{index}.png", data)
-                images.append({"file": str(path), "bytes": len(data)})
-        return {"pc": held.pc, "text": "\n".join(texts), "images": images, "is_error": result.get("isError") is True}
+        return await self._answered(held.pc, tool, reply.get("result", {}))
 
     async def viewer(self, pc: str, verb: str) -> dict[str, Any]:
         """The human's share and holder buttons for a stock PC, which has no RigDesk viewer: Rig's page stands in for it."""
@@ -940,7 +1138,10 @@ class Desks:
             rows.append({"name": name, "client": link.spec.client, "url": link.spec.url, "stock": link.spec.stock is not None, "state": link.state, "why": link.remote_why or link.why,
                          "down_since_ms": link.down_since_ms, "holder": standing.get("holder") if owner else None,
                          "owner": None if owner is None else {"id": owner.get("agent_id"), "title": owner.get("title"), "graph": owner.get("graph")},
-                         "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id"), "assigned": self.granted(name)})
+                         "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id"), "assigned": self.granted(name),
+                         "mcp": {"allowed": link.spec.mcp, "on": link.mcp_on, "why": link.mcp_why,
+                                 "servers": [{"name": server.name, "key": server.key, "says": server.says, "tools": [tool["name"] for tool in server.tools],
+                                              "since_ms": server.since_ms} for server in link.servers.values()]}})
         return rows
 
     def entries(self) -> tuple[PcEntry, ...]:
