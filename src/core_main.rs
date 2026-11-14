@@ -36,6 +36,31 @@ fn finish_macos_update(result: hbb_common::ResultType<()>) -> Option<CoreMainAct
     }
 }
 
+/// `--mcp [--port N] -- <command>`: an MCP server that speaks over stdin and stdout, put on a loopback port for the
+/// agent API's scan to find. It runs before anything else starts, so it is just the wrapper and its command.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn serve_stdio_mcp() -> i32 {
+    let words: Vec<String> = std::env::args().skip(2).collect();
+    let asked = match rigdesk_agent::wrap::asked(&words) {
+        Ok(asked) => asked,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let runtime = match hbb_common::tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("rustdesk --mcp: {e}");
+            return 1;
+        }
+    };
+    runtime.block_on(rigdesk_agent::wrap::run(asked)).unwrap_or_else(|e| {
+        eprintln!("rustdesk --mcp: {e}");
+        1
+    })
+}
+
 /// shared by flutter and sciter main function
 ///
 /// [Note]
@@ -43,6 +68,10 @@ fn finish_macos_update(result: hbb_common::ResultType<()>) -> Option<CoreMainAct
 /// If it returns [`Some`], the action determines whether to start the UI or report failure.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn core_main() -> Option<CoreMainAction> {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    if std::env::args().nth(1).as_deref() == Some("--mcp") {
+        std::process::exit(serve_stdio_mcp());
+    }
     if !crate::common::global_init() {
         return None;
     }
