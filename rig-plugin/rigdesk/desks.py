@@ -213,6 +213,8 @@ class PcLink:
     mcp_on: bool | None = None
     mcp_why: str | None = None
     syncing: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # What the health watch is asking the PC now, and how long it waits, so a timeout can say what went unanswered.
+    asking: tuple[str, float] = ("GET /health", 15.0)
 
 
 @dataclass
@@ -248,6 +250,14 @@ class PcEntry(TypedDict):
     why: str | None
     assigned: tuple[str, ...]
     held_by: PcHolder | None
+
+
+def failure(failed: BaseException) -> str:
+    """An exception in words. A timeout's own text is usually empty, so it is named as one."""
+    words = str(failed).strip()
+    if isinstance(failed, TimeoutError):
+        return f"timed out ({words})" if words else "timed out"
+    return f"{type(failed).__name__}: {words}" if words else type(failed).__name__
 
 
 def _grants(assigned: tuple[str, ...], agent: str, graph: str) -> bool:
@@ -392,7 +402,7 @@ class Desks:
                 await self._idle_leaves()
                 await self._resend()
             except Exception as failed:  # noqa: BLE001
-                _LOG.warning("rigdesk_settings_unread", f"RigDesk settings could not be read, PCs stay as they are: {type(failed).__name__}: {failed}")
+                _LOG.warning("rigdesk_settings_unread", f"RigDesk settings could not be read, PCs stay as they are: {failure(failed)}")
             await asyncio.sleep(SETTINGS_EVERY_S)
 
     def _reconcile(self, settings: RigdeskSettings) -> None:
@@ -503,7 +513,7 @@ class Desks:
         except TimeoutError:
             state, why = "down", f"no TCP connection within {PROBE_LIMIT_S:.0f} s"
         except OSError as failed:
-            state, why = "down", failed.strerror or f"{type(failed).__name__}: {failed}"
+            state, why = "down", failed.strerror or failure(failed)
         else:
             writer.close()
             state, why = "up", None
@@ -666,8 +676,12 @@ class Desks:
                 raise
             except DeskRefused as refused:
                 why = str(refused)
+            except TimeoutError as failed:
+                asked, limit_s = link.asking
+                said = str(failed).strip()
+                why = f"no answer from the PC's agent API to {asked} in {limit_s:g} s" + (f" ({said})" if said else "")
             except Exception as failed:  # noqa: BLE001
-                why = f"{type(failed).__name__}: {failed}"
+                why = f"{link.asking[0]} failed: {failure(failed)}"
             if link.state != "down":
                 link.down_since_ms = now_ms()
                 _LOG.warning("rigdesk_pc_down", f"RigDesk PC {link.name} is down: {why}", pc=link.name)
@@ -678,6 +692,7 @@ class Desks:
 
     async def _connected(self, link: PcLink) -> None:
         http = self._client()
+        link.asking = ("GET /health", 15.0)
         async with http.get(f"{link.spec.url}/health", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             if answer.status != 200:
                 raise DeskRefused(f"/health answered HTTP {answer.status}" + (": the token is refused" if answer.status == 401 else ""))
@@ -687,7 +702,9 @@ class Desks:
         boot = str(health.get("boot", ""))
         if boot != self._boots.get(link.name):
             await self._rebooted(link.name, boot)
+        link.asking = ("tools/list on /mcp", 15.0)
         await self._listed(link)
+        link.asking = ("GET /events", 10.0)  # the session's connect limit; the stream itself has none
         headers = self._headers(link) | {"Last-Event-ID": str(self._last.get(link.name, 0)), "Accept": "text/event-stream"}
         async with http.get(f"{link.spec.url}/events", headers=headers, timeout=aiohttp.ClientTimeout(total=None, sock_read=None)) as stream:
             if stream.status != 200:
@@ -841,7 +858,7 @@ class Desks:
         try:
             done = await kernel.inject(seat, "interrupt", None, None, None, "interrupt")
         except Exception as failed:  # noqa: BLE001
-            _LOG.warning("rigdesk_stop_failed", f"RigDesk {held.pc}: interrupting {held.graph}/{held.node} failed: {type(failed).__name__}: {failed}", pc=held.pc)
+            _LOG.warning("rigdesk_stop_failed", f"RigDesk {held.pc}: interrupting {held.graph}/{held.node} failed: {failure(failed)}", pc=held.pc)
             return
         if isinstance(done, RefusedOutcome):
             _LOG.warning("rigdesk_stop_refused", f"RigDesk {held.pc}: {held.graph}/{held.node} was not interrupted: {done.rendered}", pc=held.pc)
@@ -851,7 +868,7 @@ class Desks:
         try:
             verdict = await self.host.admit(seat, PluginWords(words, f"rigdesk:{held.pc}", key=f"{held.pc}:{key}", timing=timing, headline=f"RigDesk {held.pc}"))
         except Exception as failed:  # noqa: BLE001
-            _LOG.warning("rigdesk_tell_failed", f"RigDesk {held.pc}: telling {held.graph}/{held.node} failed: {type(failed).__name__}: {failed}", pc=held.pc)
+            _LOG.warning("rigdesk_tell_failed", f"RigDesk {held.pc}: telling {held.graph}/{held.node} failed: {failure(failed)}", pc=held.pc)
             return False
         if isinstance(verdict, RefusedOutcome):
             _LOG.warning("rigdesk_tell_refused", f"RigDesk {held.pc}: {held.graph}/{held.node} was not told: {verdict.rendered}", pc=held.pc)
