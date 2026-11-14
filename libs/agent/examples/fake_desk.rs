@@ -53,7 +53,7 @@ async fn main() -> std::io::Result<()> {
     let port: u16 = args.next().and_then(|p| p.parse().ok()).unwrap_or(0);
     let bearer = args.next().unwrap_or_else(|| "fake".into());
     let shared = Arc::new(Shared::new(Events::new(256)));
-    let api = Api::new(shared.clone(), Arc::new(FakeDesk), Arc::new(Journal::memory()), &bearer, Some(rigdesk_agent::Found::new([port])));
+    let api = Api::new(shared.clone(), Arc::new(FakeDesk), Arc::new(Journal::memory()), &bearer, Some(rigdesk_agent::Found::new([port], true)));
     let bound = api.serve(port).await?;
     println!("listening {bound}");
     let viewer = shared.clone();

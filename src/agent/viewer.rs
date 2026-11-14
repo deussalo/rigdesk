@@ -52,6 +52,14 @@ pub fn request(conn_id: i32, req: AgentRequest) {
         Some(Union::Block(_)) => {
             super::block_agent();
         }
+        Some(Union::Stop(_)) => {
+            super::stop_agent();
+        }
+        Some(Union::Mcp(on)) => {
+            if !super::set_mcp(on) {
+                say(conn_id, "This PC's agent API is off, so it offers no MCP servers");
+            }
+        }
         Some(Union::Unblock(_)) => {
             super::unblock_agent();
         }
@@ -105,6 +113,10 @@ fn state() -> AgentState {
     }
     state.link_open = standing.link_open;
     state.host = crate::common::whoami_hostname();
+    if let Some(found) = super::found() {
+        state.mcp_on = found.on();
+        state.mcp_servers = found.servers().into_iter().map(|s| s.name).collect();
+    }
     state
 }
 
@@ -151,7 +163,8 @@ fn forward() {
                         state.action = Some(action).into();
                         broadcast(state);
                     }
-                    EventKind::Message { .. } | EventKind::Dropped { .. } | EventKind::Reach { .. } | EventKind::Server { .. } => {}
+                    EventKind::Server { .. } | EventKind::Mcp { .. } => broadcast(state()),
+                    EventKind::Message { .. } | EventKind::Dropped { .. } | EventKind::Reach { .. } => {}
                 },
                 Err(RecvError::Lagged(_)) => broadcast(state()),
                 Err(RecvError::Closed) => break,

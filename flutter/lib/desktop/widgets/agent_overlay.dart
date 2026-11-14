@@ -40,8 +40,19 @@ Map<String, AgentBridge> get agentBridges => _bridges;
 
 String _hostOptionKey(FFI ffi) => 'rigdesk-agent-host-${ffi.id}';
 
-Future<void> _ask(FFI ffi, String verb,
+/// One verb to this session's share. A RigDesk PC speaks for itself over the session, so its verbs go there; a stock
+/// PC's go to the agent host set up for it (the rigdesk-bridge Rig runs for that PC).
+Future<void> agentAsk(FFI ffi, String verb,
     {String text = '', Uint8List? png, int display = 0}) async {
+  if (AgentModel.of(ffi.sessionId).fromPc) {
+    await bind.sessionAgentRequest(
+        sessionId: ffi.sessionId,
+        verb: verb,
+        text: text,
+        png: png ?? Uint8List(0),
+        display: display);
+    return;
+  }
   final bridge = _bridges['${ffi.sessionId}'];
   if (bridge == null) {
     showToast('Set up the agent host for this PC first.');
@@ -49,6 +60,10 @@ Future<void> _ask(FFI ffi, String verb,
   }
   await bridge.ask(verb, text: text, png: png, display: display);
 }
+
+Future<void> _ask(FFI ffi, String verb,
+        {String text = '', Uint8List? png, int display = 0}) =>
+    agentAsk(ffi, verb, text: text, png: png, display: display);
 
 /// The agent controls over the remote image: Share with agent, the owner badge, Hand to agent / Take back, Stop,
 /// Block agent, the message box, plus the agent's labelled cursor and its action strip. The agent itself runs in
@@ -90,7 +105,9 @@ class _AgentOverlayState extends State<AgentOverlay> {
     if (mounted) setState(() {});
   }
 
-  bool get _hasHost => _bridges.containsKey('${ffi.sessionId}');
+  bool get _hasHost =>
+      AgentModel.of(ffi.sessionId).fromPc ||
+      _bridges.containsKey('${ffi.sessionId}');
 
   /// A key while the agent holds input takes it back. Ctrl+Alt+Esc is Stop, which the session's key path reports
   /// (onAgentStopKey) whether or not the keyboard is grabbed.
@@ -212,6 +229,25 @@ class _AgentOverlayState extends State<AgentOverlay> {
     );
   }
 
+  /// The PC's own MCP switch: on, the MCP servers running on this PC are offered to the agent that holds the share.
+  Widget _mcpChip(AgentModel agent) {
+    final servers = agent.mcpServers;
+    return Tooltip(
+      message: !agent.mcpOn
+          ? 'MCP is off: the agent sees no MCP server on this PC. Click to turn it on.'
+          : servers.isEmpty
+              ? 'MCP servers running on this PC are offered to the agent; none is running now. Click to turn MCP off.'
+              : 'Offered to the agent: ${servers.join(', ')}. Click to turn MCP off.',
+      child: FilterChip(
+        label: Text(agent.mcpOn && servers.isNotEmpty
+            ? 'MCP · ${servers.length}'
+            : 'MCP'),
+        selected: agent.mcpOn,
+        onSelected: (on) => _ask(ffi, on ? 'mcp_on' : 'mcp_off'),
+      ),
+    );
+  }
+
   Widget _bar(BuildContext context, AgentModel agent) {
     if (!_hasHost) {
       return Material(
@@ -299,6 +335,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
         ),
       ));
     }
+    if (agent.fromPc) items.add(_mcpChip(agent));
     items.add(Tooltip(
       message: 'Agent host settings for this PC',
       child: IconButton(

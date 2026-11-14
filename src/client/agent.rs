@@ -10,14 +10,17 @@ use crate::{
     ui_session_interface::{InvokeUiSession, Session},
 };
 
-/// Build the request for `verb`: share, hand, take_back, block, unblock, revoke, note (with text and an optional
-/// PNG) or frame (a still of display `display`).
+/// Build the request for `verb`: share, hand, take_back, stop, block, unblock, revoke, mcp_on, mcp_off, note (with text
+/// and an optional PNG) or frame (a still of display `display`).
 pub fn request(verb: &str, text: String, png: Vec<u8>, display: i32) -> Option<Message> {
     use agent_request::Union;
     let union = match verb {
         "share" => Union::Share(true),
         "hand" => Union::Hand(true),
         "take_back" => Union::TakeBack(true),
+        "stop" => Union::Stop(true),
+        "mcp_on" => Union::Mcp(true),
+        "mcp_off" => Union::Mcp(false),
         "block" => Union::Block(true),
         "unblock" => Union::Unblock(true),
         "revoke" => Union::Revoke(true),
@@ -66,6 +69,8 @@ pub fn state_json(state: &AgentState) -> String {
         "action": action,
         "note": state.note,
         "frame": frame,
+        "mcp_on": state.mcp_on,
+        "mcp_servers": state.mcp_servers,
     })
     .to_string()
 }

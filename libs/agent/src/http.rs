@@ -464,6 +464,7 @@ async fn journal_holder_changes(mut rx: tokio::sync::broadcast::Receiver<Event>,
                 }
                 EventKind::Revoked { agent_id, reason } => journal.record(&Entry::new(reason, "revoke", "ok", json!({"agent_id": agent_id}))),
                 EventKind::Reach { down } => journal.record(&Entry::new("bridge", "reach", down.map_or("up".into(), |why| format!("down: {why}")), Value::Null)),
+                EventKind::Mcp { on } => journal.record(&Entry::new("human", "mcp", if on { "on" } else { "off" }, Value::Null)),
                 _ => {}
             },
             Err(RecvError::Lagged(missed)) => journal.record(&Entry::new("rigdesk", "journal", format!("missed {missed} events"), Value::Null)),

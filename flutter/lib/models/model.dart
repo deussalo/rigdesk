@@ -28,6 +28,7 @@ import 'package:flutter_hbb/models/desktop_render_texture.dart';
 import 'package:flutter_hbb/models/terminal_model.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/desktop/widgets/agent_overlay.dart';
+import 'package:flutter_hbb/models/agent_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:flutter_hbb/utils/http_service.dart' as http;
 import 'package:tuple/tuple.dart';
@@ -469,6 +470,7 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'screenshot') {
         _handleScreenshot(evt, sessionId, peerId);
       } else if (name == 'agent_state') {
+        AgentModel.of(sessionId).fromPc = true;
         onAgentStateEvent(sessionId, evt['state'] ?? '{}');
       } else if (name == 'agent_stop') {
         final ffi = parent.target;
