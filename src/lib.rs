@@ -1,7 +1,7 @@
 #[cfg(any(test, not(target_os = "linux")))]
 mod audio_resampler;
 mod keyboard;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod agent;
 /// cbindgen:ignore
 pub mod platform;
