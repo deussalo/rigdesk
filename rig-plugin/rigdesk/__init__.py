@@ -37,8 +37,8 @@ DOWN = PluginCode(f"{ID}.pc_down")
 UNSHARED = PluginCode(f"{ID}.no_session")
 
 
-NO_SESSION = ("you own no RigDesk session and no PC is assigned to you: desk/pcs lists the PCs; ask the operator to let you join one with desk/request(pc, why), "
-              "or call desk/join with a share link the human at the PC gives you")
+NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); for another, "
+              "ask the operator with desk/request(pc, why), or call desk/join with a share link the human at the PC gives you. A desk call never joins one by itself")
 
 
 REQUEST_CONFIRMED = Provision("rigdesk.request_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
@@ -210,12 +210,11 @@ def _upstream(tool: str, listed: dict[str, Any]) -> tuple[str, JsonObject, bool]
 
 def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
     async def run(call: Call, given: ToolInput) -> Answer:
-        agent, graph, node, title = _who(call)
+        agent, graph, _, _ = _who(call)
         held = desks.held_by(agent, graph)
+        if held is None:
+            return call.refused(UNSHARED, NO_SESSION)
         try:
-            held = held or await desks.assigned_join(agent, graph, node, title)
-            if held is None:
-                return call.refused(UNSHARED, NO_SESSION)
             return await desks.call(held, tool, dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
             return _refused(call, failed)

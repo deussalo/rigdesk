@@ -130,12 +130,13 @@ Known limits against a RigDesk PC:
 * **Standing grant (stock PCs).** rigdesk keeps who holds one, `"agent:<id>"` or `"graph:<name>"` per PC, in its own
   `grants` doc in Rig's store, and alone writes it: on the RigDesk page, which assigns any agent or every agent in a
   graph, or on the operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
-  link: its first `desk/<tool>` call joins the PC (the plugin mints and claims on the bridge itself), and so does its
-  next call after the bridge or Rig restarts. Stop and Block hold across that rejoin: they are on the agent, not its
-  session, and only the human's unblock lifts them. An agent sharing through a link at the time is not
+  link: `desk/join(pc)` joins the PC (the plugin mints and claims on the bridge itself). A desk call never joins a PC by
+  itself, so a call cannot land on a PC the agent did not name; after its session ends, the agent joins again the same
+  way. Stop and Block hold across a rejoin: they are on the agent, not its session, and only the human's unblock lifts
+  them. An agent sharing through a link at the time is not
   displaced. A change applies at once and does not restart the bridge; taking a grant away ends a session held through
   it. A PC removed from settings, or no longer stock, loses its grants. A session held through the grant ends after
-  5 minutes without a desk call, so other assigned agents can take the PC; its next call rejoins.
+  5 minutes without a desk call, so other assigned agents can take the PC.
 * **A session that ends** without the agent's own `desk/leave` (RigDesk restarts, the human ends the share or shares with
   another agent, an idle leave, the PC leaves Rig's settings) is told to the agent, queued for its next turn rather
   than waking it; Rig's log has it too. While the PC is down, its MCP servers close for the holder and reopen when it is back.
@@ -175,7 +176,7 @@ work), and while blocked it refuses every call.
   servers open for that agent (`mcp` in `GET /x/rigdesk/pcs`: Rig's switch, the PC's, why none, and each server's key,
   words and tools). Opening a
   PC's row takes a screenshot when asked (`POST /x/rigdesk/screenshot {pc}`, through the PC's `/frame`; shown, kept
-  nowhere, journaled on the PC) and, for a stock PC, assigns it to any agent or every agent in a graph, picked by title;
+  nowhere, journaled on the PC; it works while the human has blocked the agent, since Block binds agents, not the operator) and, for a stock PC, assigns it to any agent or every agent in a graph, picked by title;
   each standing grant is listed by the agent's title with its unassign.
 * An agent pin under each owning agent's transcript: its PC, the PC's state and who holds input.
 * `rig status` prints a line for each PC that is down.

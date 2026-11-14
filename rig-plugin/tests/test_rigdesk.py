@@ -153,7 +153,7 @@ def test_an_agent_assigned_two_pcs_names_the_one_it_joins_and_is_never_joined_to
             desks._pcs["back"] = PcLink("back", DeskPc(url="http://127.0.0.1:21122", token_file="/dev/null", stock=stock))
             await desks.assign("deus", "agent:a1")
             await desks.assign("back", "agent:a1")
-            for joining in (desks.assigned_join("a1", "g", "n", "A"), desks.join_assigned("front", "a1", "g", "n", "A")):
+            for joining in (desks.join_assigned("front", "a1", "g", "n", "A"),):
                 try:
                     await joining
                 except DeskRefused as refused:

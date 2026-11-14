@@ -1103,16 +1103,6 @@ class Desks:
         except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
             _LOG.warning("rigdesk_unassign_failed", f"RigDesk {pc}: ending the unassigned session failed: {failed}", pc=pc)
 
-    async def assigned_join(self, agent: str, graph: str, node: str, title: str) -> Held | None:
-        """Joins the one PC this agent is assigned, on any desk call; None with no grant. With several, the agent names one with desk/join(pc)."""
-        match self.assigned_pcs(agent, graph):
-            case ():
-                return None
-            case (only,):
-                return await self.join_assigned(only, agent, graph, node, title)
-            case several:
-                raise DeskRefused(f"you are assigned {', '.join(several)}: name the one you mean with desk/join(pc) first")
-
     async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str) -> Held:
         """The operator accepted this agent's request to join a stock PC: a share link is minted and claimed for it, as the human would."""
         mine = self.held_by(agent, graph)
@@ -1139,7 +1129,7 @@ class Desks:
         return await self.join(minted["link"], agent, graph, node, title, via="assigned")
 
     async def _idle_leaves(self) -> None:
-        """A session held through a standing grant ends after IDLE_LEAVE_MS without a desk call, so other assigned agents can take the PC; the next call rejoins."""
+        """A session held through a standing grant ends after IDLE_LEAVE_MS without a desk call, so other assigned agents can take the PC; it joins again with desk/join(pc)."""
         cutoff = now_ms() - IDLE_LEAVE_MS
         for held in [held for held in self._sessions.values() if held.via == "assigned" and max(held.used_ms, held.since_ms) < cutoff]:
             try:
