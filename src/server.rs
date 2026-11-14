@@ -684,7 +684,7 @@ pub async fn start_server(is_server: bool, no_server: bool) {
             }
         }
         crate::common::set_server_running(true);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         crate::agent::enroll::apply();
         if !cfg!(windows) || crate::is_server() {
             std::thread::spawn(move || {

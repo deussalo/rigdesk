@@ -15,7 +15,7 @@ use rigdesk_agent::{Events, Journal, Minted, Shared, Standing};
 
 mod capture;
 mod desk;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod enroll;
 mod input;
 mod shell;
