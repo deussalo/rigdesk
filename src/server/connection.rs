@@ -1246,7 +1246,7 @@ impl Connection {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             try_stop_record_cursor_pos();
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         crate::agent::viewer::leave(id);
         conn.on_close("End", true).await;
         log::info!("#{} connection loop exited", id);
@@ -2292,7 +2292,7 @@ impl Connection {
                 s.try_add_monitor_service(self.display_idx);
                 s.add_monitor_connection(self.inner.clone(), &noperms, self.display_idx);
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             crate::agent::viewer::join(self.inner.id(), {
                 let mut inner = self.inner.clone();
                 Box::new(move |msg: Arc<Message>| inner.send(msg))
@@ -3206,7 +3206,7 @@ impl Connection {
                         return true;
                     }
                     // A viewer's own input takes the desktop back from the agent before its next action.
-                    #[cfg(target_os = "windows")]
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
                     crate::agent::human_took_over("viewer input");
                     #[cfg(any(target_os = "android", target_os = "ios"))]
                     if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
@@ -3344,7 +3344,7 @@ impl Connection {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
-                    #[cfg(target_os = "windows")]
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
                     crate::agent::human_took_over("viewer input");
                     if self.peer_keyboard_enabled() {
                         if is_enter(&me) {
@@ -4139,7 +4139,7 @@ impl Connection {
                     #[cfg(any(target_os = "android", target_os = "ios"))]
                     log::warn!("Terminal action received but not supported on this platform");
                 }
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
                 Some(message::Union::AgentRequest(request)) => {
                     if self.peer_keyboard_enabled() {
                         crate::agent::viewer::request(self.inner.id(), request);

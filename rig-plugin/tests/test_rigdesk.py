@@ -229,7 +229,7 @@ def test_an_assigned_session_idle_five_minutes_leaves_the_pc_but_a_link_session_
 
     asyncio.run(run())
     assert left == ["deus"]
-    assert "next desk call joins it again" in told[0]
+    assert told == []
 
 
 if __name__ == "__main__":

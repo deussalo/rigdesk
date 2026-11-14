@@ -1,11 +1,15 @@
-//! Per-PC secrets from the install line. The installer, running elevated, writes `enroll.json` beside the installed
-//! binary (under Program Files, where only administrators can write) and restarts the service. The server applies it
-//! once at startup, before it serves IPC, and deletes it. Nothing here logs or prints a secret.
+//! Per-PC secrets from the install line. On Windows the installer, running elevated, writes `enroll.json` beside the
+//! installed binary (under Program Files, where only administrators can write) and restarts the service. On Linux the
+//! server runs as the desktop user, so the file is that user's own, `enroll.json` in the agent directory, 0600; anyone
+//! who can write it can already edit the config beside it. The server applies it once at startup, before it serves
+//! IPC, and deletes it. Nothing here logs or prints a secret.
 //!
 //! The permanent password is otherwise locked (`disable-change-permanent-password`), so this is the only way it
 //! changes: through the install line again.
 
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use base::config::keys;
 use hbb_common::{
@@ -25,6 +29,7 @@ struct Enrollment {
 }
 
 /// The enrollment file of the installed binary, if this process is that binary.
+#[cfg(windows)]
 fn enrollment_file() -> Option<PathBuf> {
     if !crate::is_server() || !crate::platform::is_installed() {
         return None;
@@ -35,6 +40,15 @@ fn enrollment_file() -> Option<PathBuf> {
         return None;
     }
     Some(Path::new(&dir).join("enroll.json"))
+}
+
+/// The enrollment file in the desktop user's agent directory, if this process is the server.
+#[cfg(target_os = "linux")]
+fn enrollment_file() -> Option<PathBuf> {
+    if !crate::is_server() {
+        return None;
+    }
+    Some(super::data_dir()?.join("enroll.json"))
 }
 
 pub fn apply() {
@@ -74,5 +88,14 @@ pub fn apply() {
 fn write_token(token: &str) -> std::io::Result<()> {
     let dir = super::data_dir().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no config dir"))?;
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("api.token"), token.trim())
+    let path = dir.join("api.token");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(&path, token.trim())?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&path, token.trim())
 }

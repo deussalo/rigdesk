@@ -1,4 +1,4 @@
-//! The Windows desktop behind the agent API: the tool catalog, the same as a stock PC's, and the dispatch that runs each
+//! The desktop behind the agent API: the tool catalog, the same as a stock PC's, and the dispatch that runs each
 //! call through capture, input, the clipboard and the user's shell. The share and holder rules sit in front of this in the
 //! `rigdesk-agent` crate; by the time `call` runs, the agent is allowed to act.
 
@@ -8,18 +8,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{capture, input, shell};
 
+#[cfg(target_os = "windows")]
 const SHELL: &str = "Run a PowerShell command on the PC as the signed-in user, never as SYSTEM, and get its output and \
 exit status: the code it exits with, 1 for an error it does not catch, else the last program's exit code. It reads no \
 input, so nothing can wait at a prompt; output is plain text, cut from the middle past 32 KiB.";
 
-pub struct WinDesk {
+#[cfg(target_os = "linux")]
+const SHELL: &str = "Run a command on the PC through the signed-in user's login shell ($SHELL -c, else sh -c), never as \
+root, and get its output and exit status. It reads no input, so nothing can wait at a prompt; what it starts in the \
+background keeps running; output is plain text, cut from the middle past 32 KiB.";
+
+pub struct PcDesk {
     /// When this desk last finished injecting input for the agent (wall-clock ms).
     injected_ms: AtomicU64,
 }
 
-impl WinDesk {
+impl PcDesk {
     pub fn new() -> Self {
-        WinDesk { injected_ms: AtomicU64::new(0) }
+        PcDesk { injected_ms: AtomicU64::new(0) }
     }
 }
 
@@ -27,6 +33,7 @@ impl WinDesk {
 const OWN_INPUT_SLACK_MS: u64 = 500;
 
 /// The wall-clock ms of the session's last mouse or keyboard input, injected or not.
+#[cfg(target_os = "windows")]
 fn last_input_ms() -> Option<u64> {
     use winapi::um::winuser::{GetLastInputInfo, LASTINPUTINFO};
     let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
@@ -38,6 +45,7 @@ fn last_input_ms() -> Option<u64> {
 }
 
 /// How far one wheel notch goes on this PC, from its WheelScrollLines setting.
+#[cfg(target_os = "windows")]
 fn scroll_rate() -> String {
     use winapi::um::winuser::{SystemParametersInfoW, SPI_GETWHEELSCROLLLINES, WHEEL_PAGESCROLL};
     let mut lines: u32 = 0;
@@ -48,6 +56,24 @@ fn scroll_rate() -> String {
         WHEEL_PAGESCROLL => "1 notch is one page on this PC".into(),
         n => format!("1 notch is {n} line{} on this PC; apps that scroll by pixels vary", if n == 1 { "" } else { "s" }),
     }
+}
+
+/// The wall-clock ms of the X session's last mouse or keyboard input, injected or not, from the X server's
+/// screensaver extension. None on Wayland or where the extension is missing: the person at the PC then takes over with
+/// the viewer's Stop or Block, not by moving the mouse.
+#[cfg(target_os = "linux")]
+fn last_input_ms() -> Option<u64> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::screensaver::ConnectionExt;
+    let (conn, screen) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots.get(screen)?.root;
+    let info = conn.screensaver_query_info(root).ok()?.reply().ok()?;
+    Some(rigdesk_agent::now_ms().saturating_sub(info.ms_since_user_input as u64))
+}
+
+#[cfg(target_os = "linux")]
+fn scroll_rate() -> String {
+    "1 notch is 3 lines in most Linux apps; apps that scroll by pixels vary".into()
 }
 
 /// What a scroll did, in notches, with how far a notch goes.
@@ -72,7 +98,7 @@ fn ok(words: impl Into<String>) -> Result<Vec<Content>, String> {
     Ok(vec![Content::Text(words.into())])
 }
 
-impl Desk for WinDesk {
+impl Desk for PcDesk {
     fn tools(&self) -> Vec<ToolSpec> {
         let obj = |props: Value, required: &[&str]| json!({"type": "object", "properties": props, "required": required});
         let xy = json!({"x": {"type": "integer"}, "y": {"type": "integer"}});
@@ -118,7 +144,7 @@ impl Desk for WinDesk {
     }
 }
 
-impl WinDesk {
+impl PcDesk {
     fn run(&self, tool: &str, args: &Value) -> Result<Vec<Content>, String> {
         match tool {
             "screenshot" => {

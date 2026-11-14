@@ -17,6 +17,8 @@
 //!        screenshot on demand; journaled
 //!   GET  /health           - liveness, this process's boot id and the current standing
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
+//!   GET  /servers          - the MCP servers found on the PC while an agent is connected, and whether MCP is on
+//!   POST /servers/<name>/mcp - MCP to that server, forwarded to its loopback port; X-Desk-Session as for /mcp
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -36,6 +38,7 @@ use tokio::sync::mpsc;
 
 use crate::desk::Desk;
 use crate::events::{Event, EventKind};
+use crate::found::Found;
 use crate::journal::{Entry, Journal};
 use crate::mcp::Mcp;
 use crate::session::{Owner, Shared};
@@ -50,6 +53,7 @@ pub struct Api {
     /// Fresh each start: event ids and sessions do not outlive the process, so a client that sees a new boot starts over.
     boot: String,
     viewer_routes: bool,
+    found: Option<Arc<Found>>,
 }
 
 fn full(bytes: impl Into<Bytes>) -> Body {
@@ -69,17 +73,18 @@ fn text(status: StatusCode, body: &str) -> Response<Body> {
 }
 
 impl Api {
-    pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
+    /// `found`, where given, offers the MCP servers running on the PC to the agent; a bridge to a stock PC has none.
+    pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, found })
     }
 
     /// As `new`, plus the `/viewer/*` routes: the human's share and holder buttons, for a host with no RigDesk viewer.
     pub fn hosted(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, found: None })
     }
 
     fn bearer_ok(&self, request: &Request<Incoming>) -> bool {
@@ -98,6 +103,9 @@ impl Api {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         let bound = listener.local_addr()?.port();
         tokio::spawn(journal_holder_changes(self.shared.events.subscribe(), self.journal.clone()));
+        if let Some(found) = &self.found {
+            tokio::spawn(found.clone().watch(self.shared.clone()));
+        }
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else { continue };
@@ -131,6 +139,14 @@ impl Api {
             }
             ("GET", "/events") => self.events(request),
             ("GET", "/frame") => self.frame(request).await,
+            ("GET", "/servers") => match &self.found {
+                Some(found) => json_response(StatusCode::OK, &json!({"on": found.on(), "servers": found.servers()})),
+                None => json_response(StatusCode::OK, &json!({"on": false, "servers": [], "why": "this PC's RigDesk does not offer MCP servers"})),
+            },
+            ("POST", p) if p.starts_with("/servers/") && p.ends_with("/mcp") => {
+                let name = p.trim_start_matches("/servers/").trim_end_matches("/mcp").to_string();
+                self.forward(request, &name).await
+            }
             ("POST", "/debug/mint") if std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
                 let minted = self.shared.mint();
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
@@ -171,6 +187,69 @@ impl Api {
 
     fn session_token<'a>(&self, request: &'a Request<Incoming>) -> Option<&'a str> {
         request.headers().get("x-desk-session").and_then(|v| v.to_str().ok())
+    }
+
+    /// One MCP message to a server on the PC, under the holder and Block rules: a tool call is an action, so it waits
+    /// for the person at the PC as typing does; the rest (initialize, listing) is a read.
+    async fn forward(self: Arc<Self>, request: Request<Incoming>, name: &str) -> Response<Body> {
+        let Some(found) = self.found.clone() else {
+            return text(StatusCode::NOT_FOUND, "this PC's RigDesk does not offer MCP servers");
+        };
+        if !found.on() {
+            return text(StatusCode::FORBIDDEN, "MCP is off on this PC: screen, input and shell are still on");
+        }
+        let Some(server) = found.get(name) else {
+            let have: Vec<String> = found.servers().into_iter().map(|s| s.name).collect();
+            return text(StatusCode::NOT_FOUND, &format!("no MCP server {name} on this PC now; found: {}", if have.is_empty() { "none".into() } else { have.join(", ") }));
+        };
+        let Some(token) = self.session_token(&request).map(str::to_string) else {
+            return text(StatusCode::UNAUTHORIZED, &crate::session::Refusal::NoSession.words());
+        };
+        let passed: Vec<(String, String)> = ["mcp-session-id", "mcp-protocol-version", "last-event-id"]
+            .iter()
+            .filter_map(|h| request.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.to_string())))
+            .collect();
+        let Ok(body) = request.into_body().collect().await.map(|b| b.to_bytes()) else {
+            return text(StatusCode::BAD_REQUEST, "the request body could not be read");
+        };
+        let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let method = message.get("method").and_then(Value::as_str).unwrap_or("").to_string();
+        let tool = message.pointer("/params/name").and_then(Value::as_str).unwrap_or("").to_string();
+        let what = if tool.is_empty() { format!("mcp {name} {method}") } else { format!("mcp {name}/{tool}") };
+        let owner = match self.mcp.admit(&token, method != "tools/call", &what) {
+            Ok(owner) => owner,
+            Err(words) => {
+                return match message.get("id") {
+                    Some(id) if method == "tools/call" => json_response(StatusCode::OK, &json!({"jsonrpc": "2.0", "id": id, "result": crate::mcp::tool_error(&words)})),
+                    _ => text(StatusCode::FORBIDDEN, &words),
+                };
+            }
+        };
+        let headers: Vec<(&str, &str)> = passed.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        let answered = tokio::time::timeout(crate::found::CALL_WAIT, crate::found::post(server.port, &server.path, &headers, &body)).await;
+        let answer = match answered {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(why)) => {
+                self.journal.record(&Entry::new(owner.who(), &what, format!("error: {why}"), Value::Null));
+                return text(StatusCode::BAD_GATEWAY, &format!("MCP server {name} on this PC did not answer: {why}"));
+            }
+            Err(_) => {
+                self.journal.record(&Entry::new(owner.who(), &what, "timed out", Value::Null));
+                return text(StatusCode::GATEWAY_TIMEOUT, &format!("MCP server {name} on this PC gave no answer within {} s", crate::found::CALL_WAIT.as_secs()));
+            }
+        };
+        if method == "tools/call" {
+            let failed = answer.status != 200 || answer.json_rpc().map_or(true, |r| r.get("error").is_some() || r.pointer("/result/isError") == Some(&Value::Bool(true)));
+            self.journal.record(&Entry::new(owner.who(), &what, if failed { "failed" } else { "ok" }, json!({"args": message.pointer("/params/arguments")})));
+            self.shared.events.transient(EventKind::Action { agent_title: owner.title.clone(), tool: format!("{name}/{tool}"), summary: what.clone(), ok: !failed, x: None, y: None });
+        }
+        let mut reply = Response::builder().status(answer.status);
+        for keep in ["content-type", "mcp-session-id"] {
+            if let Some(value) = answer.header(keep) {
+                reply = reply.header(keep, value);
+            }
+        }
+        reply.body(full(answer.body)).unwrap_or_else(|_| text(StatusCode::BAD_GATEWAY, "the server's answer could not be passed on"))
     }
 
     async fn note(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
@@ -428,7 +507,7 @@ mod tests {
     async fn a_block_from_the_viewer_is_readable_in_the_log() {
         let dir = std::env::temp_dir().join(format!("rigdesk-http-{}", rand::random::<u32>()));
         let shared = Arc::new(Shared::new(Events::new(64)));
-        let api = Api::new(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::open(dir.join("a.jsonl"), 1 << 20)), "b");
+        let api = Api::new(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::open(dir.join("a.jsonl"), 1 << 20)), "b", None);
         let port = api.serve(0).await.unwrap();
         let minted = shared.mint();
         let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
@@ -450,7 +529,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn after_leave_the_session_token_is_refused() {
         let shared = Arc::new(Shared::new(Events::new(64)));
-        let api = Api::new(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::memory()), "b");
+        let api = Api::new(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
         let port = api.serve(0).await.unwrap();
         let minted = shared.mint();
         let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});

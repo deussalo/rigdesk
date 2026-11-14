@@ -83,25 +83,9 @@ impl Mcp {
             return reply(id, tool_error(&crate::session::Refusal::NoSession.words()));
         };
         let read_only = self.desk.tools().iter().find(|t| t.name == name).map_or(false, |t| t.read_only);
-        if !read_only {
-            let standing = self.shared.standing();
-            if let (Some(Holder::Agent), Some(since)) = (standing.holder, standing.since_ms) {
-                if self.desk.local_input_after(since) {
-                    self.shared.human_input("local input");
-                }
-            }
-        }
-        let owner = match self.shared.admit(token, read_only) {
+        let owner = match self.admit(token, read_only, &format!("call {name}")) {
             Ok(owner) => owner,
-            Err(refusal) => {
-                self.journal.record(&Entry::new(
-                    self.shared.owner_of(token).map(|o| o.who()).unwrap_or_else(|_| "unknown agent".into()),
-                    format!("call {name}"),
-                    "refused",
-                    json!({"reason": refusal.words()}),
-                ));
-                return reply(id, tool_error(&refusal.words()));
-            }
+            Err(words) => return reply(id, tool_error(&words)),
         };
         let (outcome, iserror, result) = match self.desk.call(name, &args) {
             Ok(called) => (called.outcome, false, contents(called.contents)),
@@ -117,6 +101,30 @@ impl Mcp {
             y: args.get("y").and_then(Value::as_i64).map(|v| v as i32),
         });
         reply(id, result)
+    }
+}
+
+impl Mcp {
+    /// Whether the session may act now: input the person at the PC made since the agent took it hands it back first,
+    /// then the holder and Block rules. A refusal is journaled as `what` and answered in words.
+    pub fn admit(&self, token: &str, read_only: bool, what: &str) -> Result<crate::session::Owner, String> {
+        if !read_only {
+            let standing = self.shared.standing();
+            if let (Some(Holder::Agent), Some(since)) = (standing.holder, standing.since_ms) {
+                if self.desk.local_input_after(since) {
+                    self.shared.human_input("local input");
+                }
+            }
+        }
+        self.shared.admit(token, read_only).map_err(|refusal| {
+            self.journal.record(&Entry::new(
+                self.shared.owner_of(token).map(|o| o.who()).unwrap_or_else(|_| "unknown agent".into()),
+                what,
+                "refused",
+                json!({"reason": refusal.words()}),
+            ));
+            refusal.words()
+        })
     }
 }
 

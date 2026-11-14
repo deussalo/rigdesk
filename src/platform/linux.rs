@@ -2,6 +2,9 @@ use super::{gtk_sudo, CursorData, ResultType};
 use desktop::Desktop;
 pub use base::platform::linux::*;
 
+mod agent_shell;
+pub use agent_shell::run_shell_as_user;
+
 #[cfg(feature = "drm")]
 pub fn dispatch_wayland_display_probe() {
     use std::ffi::OsStr;

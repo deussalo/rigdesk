@@ -684,7 +684,7 @@ pub async fn start_server(is_server: bool, no_server: bool) {
             }
         }
         crate::common::set_server_running(true);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         crate::agent::enroll::apply();
         if !cfg!(windows) || crate::is_server() {
             std::thread::spawn(move || {
@@ -729,7 +729,7 @@ pub async fn start_server(is_server: bool, no_server: bool) {
         crate::platform::try_kill_broker();
         #[cfg(feature = "hwcodec")]
         scrap::hwcodec::start_check_process();
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         crate::agent::start();
         crate::RendezvousMediator::start_all().await;
     } else {

@@ -152,6 +152,13 @@ Known limits against a RigDesk PC:
   errors as plain text, cut from the middle past 32 KiB; a command over its limit (60 s by default, 600 at most) is
   ended and refused as timed out, with what it printed. The PC's journal keeps each command and its status.
 * `desk/attachment(id)` — an image the human sent with a message.
+* `<pc>.<server>/<tool>` — the MCP servers already running on a RigDesk PC (Blender's, an IDE's), for the agent
+  holding it alone. While an agent holds the PC, its RigDesk finds each MCP server listening on loopback; the plugin
+  opens each under the holder's session (initialize, then tools/list) and tells the holder each one's tools by exact
+  name, and when one goes. They are `hidden`: in no seat's session notice, loadable by name, refused to any agent but
+  the holder. A call goes through the PC under its holder and Block rules, as a desk call does, and is journaled there;
+  a server that forgot its MCP session is opened again once. A PC's `mcp: false` in settings opens none, and turned off
+  closes those open and tells the holder; the person at the PC has a switch of their own. A stock PC, through its bridge, offers none.
 * `desk/leave` — ends the session.
 
 What the human does reaches the owning agent as Rig messages (steered into its turn): taking input
@@ -164,7 +171,9 @@ work), and while blocked it refuses every call.
 
 ## Pages
 
-* `/x/rigdesk/all` (the **RigDesk** tab): each PC, up or down and why, who holds input, and the owning agent. Opening a
+* `/x/rigdesk/all` (the **RigDesk** tab): each PC, up or down and why, who holds input, the owning agent, and its MCP
+  servers open for that agent (`mcp` in `GET /x/rigdesk/pcs`: Rig's switch, the PC's, why none, and each server's key,
+  words and tools). Opening a
   PC's row takes a screenshot when asked (`POST /x/rigdesk/screenshot {pc}`, through the PC's `/frame`; shown, kept
   nowhere, journaled on the PC) and, for a stock PC, assigns it to any agent or every agent in a graph, picked by title;
   each standing grant is listed by the agent's title with its unassign.
