@@ -247,7 +247,7 @@ extern "C"
         return IsWindows10OrGreater();
     }
 
-    HANDLE LaunchProcessWin(LPCWSTR cmd, DWORD dwSessionId, BOOL as_user, BOOL show, DWORD *pDwTokenPid)
+    HANDLE LaunchProcessWin(LPCWSTR cmd, DWORD dwSessionId, BOOL as_user, BOOL show, BOOL hidden_console, DWORD *pDwTokenPid)
     {
         HANDLE hProcess = NULL;
         HANDLE hToken = NULL;
@@ -266,7 +266,9 @@ extern "C"
             wcscpy_s(buf, MAX_PATH, cmd);
             PROCESS_INFORMATION pi;
             LPVOID lpEnvironment = NULL;
-            DWORD dwCreationFlags = DETACHED_PROCESS;
+            // A detached console program's console children each get a console of their own, which Windows 11 opens in
+            // Terminal, visible, and their output goes there rather than to a redirect; a hidden console is shared instead.
+            DWORD dwCreationFlags = hidden_console ? CREATE_NO_WINDOW : DETACHED_PROCESS;
             if (as_user)
             {
 

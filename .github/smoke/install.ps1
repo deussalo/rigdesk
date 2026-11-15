@@ -1,6 +1,7 @@
 # Installer smoke test (plan S3): the install line, minus Tailscale, against the build just made. Checks the service
 # runs at boot start, the secrets reach it without being printed, the direct port is open to the tailnet only, and
-# the agent API answers with the enrolled token.
+# the agent API answers with the enrolled token, and that the service-spawned server (SYSTEM in the user's session)
+# runs the agent's shell as the user with its output, and takes a screenshot.
 $ErrorActionPreference = "Stop"
 function Show-State {
   Write-Host "--- processes"
@@ -24,6 +25,9 @@ $password = "Ci-" + [guid]::NewGuid().ToString("N").Substring(0, 12)
 # Masked so that a leak fails the check below without landing in the log.
 Write-Host "::add-mask::$password"
 Write-Host "::add-mask::$token"
+
+# The service's server reads the machine environment when it starts: the debug mint lets this check claim a session.
+[Environment]::SetEnvironmentVariable("RIGDESK_AGENT_DEBUG_MINT", "1", "Machine")
 
 try {
   $lines = & .\install\install.ps1 -Client ci -SkipTailscale -Password $password -Pin "2468" -AgentToken $token `
@@ -64,4 +68,24 @@ foreach ($i in 1..90) {
 }
 if (-not $up) { Fail "the installed agent API did not answer within 90 s" }
 Write-Host "health: $($health | ConvertTo-Json -Compress)"
+
+$auth = @{ Authorization = "Bearer $token" }
+function Post($path, $body, $headers = $auth) {
+  Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:21119$path" -Headers $headers -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 8 -Compress)
+}
+try { $minted = Post "/debug/mint" @{} } catch { Fail "the service's server has no debug mint: $_" }
+$claim = Post "/claim" @{ grant = $minted.grant; secret = $minted.secret; agent = @{ id = "install-smoke"; title = "Install smoke"; graph = "ci" } }
+$session = $auth + @{ "X-Desk-Session" = $claim.session }
+function Tool($id, $name, $arguments = @{}) {
+  (Post "/mcp" @{ jsonrpc = "2.0"; id = $id; method = "tools/call"; params = @{ name = $name; arguments = $arguments } } $session).result
+}
+$ran = Tool 1 "shell" @{ command = "whoami; cmd /c exit 3" }
+$answer = ($ran.content | Where-Object { $_.type -eq "text" } | Select-Object -First 1).text | ConvertFrom-Json
+if ($ran.isError -or $answer.exit_code -ne 3 -or $answer.output -notmatch "\\") { Fail "the service's shell did not answer whoami and exit 3 as the user: $($ran | ConvertTo-Json -Depth 6 -Compress)" }
+if ($answer.output -match "system") { Fail "the service's shell ran as SYSTEM: $($answer.output)" }
+Write-Host "service shell: $($answer.output.Trim()), exit $($answer.exit_code)"
+$shot = Tool 2 "screenshot"
+$png = $shot.content | Where-Object { $_.type -eq "image" } | Select-Object -First 1
+if ($shot.isError -or $null -eq $png) { Fail "the service's screenshot failed: $(($shot.content | Where-Object { $_.type -eq 'text' }).text)" }
+Write-Host "service screenshot: $($png.data.Length) base64 chars"
 Write-Host "install smoke passed"

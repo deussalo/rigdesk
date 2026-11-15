@@ -3,7 +3,8 @@
 //! The command and `shell::POWERSHELL_WRAPPER` go in a fresh directory in the user's own temp directory, where only the
 //! user, SYSTEM and administrators can look, and run through cmd, which writes their output and errors to one file there
 //! in the order they came. As the user, the app runs it directly; as SYSTEM (the service-spawned `--server`), through the
-//! user's session token. Over its limit, its whole process tree is ended.
+//! user's session token, in a hidden console that PowerShell shares, so its output reaches the redirect. Over its limit,
+//! its whole process tree is ended.
 
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
@@ -92,7 +93,7 @@ fn launched_as_user(line: &str, session: u32, limit: Duration) -> ResultType<(i3
         bail!("cannot run the command as the user: its launch line is {} characters, over Windows' {LAUNCH_LINE_MAX} (the user's temp path is too long)", wide.len() - 1);
     }
     let mut token_pid = 0;
-    let handle: HANDLE = unsafe { super::LaunchProcessWin(wide.as_ptr(), session, 1, 0, &mut token_pid) };
+    let handle: HANDLE = unsafe { super::LaunchProcessWin(wide.as_ptr(), session, 1, 0, 1, &mut token_pid) };
     if handle.is_null() {
         bail!("cannot run the command as the user (session {session}): {}", std::io::Error::last_os_error());
     }
