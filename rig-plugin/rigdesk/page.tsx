@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { ALL_SPACE, get_agent_settings, get_graph_cards, get_graphs, patch_agent_settings } from '@rig/contract'
-import { Action, agoOf, AppTab, Board, BoardBar, BoardFacts, BoardForm, BoardNew, BoardPart, BoardProblems, BoardRow, BoardRows, contribution, editSettings, Field, Headed, href, lastOf, Link, Mark,
+import { Action, agoOf, Board, BoardBar, BoardFacts, BoardForm, BoardNew, BoardPart, BoardProblems, BoardRow, BoardRows, contribution, editSettings, Field, Headed, href, lastOf, Link, Mark, MenuRow,
   objectOf, Quiet, REREAD_MS, Refusal, store as core, tell, Text, Toggle, told, useAsked, useNow, useRememberedFold, withPath, type BoardColumns, type Fact, type Ink, type Refused } from '@rig/host'
 import css from './rigdesk.module.css'
 
@@ -68,7 +68,7 @@ const copied = (what: string, text: string): void => {
 }
 
 export function RigdeskTab(): ReactNode {
-  return <AppTab plugin="rigdesk" path="all" label="RigDesk" icon="bento" />
+  return <MenuRow plugin="rigdesk" path="all" label="RigDesk" icon="bento" />
 }
 
 function usePcs(): PcsView | Refused | null {
