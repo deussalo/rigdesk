@@ -390,8 +390,18 @@ impl Api {
                         return;
                     }
                 }
+                let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + KEEP_ALIVE, KEEP_ALIVE);
                 loop {
-                    match rx.recv().await {
+                    let received = tokio::select! {
+                        received = rx.recv() => received,
+                        _ = beat.tick() => {
+                            if tx.send(Ok(hyper::body::Frame::data(Bytes::from_static(b": keep-alive\n\n")))).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                    };
+                    match received {
                         Ok(event) if event.id != 0 && event.id <= sent => continue,
                         Ok(event) => {
                             sent = sent.max(event.id);
@@ -456,6 +466,10 @@ impl Api {
         json_response(StatusCode::OK, &json!({"cleared": cleared}))
     }
 }
+
+// A proxy in front of the API (tailscale serve) keeps the reader's connection open after this process dies; a reader
+// that hears nothing for a few beats knows the stream is gone.
+const KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn sse(event: &Event) -> hyper::body::Frame<Bytes> {
     let data = serde_json::to_string(event).unwrap_or_default();
