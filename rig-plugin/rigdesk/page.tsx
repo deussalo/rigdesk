@@ -113,7 +113,7 @@ const openDesk = async (graph: string, agent: string): Promise<Refused | null> =
   const servers = objectOf(read.value.config['mcp_servers']) ?? null
   if (servers?.[DESK_SERVER] === 'server') return null
   const saved = await core.post({ route: patch_agent_settings, params: { name: graph, agent_id: agent },
-    body: { settings: { mcp_servers: { ...servers, [DESK_SERVER]: 'server' } }, expected: { mcp_servers: servers } } })
+    body: { settings: { mcp_servers: { ...servers, [DESK_SERVER]: 'server' } }, expected: { mcp_servers: servers }, request_id: crypto.randomUUID() } })
   return saved.ok ? null : told('assigned, but desk not opened for it', saved.refused)
 }
 

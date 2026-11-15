@@ -178,7 +178,7 @@ work), and while blocked it refuses every call.
   PC's row takes a screenshot when asked (`POST /x/rigdesk/screenshot {pc}`, through the PC's `/frame`; shown, kept
   nowhere, journaled on the PC; it works while the human has blocked the agent, since Block binds agents, not the operator) and, for a stock PC, assigns it to any agent or every agent in a graph, picked by title;
   each standing grant is listed by the agent's title with its unassign.
-* An agent pin under each owning agent's transcript: its PC, the PC's state and who holds input.
+* A row among each owning agent's holds, beside its shell and sub-agents: its PC, the PC's state or who holds input, and how long it has been joined; the row opens RigDesk.
 * `rig status` prints a line for each PC that is down.
 
 ## Testing off Windows
