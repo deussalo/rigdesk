@@ -35,6 +35,7 @@ RETRY_S = (1.0, 2.0, 5.0, 10.0, 30.0)
 SETTINGS_EVERY_S = 5.0
 IDLE_LEAVE_MS = 5 * 60_000
 CALL_LIMIT_S = 120.0
+EVENTS_SILENT_S = 45.0
 SHELL_LIMIT_S = 600
 
 
@@ -704,9 +705,10 @@ class Desks:
             await self._rebooted(link.name, boot)
         link.asking = ("tools/list on /mcp", 15.0)
         await self._listed(link)
-        link.asking = ("GET /events", 10.0)  # the session's connect limit; the stream itself has none
+        # The agent API beats every 15 s, so a stream silent for three beats is dead even when a proxy keeps the socket open.
+        link.asking = ("GET /events", EVENTS_SILENT_S)
         headers = self._headers(link) | {"Last-Event-ID": str(self._last.get(link.name, 0)), "Accept": "text/event-stream"}
-        async with http.get(f"{link.spec.url}/events", headers=headers, timeout=aiohttp.ClientTimeout(total=None, sock_read=None)) as stream:
+        async with http.get(f"{link.spec.url}/events", headers=headers, timeout=aiohttp.ClientTimeout(total=None, sock_read=EVENTS_SILENT_S)) as stream:
             if stream.status != 200:
                 raise DeskRefused(f"/events answered HTTP {stream.status}")
             link.state, link.why, link.down_since_ms = "up", None, None
