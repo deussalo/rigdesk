@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../common.dart' show ColorThemeExtension, isMacOS, isWindows;
+import '../common.dart' show ColorThemeExtension;
 import '../desktop/widgets/tabbar_widget.dart' show TabbarTheme;
 
 /// Rig's look: the tokens of Rig's web/src/ui/theme.css, named as there, and
@@ -45,15 +45,6 @@ class RigTheme {
   static const accent50 = Color(0x77BB7744);
   static const accent80 = Color(0xAABB7744);
 
-  /// The platform's own monospace; no font is bundled. A family the platform
-  /// lacks is not skipped for the next one in the list on every engine, so the
-  /// first one named is the one this platform has.
-  static final font = isWindows
-      ? 'Consolas'
-      : isMacOS
-          ? 'Menlo'
-          : 'monospace';
-  static const fontFallback = ['Consolas', 'Menlo', 'monospace'];
   static const fontXs = 10.0;
   static const fontSm = 12.0;
   static const fontMd = 16.0;
@@ -82,8 +73,6 @@ class RigTheme {
           labelSmall: size(t.labelSmall, fontXs),
         )
         .apply(
-          fontFamily: font,
-          fontFamilyFallback: fontFallback,
           bodyColor: text,
           displayColor: text,
         );
