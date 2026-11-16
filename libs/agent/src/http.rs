@@ -19,6 +19,9 @@
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 //!   GET  /servers          - the MCP servers found on the PC while an agent is connected, and whether MCP is on
 //!   POST /servers/<name>/mcp - MCP to that server, forwarded to its loopback port; X-Desk-Session as for /mcp
+//!   POST /shell {agent, command, timeout_s, as, background} or {agent, job} - the management lane (see `manage`): no
+//!        session, admitted by the PC's agent-shell switch and the human's Block on that agent; only where the host offers it
+//!   GET  /samples?after=ID - the PC's health samples after ID (see `health`); only where the host offers them
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -39,7 +42,9 @@ use tokio::sync::mpsc;
 use crate::desk::Desk;
 use crate::events::{Event, EventKind};
 use crate::found::Found;
+use crate::health::Collector;
 use crate::journal::{Entry, Journal};
+use crate::manage::Lane;
 use crate::mcp::Mcp;
 use crate::session::{Owner, Shared};
 
@@ -54,6 +59,8 @@ pub struct Api {
     boot: String,
     viewer_routes: bool,
     found: Option<Arc<Found>>,
+    lane: std::sync::OnceLock<Arc<Lane>>,
+    collector: std::sync::OnceLock<Arc<Collector>>,
 }
 
 fn full(bytes: impl Into<Bytes>) -> Body {
@@ -84,14 +91,22 @@ impl Api {
     pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, found })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, found, lane: Default::default(), collector: Default::default() })
     }
 
     /// As `new`, plus the `/viewer/*` routes: the human's share and holder buttons, for a host with no RigDesk viewer.
     pub fn hosted(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, found: None })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, found: None, lane: Default::default(), collector: Default::default() })
+    }
+
+    /// Offers the management lane at /shell and, with a collector, health samples at /samples. Before `serve`, once.
+    pub fn manage(&self, lane: Arc<Lane>, collector: Option<Arc<Collector>>) {
+        let _ = self.lane.set(lane);
+        if let Some(collector) = collector {
+            let _ = self.collector.set(collector);
+        }
     }
 
     fn bearer_ok(&self, request: &Request<Incoming>) -> bool {
@@ -112,6 +127,12 @@ impl Api {
         tokio::spawn(journal_holder_changes(self.shared.events.subscribe(), self.journal.clone()));
         if let Some(found) = &self.found {
             tokio::spawn(found.clone().watch(self.shared.clone()));
+        }
+        if let Some(lane) = self.lane.get() {
+            tokio::spawn(crate::manage::sweep_forever(lane.clone()));
+        }
+        if let Some(collector) = self.collector.get() {
+            tokio::spawn(collector.clone().run_forever());
         }
         tokio::spawn(async move {
             loop {
@@ -145,6 +166,14 @@ impl Api {
                 json_response(StatusCode::OK, &json!({"entries": self.journal.tail(n)}))
             }
             ("GET", "/events") => self.events(request),
+            ("POST", "/shell") => self.shell(request).await,
+            ("GET", "/samples") => match self.collector.get() {
+                Some(collector) => {
+                    let after = query_number(request.uri().query(), "after").unwrap_or(0) as u64;
+                    json_response(StatusCode::OK, &json!({"samples": collector.samples.after(after)}))
+                }
+                None => text(StatusCode::NOT_FOUND, "this PC's RigDesk takes no health samples"),
+            },
             ("GET", "/frame") => self.frame(request).await,
             ("GET", "/servers") => match &self.found {
                 Some(found) => json_response(StatusCode::OK, &json!({"on": found.on(), "servers": found.servers()})),
@@ -341,6 +370,29 @@ impl Api {
                 self.journal.record(&Entry::new(owner.who(), "claim", "refused", json!({"reason": refusal.words()})));
                 json_response(StatusCode::FORBIDDEN, &json!({"error": refusal.words()}))
             }
+        }
+    }
+
+    async fn shell(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+        let Some(lane) = self.lane.get().cloned() else {
+            return json_response(StatusCode::NOT_FOUND, &json!({"error": "this PC's RigDesk has no agent shell lane", "code": "no_lane"}));
+        };
+        let Some(body) = Self::body_json(request).await else {
+            return json_response(StatusCode::BAD_REQUEST, &json!({"error": "shell wants a JSON body", "code": "bad_request"}));
+        };
+        let (owner, asked) = match crate::manage::request(&body) {
+            Ok(read) => read,
+            Err(why) => return json_response(StatusCode::BAD_REQUEST, &json!({"error": why, "code": "bad_request"})),
+        };
+        // A command blocks for as long as it runs, so it must not run on the reactor.
+        let served = tokio::task::spawn_blocking(move || lane.serve(&owner, asked)).await;
+        match served {
+            Ok(Ok(answer)) => json_response(StatusCode::OK, &json!(answer)),
+            Ok(Err(refused)) => {
+                let status = if matches!(refused, crate::manage::Refused::NoJob(_)) { StatusCode::NOT_FOUND } else { StatusCode::FORBIDDEN };
+                json_response(status, &json!({"error": refused.words(), "code": refused.code()}))
+            }
+            Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": format!("the shell handler panicked: {e}"), "code": "panicked"})),
         }
     }
 

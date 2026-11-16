@@ -121,6 +121,11 @@ pub fn answer(printed: &Printed, ended: Ended) -> Result<Called, String> {
     }
 }
 
+/// The output the agent reads, cut to `OUTPUT_CAP`, and how many bytes were cut.
+pub fn output(printed: &Printed) -> (String, usize) {
+    capped(&plain(&printed.head), printed.dropped, &plain(&printed.tail), OUTPUT_CAP)
+}
+
 /// The text a terminal would show of `raw`, without its colour, cursor and title codes: escape sequences (CSI, OSC, and
 /// two-byte ones) and other control characters go, tabs and line ends stay, and a carriage return that redraws a line
 /// keeps only what was drawn last.

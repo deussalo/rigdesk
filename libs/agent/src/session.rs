@@ -200,6 +200,12 @@ impl Shared {
         }
     }
 
+    /// When the human blocked this agent, if they have. A block outlives its session, so it holds for the agent's
+    /// commands on the management lane too, which need no session.
+    pub fn blocked_since(&self, agent_id: &str) -> Option<u64> {
+        self.state.lock().unwrap().block.as_ref().filter(|b| b.agent_id == agent_id).map(|b| b.since_ms)
+    }
+
     /// Whether the session's holder may run a call now: a block stops everything, a human using the PC stops actions.
     pub fn admit(&self, token: &str, read_only: bool) -> Result<Owner, Refusal> {
         let mut state = self.state.lock().unwrap();

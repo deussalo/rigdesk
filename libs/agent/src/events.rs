@@ -26,6 +26,10 @@ pub enum EventKind {
     Server { name: String, found: bool, says: String, why: Option<String> },
     /// The PC's own MCP switch was turned on or off by the person there.
     Mcp { on: bool },
+    /// A command on the management lane was refused, ran, started as a job, or its job ended; `command` is its start.
+    Shell { owner: Owner, run_as: Option<crate::manage::RunAs>, command: String, outcome: String, took_ms: Option<u64>, job: Option<String> },
+    /// The PC took a health sample, read at GET /samples.
+    Health { sample: u64 },
 }
 
 #[derive(Clone, Debug, Serialize)]
