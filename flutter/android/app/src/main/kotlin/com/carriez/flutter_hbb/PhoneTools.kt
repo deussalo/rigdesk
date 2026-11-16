@@ -68,7 +68,7 @@ class PhoneMcp(private val ctx: Context) {
                     waitMs = 1_000L
                     while (!closed) {
                         val s = server.accept()
-                        if (!reachable(s.localAddress)) { s.close(); continue }
+                        if (!reachable(s.localAddress) || !reachable(s.inetAddress)) { s.close(); continue }
                         calls.execute { answer(s) }
                     }
                 }
@@ -81,7 +81,11 @@ class PhoneMcp(private val ctx: Context) {
         }
     }
 
-    /** Tailscale's addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48) and loopback, not the Wi-Fi or mobile network. */
+    /**
+     * Tailscale's addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48) and loopback, checked at both ends: a carrier may give
+     * the phone a 100.64/10 address of its own, and a LAN peer can address the tailnet IP over Wi-Fi, but Tailscale routes
+     * replies to a tailnet sender through its tunnel.
+     */
     private fun reachable(at: InetAddress): Boolean {
         if (at.isLoopbackAddress) return true
         val b = at.address
@@ -179,7 +183,7 @@ class PhoneMcp(private val ctx: Context) {
         val params = msg.optJSONObject("params") ?: JSONObject()
         val result = when (val method = msg.optString("method")) {
             "initialize" -> JSONObject()
-                .put("protocolVersion", params.optString("protocolVersion").ifEmpty { PROTOCOL_VERSION })
+                .put("protocolVersion", params.optString("protocolVersion").takeIf { it in PROTOCOL_VERSIONS } ?: PROTOCOL_VERSIONS[0])
                 .put("capabilities", JSONObject().put("tools", JSONObject()))
                 .put("serverInfo", JSONObject().put("name", "phone").put("version", tools.version))
                 .put("instructions", "The phone's native Android tools, beside desk/* which sees and drives its screen.")
@@ -197,7 +201,7 @@ class PhoneMcp(private val ctx: Context) {
     companion object {
         private const val TAG = "PhoneMcp"
         const val PORT = 8790
-        private const val PROTOCOL_VERSION = "2025-06-18"
+        private val PROTOCOL_VERSIONS = listOf("2025-06-18", "2025-03-26", "2024-11-05")
         private const val MAX_HEAD = 16 * 1024
         private const val MAX_BODY = 1024 * 1024
     }
@@ -302,12 +306,14 @@ class PhoneTools(private val ctx: Context) {
     private var bubble: TextView? = null
     private val hide = Runnable { removeBubble() }
 
-    /** Shown at the top of the screen over other apps, else as a notification. */
+    /** Shown at the top of the screen over other apps, else as a notification: whether it was shown. */
     private fun show(text: String): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(ctx)) {
             notify(text)
             return false
         }
+        val done = java.util.concurrent.CountDownLatch(1)
+        var shown = false // set on the main thread before done counts down
         main.post {
             main.removeCallbacks(hide)
             val view = bubble ?: TextView(ctx).also { v ->
@@ -330,13 +336,17 @@ class PhoneTools(private val ctx: Context) {
                 } catch (e: Exception) {
                     Log.w(TAG, "bubble: $e")
                     notify(text)
+                    done.countDown()
                     return@post
                 }
             }
             view.text = text
             main.postDelayed(hide, (3_000L + 60L * text.length).coerceAtMost(15_000L))
+            shown = true
+            done.countDown()
         }
-        return true
+        if (!done.await(3, java.util.concurrent.TimeUnit.SECONDS)) throw Refusal("the phone's main thread did not show the text within 3 s")
+        return shown
     }
 
     private fun windows() = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
