@@ -2,6 +2,7 @@ package com.carriez.flutter_hbb
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityOptions
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -151,12 +152,27 @@ class PhoneMessages(private val ctx: Context) {
                 ?: throw Refusal("no action $title on it: ${actions.joinToString(", ") { it.title }.ifEmpty { "it has none" }}")).actionIntent
         }
         try {
-            intent.send()
+            sendLending(intent)
         } catch (e: PendingIntent.CanceledException) {
             throw Refusal("${label(n.packageName)} withdrew that action: list the notifications again")
         }
         if (title.isEmpty() && (n.notification.flags and Notification.FLAG_AUTO_CANCEL) != 0) listener().cancelNotification(n.key)
         return if (title.isEmpty()) "opened ${label(n.packageName)}'s notification" else "pressed $title on ${label(n.packageName)}'s notification"
+    }
+
+    /**
+     * Sends with RigDesk's own right to start an activity from the background (it holds the overlay permission). Since
+     * Android 14 a sender targeting 34+ lends none unless it says so, and Android then drops the start without an error.
+     */
+    private fun sendLending(intent: PendingIntent) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            intent.send()
+            return
+        }
+        val mode = if (Build.VERSION.SDK_INT >= 36) ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+            else ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+        val options = ActivityOptions.makeBasic().setPendingIntentBackgroundActivityStartMode(mode).toBundle()
+        intent.send(ctx, 0, null, null, null, null, options)
     }
 
     private fun dismiss(key: String): String {
@@ -201,7 +217,8 @@ class PhoneMessages(private val ctx: Context) {
             val flags = PendingIntent.FLAG_ONE_SHOT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
             val sent = ArrayList((0 until parts.size).map { PendingIntent.getBroadcast(ctx, it, Intent(action).setPackage(ctx.packageName), flags) })
             sms.sendMultipartTextMessage(to, null, parts, sent, null)
-            if (!left.await(SMS_WAIT_S, TimeUnit.SECONDS)) throw Refusal("sent to $to, but the network confirmed only ${parts.size - left.count} of ${parts.size} parts within $SMS_WAIT_S s")
+            if (!left.await(SMS_WAIT_S, TimeUnit.SECONDS)) throw Refusal("sent to $to, but the network confirmed only ${parts.size - left.count} of ${parts.size} parts within $SMS_WAIT_S s: " +
+                "it may still arrive, so don't send it again unless the person asks")
         } finally {
             ctx.unregisterReceiver(receiver)
         }
