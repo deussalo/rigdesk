@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/common/rigdesk.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:get/get.dart';
@@ -38,7 +39,6 @@ class SettingsPage extends StatefulWidget implements PageShape {
   State<SettingsPage> createState() => _SettingsState();
 }
 
-const url = 'https://rustdesk.com/';
 
 enum KeepScreenOn {
   never,
@@ -903,18 +903,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               onPressed: (context) {
                 showLanguageSettings(gFFI.dialogManager);
               }),
-          SettingsTile(
-            title: Text(translate(
-                Theme.of(context).brightness == Brightness.light
-                    ? 'Light Theme'
-                    : 'Dark Theme')),
-            leading: Icon(Theme.of(context).brightness == Brightness.light
-                ? Icons.dark_mode
-                : Icons.light_mode),
-            onPressed: (context) {
-              showThemeSettings(gFFI.dialogManager);
-            },
-          ),
           if (!disabledSettings)
             SettingsTile.navigation(
               leading: Icon(Icons.keyboard_outlined),
@@ -1061,12 +1049,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           tiles: [
             SettingsTile(
                 onPressed: (context) async {
-                  await launchUrl(Uri.parse(url));
+                  await launchUrl(Uri.parse(kRigDeskSource));
                 },
                 title: Text(translate("Version: ") + version),
                 value: Padding(
                   padding: EdgeInsets.symmetric(vertical: 8),
-                  child: Text('rustdesk.com',
+                  child: Text('source',
                       style: TextStyle(
                         decoration: TextDecoration.underline,
                       )),
@@ -1097,10 +1085,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 ),
                 leading: Icon(Icons.perm_identity)),
             SettingsTile(
-              title: Text(translate("Privacy Statement")),
-              onPressed: (context) =>
-                  launchUrlString('https://rustdesk.com/privacy.html'),
-              leading: Icon(Icons.privacy_tip),
+              title: Text(kBuiltOn),
+              onPressed: (context) => launchUrlString(kRustDeskSite),
+              leading: Icon(Icons.copyright),
             )
           ],
         ),
@@ -1176,52 +1163,27 @@ void showLanguageSettings(OverlayDialogManager dialogManager) async {
   }
 }
 
-void showThemeSettings(OverlayDialogManager dialogManager) async {
-  var themeMode = MyTheme.getThemeModePreference();
-
-  dialogManager.show((setState, close, context) {
-    setTheme(v) {
-      if (themeMode != v) {
-        setState(() {
-          themeMode = v;
-        });
-        MyTheme.changeDarkMode(themeMode);
-        Future.delayed(Duration(milliseconds: 200), close);
-      }
-    }
-
-    final isOptFixed = isOptionFixed(kCommConfKeyTheme);
-    return CustomAlertDialog(
-      content: Column(children: [
-        getRadio(Text(translate('Light')), ThemeMode.light, themeMode,
-            isOptFixed ? null : setTheme),
-        getRadio(Text(translate('Dark')), ThemeMode.dark, themeMode,
-            isOptFixed ? null : setTheme),
-        getRadio(Text(translate('Follow System')), ThemeMode.system, themeMode,
-            isOptFixed ? null : setTheme)
-      ]),
-    );
-  }, backDismiss: true, clickMaskDismiss: true);
-}
-
 void showAbout(OverlayDialogManager dialogManager) {
   dialogManager.show((setState, close, context) {
     return CustomAlertDialog(
       title: Text(translate('About RustDesk')),
       content: Wrap(direction: Axis.vertical, spacing: 12, children: [
         Text('Version: $version'),
-        InkWell(
-            onTap: () async {
-              const url = 'https://rustdesk.com/';
-              await launchUrl(Uri.parse(url));
-            },
-            child: Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text('rustdesk.com',
-                  style: TextStyle(
-                    decoration: TextDecoration.underline,
-                  )),
-            )),
+        for (final (label, link) in [
+          ('source', kRigDeskSource),
+          (kBuiltOn, kRustDeskSite)
+        ])
+          InkWell(
+              onTap: () async {
+                await launchUrl(Uri.parse(link));
+              },
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(label,
+                    style: TextStyle(
+                      decoration: TextDecoration.underline,
+                    )),
+              )),
       ]),
       actions: [],
     );

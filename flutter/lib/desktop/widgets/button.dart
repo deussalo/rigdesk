@@ -66,7 +66,7 @@ class _ButtonState extends State<Button> {
                                 ? widget.borderColor ?? MyTheme.border
                                 : MyTheme.button),
                   ),
-                  borderRadius: BorderRadius.circular(widget.radius ?? 5),
+                  borderRadius: BorderRadius.circular(widget.radius ?? 0),
                 ),
                 child: Text(
                   translate(
@@ -143,7 +143,7 @@ class _FixedWidthButtonState extends State<FixedWidthButton> {
                             ? widget.borderColor ?? MyTheme.border
                             : MyTheme.button),
               ),
-              borderRadius: BorderRadius.circular(widget.radius ?? 5),
+              borderRadius: BorderRadius.circular(widget.radius ?? 0),
             ),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,

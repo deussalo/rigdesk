@@ -105,7 +105,7 @@ class AgentBridge {
       }
     } catch (e) {
       onTrouble('RigDesk agent host: $e');
-      if (verb == 'frame') _emit(note: 'No still of the screen: $e');
+      if (verb == 'frame') _emit(note: 'no still of the screen: $e');
     }
   }
 
