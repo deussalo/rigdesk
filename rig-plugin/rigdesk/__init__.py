@@ -167,7 +167,7 @@ def _shell_words(desks: Desks, entry: PcEntry, agent: str, graph: str) -> str:
         return "none: stock RustDesk runs commands only in a joined session, as its user"
     level = _shell_level(desks, entry["name"], agent, graph)
     switch = entry["shell"]
-    pc_says = ("its RigDesk has no agent shell yet" if switch is None else "its agent shell is on" if switch.get("open")
+    pc_says = ("its RigDesk has no agent shell (RigDesk has one on Windows only)" if switch is None else "its agent shell is on" if switch.get("open")
               else f"{switch.get('words')} ({switch.get('code')})")
     may = {"system": "you may run commands as SYSTEM or as the user", "user": "you may run commands as its signed-in user", None: "you may not run commands there"}[level]
     return f"{may}; {pc_says}"
