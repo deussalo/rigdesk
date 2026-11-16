@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { ALL_SPACE, get_agent_settings, get_graph_cards, get_graphs, patch_agent_settings } from '@rig/contract'
 import { Action, agoOf, Board, BoardBar, BoardFacts, BoardForm, BoardNew, BoardPart, BoardProblems, BoardRow, BoardRows, contribution, editSettings, Field, Headed, href, lastOf, Link, Mark, MenuRow,
-  objectOf, Quiet, REREAD_MS, Refusal, store as core, tell, Text, told, useAsked, useNow, useRememberedFold, withPath, type BoardColumns, type Fact, type Ink, type Refused } from '@rig/host'
+  objectOf, Quiet, REREAD_MS, Refusal, store as core, tell, Text, told, useAsked, useGraphLabel, useNow, useRememberedFold, withPath, type BoardColumns, type Fact, type Ink, type Refused } from '@rig/host'
 import css from './rigdesk.module.css'
 
 const routes = contribution('rigdesk')
@@ -97,11 +97,15 @@ const assigning = (pc: string, grantee: string, granted: boolean) => async (): P
   return done.ok ? null : told(granted ? 'assign failed' : 'unassign failed', done.refused)
 }
 
+/** A grant as the page names it: the agent by its title, a whole graph by its label (the root graph as this machine). */
+const grantLabel = (each: Grant, labelOf: (graph: string) => string): string => (each.agent_id === null && each.graph !== null ? `every agent in ${labelOf(each.graph)}` : each.label)
+
 /** Who holds a standing grant to a stock PC, each a line with its unassign. */
 function Grants({ pc }: { readonly pc: PcRow }): ReactNode {
+  const labelOf = useGraphLabel()
   return pc.assigned.map(each => (
     <BoardBar key={each.grantee} apart={<Action label="unassign" tone="outlined" pending="unassigning…" onInvoke={assigning(pc.name, each.grantee, false)} />}>
-      {each.agent_id !== null && each.graph !== null ? <Link href={href('agent', { graph: each.graph, agent: each.agent_id })}>{each.label}</Link> : <span>{each.label}</span>}
+      {each.agent_id !== null && each.graph !== null ? <Link href={href('agent', { graph: each.graph, agent: each.agent_id })}>{each.label}</Link> : <span>{grantLabel(each, labelOf)}</span>}
     </BoardBar>
   ))
 }
@@ -120,6 +124,7 @@ const openDesk = async (graph: string, agent: string): Promise<Refused | null> =
 /** A standing grant to any agent, or to every agent in a graph, picked by title. */
 function Assign({ pc, forFleet }: { readonly pc: PcRow; readonly forFleet: boolean }): ReactNode {
   const graphs = (lastOf(useAsked(GRAPHS)) ?? []).flatMap(row => (row.type === 'graph' && !row.flow ? [row.name] : []))
+  const labelOf = useGraphLabel()
   const [graph, setGraph] = useState<string | null>(null)
   const chosen = graph ?? graphs[0] ?? null
   const agents = (lastOf(useAsked(chosen === null ? null : { route: get_graph_cards, params: { name: chosen }, query: { space: ALL_SPACE, limit: AGENTS_OFFERED } }))?.cards ?? [])
@@ -136,7 +141,7 @@ function Assign({ pc, forFleet }: { readonly pc: PcRow; readonly forFleet: boole
   if (graphs.length === 0) return <Quiet>no graph to assign it in</Quiet>
   return (
     <BoardForm label={`assign ${pc.name}`} onLeave={() => undefined}>
-      <Field kind="select" label="graph" value={chosen} options={graphs} onChange={value => { setGraph(textOf(value) || null); setAgent(WHOLE_GRAPH) }} />
+      <Field kind="select" label="graph" value={chosen} options={graphs} labels={Object.fromEntries(graphs.map(name => [name, labelOf(name)]))} onChange={value => { setGraph(textOf(value) || null); setAgent(WHOLE_GRAPH) }} />
       <Field kind="select" label="agent" value={picked} options={[WHOLE_GRAPH, ...agents.map(each => each.id)]}
         labels={Object.fromEntries<string>([[WHOLE_GRAPH, 'every agent in the graph'], ...agents.map((each): [string, string] => [each.id, each.label || each.id])])}
         onChange={value => { setAgent(textOf(value)) }}
@@ -233,7 +238,8 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
   const standing = standingOf(pc)
   const ink: Ink = standing === 'blocked' ? 'hold' : INK[pc.state]
   const held = pc.owner === null ? null : <span>held by <OwnerOf owner={pc.owner} />{pc.owned_here ? '' : ' (joined elsewhere)'}</span>
-  const assigned = pc.assigned.map(each => each.label)
+  const labelOf = useGraphLabel()
+  const assigned = pc.assigned.map(each => grantLabel(each, labelOf))
   const servers = pc.mcp?.servers.length ?? 0
   const mcpKnown = pc.state === 'up' && pc.mcp !== undefined && pc.mcp.on !== null
   const facts: readonly Fact[] = [
