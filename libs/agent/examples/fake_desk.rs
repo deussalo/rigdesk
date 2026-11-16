@@ -4,7 +4,8 @@
 //!
 //! It prints `listening <port>`, then reads the viewer's side from stdin, one command a line:
 //! `mint` (prints `link <grant> <secret>`), `hand`, `human`, `block`, `unblock`, `revoke`, `msg <text>` (sent with one image),
-//! `shell on|off` (the PC's agent-shell switch), `pause on|off` (the person's pause), `reboot` (a new boot id), `sample` (a health sample now).
+//! `shell on|off` (the PC's agent-shell switch), `pause on|off` (the person's pause), `reboot` (a new boot id), `sample` (a health sample now),
+//! `join on|off|paused` (the PC's switch for sessions the operator starts from Rig; on at start), `end` (the person at the PC ends that session).
 //!
 //! Its management lane runs commands through `sh` as the user running it. It keeps its journal, jobs and health samples in
 //! `$FAKE_DESK_DIR` (a fresh temp directory if unset), so they outlive a restart, and samples every `$FAKE_DESK_HEALTH_S`
@@ -66,6 +67,16 @@ impl Desk for FakeDesk {
 }
 
 #[cfg(target_os = "linux")]
+struct JoinSwitch(std::sync::Mutex<Result<(), rigdesk_agent::operator::Closed>>);
+
+#[cfg(target_os = "linux")]
+impl rigdesk_agent::operator::Switch for JoinSwitch {
+    fn open(&self) -> Result<(), rigdesk_agent::operator::Closed> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -90,6 +101,8 @@ async fn main() -> std::io::Result<()> {
     let samples = Arc::new(Samples::open(Some(dir.join("health.jsonl"))));
     let collector = Arc::new(Collector { lane: lane.clone(), shared: shared.clone(), samples, script, dir: dir.join("health"), rigdesk: "fake".into(), interval });
     api.manage(lane, Some(collector.clone()));
+    let joins = Arc::new(JoinSwitch(std::sync::Mutex::new(Ok(()))));
+    api.operator_joins(joins.clone());
     let bound = api.serve(port).await?;
     println!("listening {bound}");
     let viewer = shared.clone();
@@ -121,6 +134,15 @@ async fn main() -> std::io::Result<()> {
                     "ok true".into()
                 }
                 "sample" => format!("ok {}", collector.take().id),
+                "join" => {
+                    *joins.0.lock().unwrap() = match rest {
+                        "on" => Ok(()),
+                        "paused" => Err(rigdesk_agent::operator::Closed::Paused),
+                        _ => Err(rigdesk_agent::operator::Closed::Off("the install line turned it off (-AgentJoin off)".into())),
+                    };
+                    format!("ok {rest}")
+                }
+                "end" => format!("ok {}", viewer.operator_owner().map_or(false, |owner| viewer.end_operator(&owner.agent_id))),
                 _ => format!("unknown {verb}"),
             };
             println!("{said}");

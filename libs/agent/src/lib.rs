@@ -10,6 +10,7 @@ pub mod http;
 pub mod journal;
 pub mod manage;
 pub mod mcp;
+pub mod operator;
 pub mod relay;
 pub mod session;
 pub mod shell;

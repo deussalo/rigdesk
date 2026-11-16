@@ -82,6 +82,8 @@ struct Session {
     hands: Hands,
     since_ms: u64,
     last_input_ms: u64,
+    /// Started by Rig on the operator's Accept, not by a share link: the PC's tray names it and offers to end it.
+    operator: bool,
 }
 
 /// The human's Block or Stop, on an agent: it outlives that agent's session, so leaving and joining again (a new link,
@@ -172,11 +174,44 @@ impl Shared {
             self.events.push(EventKind::Revoked { agent_id: previous.owner.agent_id, reason: "the desktop was shared with another agent".into() });
         }
         let token = fresh();
-        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0 });
+        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: false });
         let holder = state.holder().map_or(Holder::Agent, |(holder, _)| holder);
         self.events.push(EventKind::Claimed { owner });
         self.events.push(EventKind::Holder { holder, by: "share".into() });
         Ok(token)
+    }
+
+    /// A session the operator accepted in Rig, with no link: it never replaces an agent holding the session, never
+    /// starts for a blocked agent, and leaves any open link as it is.
+    pub fn join_operator(&self, owner: Owner) -> Result<String, crate::operator::Refused> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(session) = &state.session {
+            return Err(crate::operator::Refused::Held(session.owner.clone()));
+        }
+        if let Some(block) = state.block.as_ref().filter(|b| b.agent_id == owner.agent_id) {
+            return Err(crate::operator::Refused::Blocked { since_ms: block.since_ms });
+        }
+        let token = fresh();
+        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: true });
+        self.events.push(EventKind::Claimed { owner });
+        self.events.push(EventKind::Holder { holder: Holder::Agent, by: "operator".into() });
+        Ok(token)
+    }
+
+    /// The agent holding a session the operator started, if one does.
+    pub fn operator_owner(&self) -> Option<Owner> {
+        self.state.lock().unwrap().session.as_ref().filter(|s| s.operator).map(|s| s.owner.clone())
+    }
+
+    /// The person at the PC ends the operator-started session of `agent_id`; false when that agent holds none.
+    pub fn end_operator(&self, agent_id: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if !state.session.as_ref().map_or(false, |s| s.operator && s.owner.agent_id == agent_id) {
+            return false;
+        }
+        let Some(session) = state.session.take() else { return false };
+        self.events.push(EventKind::Revoked { agent_id: session.owner.agent_id, reason: "the person at the PC ended the session".into() });
+        true
     }
 
     fn held<'a>(state: &'a mut State, token: &str) -> Result<&'a mut Session, Refusal> {
@@ -461,6 +496,26 @@ mod tests {
         let token4 = shared.claim(&back.grant, &back.secret, owner("a1")).unwrap();
         assert!(shared.admit(&token4, false).is_ok());
         assert!(!shared.unblock(), "nothing left to lift");
+    }
+
+    #[test]
+    fn an_operator_join_takes_a_free_desktop_only_and_leaves_an_open_link_alone() {
+        let shared = Shared::new(Events::new(64));
+        let link = shared.mint();
+        let token = shared.join_operator(owner("a1")).unwrap();
+        assert_eq!(shared.admit(&token, false), Ok(owner("a1")));
+        assert_eq!(shared.operator_owner(), Some(owner("a1")));
+        assert_eq!(shared.join_operator(owner("a2")), Err(crate::operator::Refused::Held(owner("a1"))));
+        assert!(!shared.end_operator("a2"));
+        assert!(shared.end_operator("a1"));
+        assert_eq!(shared.admit(&token, true), Err(Refusal::NoSession));
+        let by_link = shared.claim(&link.grant, &link.secret, owner("a2")).unwrap();
+        assert_eq!(shared.operator_owner(), None, "a link session is not the operator's");
+        assert_eq!(shared.join_operator(owner("a1")), Err(crate::operator::Refused::Held(owner("a2"))));
+        assert!(shared.block());
+        assert!(shared.revoke("the agent left"));
+        assert!(matches!(shared.join_operator(owner("a2")), Err(crate::operator::Refused::Blocked { .. })));
+        assert!(shared.admit(&by_link, true).is_err());
     }
 
     #[test]
