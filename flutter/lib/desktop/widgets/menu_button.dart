@@ -27,7 +27,7 @@ class MenuButton extends StatefulWidget {
 
 class _MenuButtonState extends State<MenuButton> {
   bool _isHover = false;
-  final double _borderRadius = 8.0;
+  final double _borderRadius = 0;
 
   @override
   Widget build(BuildContext context) {

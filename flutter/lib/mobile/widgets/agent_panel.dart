@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/rig_theme.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/agent_overlay.dart';
 import 'package:flutter_hbb/models/agent_bridge.dart';
@@ -13,8 +14,8 @@ import 'package:flutter_hbb/models/agent_note.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
-const _agentGreen = Color(0xFF22C55E);
-const _stopRed = Color(0xFFDC2626);
+const _live = RigTheme.toneLive;
+const _fault = RigTheme.toneFault;
 
 /// The remote page keeps the soft keyboard off for its own input; a text field of the panel turns it back on.
 void _allowSoftKeyboard() {
@@ -151,26 +152,24 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
   Widget _badge(AgentModel agent) {
     final String label;
     if (!_ready) {
-      label = 'Set up bridge';
+      label = 'set up';
     } else if (agent.isShared) {
       label = '${agent.ownerTitle} · ${_holds(agent)}';
     } else if (agent.linkOpen) {
-      label = 'Waiting for the agent';
+      label = 'waiting';
     } else {
-      label = 'Agent';
+      label = 'agent';
     }
     return Material(
-      elevation: 4,
-      color: agent.isBlocked ? Colors.orange.shade100 : null,
-      borderRadius: BorderRadius.circular(20),
+      color: agent.isBlocked ? RigTheme.toneHoldBg : RigTheme.surface,
+      shape: RigTheme.square.copyWith(side: BorderSide(color: RigTheme.border)),
       child: InkWell(
-        borderRadius: BorderRadius.circular(20),
         onTap: _ready ? _openSheet : _setUp,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             AgentDiamond(
-                size: 18, color: agent.isShared ? _agentGreen : null),
+                size: 18, color: agent.isShared ? _live : null),
             const SizedBox(width: 6),
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 200),
@@ -192,15 +191,16 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
     final blocked = AgentModel.of(ffi.sessionId).isBlocked;
     return ElevatedButton.icon(
       style: ElevatedButton.styleFrom(
-        backgroundColor: blocked ? _agentGreen : _stopRed,
-        foregroundColor: Colors.white,
+        backgroundColor: blocked ? _live : _fault,
+        foregroundColor: RigTheme.bg,
         minimumSize: wide ? const Size.fromHeight(56) : null,
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-        textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        textStyle: const TextStyle(
+            fontSize: RigTheme.fontMd, fontWeight: RigTheme.strong),
       ),
       onPressed: () => _ask(blocked ? 'unblock' : 'stop'),
       icon: Icon(blocked ? Icons.play_circle : Icons.stop_circle),
-      label: Text(blocked ? 'Resume' : 'Stop'),
+      label: Text(blocked ? 'resume' : 'stop'),
     );
   }
 
@@ -227,37 +227,35 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                   if (agent.isShared)
                     ListTile(
                       leading:
-                          const AgentDiamond(color: _agentGreen),
+                          const AgentDiamond(color: _live),
                       title: Text(agent.ownerTitle),
                       subtitle: Text(
-                          'Rig agent in ${agent.ownerGraph} · ${_holds(agent)}'),
+                          '${agent.ownerGraph} · ${_holds(agent)}'),
                     ),
                   ListTile(
                     leading: const Icon(Icons.share),
                     title: Text(agent.linkOpen && !agent.isShared
-                        ? 'Link copied, waiting for the agent'
-                        : 'Share with agent'),
-                    subtitle: const Text(
-                        'Copy a one-time link that hands this session to a Rig agent'),
+                        ? 'waiting'
+                        : 'share'),
+                    subtitle: const Text('one-time link for a Rig agent'),
                     onTap: () => run(() => _ask('share')),
                   ),
                   if (agent.isShared && agent.holder == 'human')
                     ListTile(
                       leading: const Icon(Icons.pan_tool_alt),
-                      title: const Text('Hand to agent'),
+                      title: const Text('hand over'),
                       onTap: () => run(() => _ask('hand')),
                     ),
                   if (agent.agentHolds)
                     ListTile(
                       leading: const Icon(Icons.back_hand),
-                      title: const Text('Take back'),
+                      title: const Text('take back'),
                       onTap: () => run(() => _ask('take_back')),
                     ),
                   if (agent.isShared)
                     ListTile(
                       leading: const Icon(Icons.chat_bubble_outline),
-                      title: const Text('Message the agent'),
-                      subtitle: const Text('With a screenshot to clip and mark'),
+                      title: const Text('message'),
                       onTap: () => run(_message),
                     ),
                   if (agent.isShared)
@@ -265,31 +263,31 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                       leading: Icon(agent.isBlocked
                           ? Icons.play_circle_outline
                           : Icons.block),
-                      title: Text(agent.isBlocked ? 'Unblock' : 'Block'),
+                      title: Text(agent.isBlocked ? 'unblock' : 'block'),
                       onTap: () => run(
                           () => _ask(agent.isBlocked ? 'unblock' : 'block')),
                     ),
                   if (agent.isShared)
                     ListTile(
                       leading: const Icon(Icons.link_off),
-                      title: const Text('End share'),
+                      title: const Text('end share'),
                       onTap: () => run(() => _ask('revoke')),
                     ),
                   if (agent.fromPc)
                     SwitchListTile(
                       secondary: const Icon(Icons.extension),
-                      title: const Text('MCP servers'),
+                      title: const Text('MCP'),
                       subtitle: Text(!agent.mcpOn
-                          ? 'Off: the agent sees no MCP server on this PC'
+                          ? 'off'
                           : agent.mcpServers.isEmpty
-                              ? 'Offered to the agent; none running now'
-                              : 'Offered to the agent: ${agent.mcpServers.join(', ')}'),
+                              ? 'no server running'
+                              : agent.mcpServers.join(', ')),
                       value: agent.mcpOn,
                       onChanged: (on) => run(() => _ask(on ? 'mcp_on' : 'mcp_off')),
                     ),
                   ListTile(
                     leading: const Icon(Icons.settings),
-                    title: const Text('Bridge settings'),
+                    title: const Text('bridge'),
                     onTap: () => run(_setUp),
                   ),
                   if (agent.isShared)
@@ -320,28 +318,32 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 14,
-              height: 14,
-              decoration: BoxDecoration(
-                color: _agentGreen,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
+            SizedBox.square(
+              dimension: 14,
+              child: Center(
+                child: Transform.rotate(
+                  angle: math.pi / 4,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: _live,
+                      border: Border.all(color: RigTheme.bg, width: 2),
+                    ),
+                  ),
+                ),
               ),
             ),
             const SizedBox(width: 4),
             Container(
               constraints: const BoxConstraints(maxWidth: 220),
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: _agentGreen,
-                borderRadius: BorderRadius.circular(4),
-              ),
+              color: _live,
               child: Text(
                 '${point.agentTitle}: ${point.summary}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white, fontSize: 12),
+                style: const TextStyle(color: RigTheme.bg, fontSize: RigTheme.fontSm),
               ),
             ),
           ],
@@ -358,8 +360,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
       constraints: const BoxConstraints(maxWidth: 320),
       padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.6),
-        borderRadius: BorderRadius.circular(6),
+        color: RigTheme.bg.withOpacity(0.85),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -370,8 +371,8 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      color: a.ok ? Colors.white : Colors.orangeAccent,
-                      fontSize: 11),
+                      color: a.ok ? RigTheme.text : RigTheme.toneFaultInk,
+                      fontSize: RigTheme.fontXs),
                 ))
             .toList(),
       ),
@@ -446,7 +447,7 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
       _frame = image;
       _loading = false;
       if (image == null) {
-        _error = 'No screenshot could be taken; the message goes without one.';
+        _error = 'no screenshot: it goes without one';
       }
     });
   }
@@ -507,7 +508,7 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
     final text = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Label'),
+        title: const Text('label'),
         content: TextField(
           controller: controller,
           autofocus: true,
@@ -517,10 +518,10 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
         actions: [
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel')),
+              child: const Text('cancel')),
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(controller.text),
-              child: const Text('Add')),
+              child: const Text('add')),
         ],
       ),
     );
@@ -544,11 +545,11 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
 
   Widget _tools() {
     const labels = {
-      NoteTool.clip: 'Clip',
-      NoteTool.pen: 'Pen',
-      NoteTool.arrow: 'Arrow',
-      NoteTool.box: 'Box',
-      NoteTool.text: 'Text',
+      NoteTool.clip: 'clip',
+      NoteTool.pen: 'pen',
+      NoteTool.arrow: 'arrow',
+      NoteTool.box: 'box',
+      NoteTool.text: 'text',
     };
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -568,12 +569,12 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
             onPressed: _marks.isEmpty
                 ? null
                 : () => setState(() => _marks.removeLast()),
-            child: const Text('Undo'),
+            child: const Text('undo'),
           ),
           TextButton(
             onPressed:
                 _clip == null ? null : () => setState(() => _clip = null),
-            child: const Text('Whole screen'),
+            child: const Text('whole screen'),
           ),
         ],
       ),
@@ -625,7 +626,7 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
       child: Scaffold(
         appBar: AppBar(
           title: Text(
-              'Message ${AgentModel.of(widget.ffi.sessionId).ownerTitle}'),
+              'message ${AgentModel.of(widget.ffi.sessionId).ownerTitle}'),
         ),
         body: SafeArea(
           child: Column(
@@ -642,13 +643,13 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
                         minLines: 1,
                         maxLines: 4,
                         decoration: const InputDecoration(
-                            hintText: 'What should the agent know or do?'),
+                            hintText: 'what should the agent know or do?'),
                       ),
                     ),
                     IconButton(
                       tooltip: _clip == null
-                          ? 'Send with screenshot'
-                          : 'Send with clip',
+                          ? 'send'
+                          : 'send clip',
                       onPressed: _sending ? null : _send,
                       icon: const Icon(Icons.send),
                     ),
@@ -688,11 +689,11 @@ class _MobileNotePainter extends CustomPainter {
         ..fillType = PathFillType.evenOdd
         ..addRect(full)
         ..addRect(region);
-      canvas.drawPath(shade, Paint()..color = Colors.black45);
+      canvas.drawPath(shade, Paint()..color = RigTheme.bg.withOpacity(0.55));
       canvas.drawRect(
           region,
           Paint()
-            ..color = Colors.white
+            ..color = RigTheme.accent
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2 / scale);
     }

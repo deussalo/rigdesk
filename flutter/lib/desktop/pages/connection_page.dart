@@ -15,6 +15,7 @@ import 'package:window_manager/window_manager.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 
 import '../../common.dart';
+import '../../common/rig_theme.dart';
 import '../../common/formatter/id_formatter.dart';
 import '../../common/widgets/peer_tab_page.dart';
 import '../../common/widgets/autocomplete.dart';
@@ -117,13 +118,13 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
               height: 8,
               width: 8,
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(4),
+                borderRadius: BorderRadius.zero,
                 color: _svcStopped.value ||
                         stateGlobal.svcStatus.value == SvcStatus.connecting
-                    ? kColorWarn
+                    ? RigTheme.toneHold
                     : (stateGlobal.svcStatus.value == SvcStatus.ready
-                        ? Color.fromARGB(255, 50, 190, 166)
-                        : Color.fromARGB(255, 224, 79, 95)),
+                        ? RigTheme.toneLive
+                        : RigTheme.toneFault),
               ),
             ).marginSymmetric(horizontal: em),
             Container(
@@ -380,7 +381,7 @@ class _ConnectionPageState extends State<ConnectionPage>
       width: 320 + 20 * 2,
       padding: const EdgeInsets.fromLTRB(20, 24, 20, 22),
       decoration: BoxDecoration(
-          borderRadius: const BorderRadius.all(Radius.circular(13)),
+          borderRadius: const BorderRadius.all(Radius.zero),
           border: Border.all(color: Theme.of(context).colorScheme.background)),
       child: Ink(
         child: Column(
@@ -511,7 +512,7 @@ class _ConnectionPageState extends State<ConnectionPage>
                             ],
                           ),
                           child: ClipRRect(
-                              borderRadius: BorderRadius.circular(5),
+                              borderRadius: BorderRadius.zero,
                               child: Material(
                                 elevation: 4,
                                 child: ConstrainedBox(
@@ -566,7 +567,7 @@ class _ConnectionPageState extends State<ConnectionPage>
                   width: 28.0,
                   decoration: BoxDecoration(
                     border: Border.all(color: Theme.of(context).dividerColor),
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.zero,
                   ),
                   child: Center(
                     child: StatefulBuilder(

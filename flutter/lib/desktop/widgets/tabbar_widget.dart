@@ -650,9 +650,9 @@ class _DesktopTabState extends State<DesktopTab>
                         ),
                         Offstage(
                             offstage: !showTitle,
-                            child: const Text(
-                              "RustDesk",
-                              style: TextStyle(fontSize: 13),
+                            child: Text(
+                              bind.mainGetAppNameSync(),
+                              style: const TextStyle(fontSize: 13),
                             ).marginOnly(left: 2))
                       ]).marginOnly(
                         left: 5,
@@ -1240,7 +1240,7 @@ class _CloseButton extends StatelessWidget {
               if (visible) {
                 return InkWell(
                   hoverColor: MyTheme.tabbar(context).closeHoverColor,
-                  customBorder: const CircleBorder(),
+                  customBorder: const RoundedRectangleBorder(),
                   onTap: () => onClose(),
                   child: Icon(
                     Icons.close,
