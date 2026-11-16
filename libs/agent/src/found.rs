@@ -38,21 +38,23 @@ const SSE_PATH: &str = "/sse";
 /// A server's answer larger than this is refused rather than held in memory.
 const ANSWER_CAP: usize = 64 << 20;
 
-/// Where a server is asked: a loopback port, or a named server's host with the bearer it wants.
+/// Where a server is asked: a loopback port found by scanning, or a told-of server's host with the bearer it wants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct At {
     pub host: String,
     pub port: u16,
     pub bearer: Option<String>,
+    /// Told of rather than found: kept while its address answers, whatever that address is.
+    told: bool,
 }
 
 impl At {
     pub fn loopback(port: u16) -> At {
-        At { host: "127.0.0.1".into(), port, bearer: None }
+        At { host: "127.0.0.1".into(), port, bearer: None, told: false }
     }
 
     fn remote(&self) -> bool {
-        self.host != "127.0.0.1"
+        self.told
     }
 }
 
@@ -68,14 +70,22 @@ impl Remote {
     pub fn parse(url: &str, bearer: Option<String>) -> Result<Remote, String> {
         let rest = url.strip_prefix("http://").ok_or_else(|| format!("{url}: an MCP server is named as http://host[:port][/path]"))?;
         let (authority, path) = rest.find('/').map_or((rest, "/mcp"), |at| rest.split_at(at));
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((host, port)) if !host.ends_with(']') || authority.starts_with('[') => {
-                (host, port.parse::<u16>().map_err(|_| format!("{url}: {port} is not a port"))?)
+        // An IPv6 address comes in brackets, so a bare one's colons are never read as its port.
+        let (host, port, v6) = match authority.strip_prefix('[') {
+            Some(bracketed) => {
+                let (host, after) = bracketed.split_once(']').ok_or_else(|| format!("{url}: an unclosed ["))?;
+                (host, after.strip_prefix(':').filter(|p| !p.is_empty()), true)
             }
-            _ => (authority, 80),
+            None => match authority.split_once(':') {
+                Some((host, port)) => (host, Some(port), false),
+                None => (authority, None, false),
+            },
         };
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':')) {
+        let port = match port {
+            Some(port) => port.parse::<u16>().map_err(|_| format!("{url}: {port} is not a port"))?,
+            None => 80,
+        };
+        if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-') || (v6 && c == ':')) {
             return Err(format!("{url}: {host:?} is not a host"));
         }
         if path.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -84,7 +94,7 @@ impl Remote {
         if bearer.as_deref().map_or(false, |b| b.is_empty() || b.contains(['\r', '\n'])) {
             return Err(format!("{url}: its token is empty or spans lines"));
         }
-        Ok(Remote { at: At { host: host.to_string(), port, bearer }, path: path.to_string() })
+        Ok(Remote { at: At { host: host.to_string(), port, bearer, told: true }, path: path.to_string() })
     }
 }
 
@@ -832,6 +842,9 @@ mod tests {
         assert_eq!(Remote::parse("http://[fd7a::1]:9/mcp", None).unwrap().at.host, "fd7a::1");
         assert!(Remote::parse("https://moto-g57:9", None).is_err());
         assert!(Remote::parse("http://moto-g57:x", None).is_err());
+        assert!(Remote::parse("http://fd7a::1", None).is_err(), "a bare IPv6 address is refused, not read as host fd7a: port 1");
+        assert!(Remote::parse("http://[fd7a::1", None).is_err());
+        assert_eq!(Remote::parse("http://[fd7a::1]/mcp", None).unwrap().at.port, 80);
         assert!(Remote::parse("http://a b:9", None).is_err());
         assert!(Remote::parse("http://moto-g57:9", Some("a\nb".into())).is_err());
     }
@@ -881,10 +894,10 @@ mod tests {
         let wrong = Found::remote(vec![Remote::parse(&format!("http://localhost:{port}/mcp"), Some("guess".into())).unwrap()]);
         wrong.ask_remotes(&shared).await;
         assert!(wrong.servers().is_empty(), "a server that refuses the bearer is not offered");
-        let found = Found::remote(vec![Remote::parse(&format!("http://localhost:{port}/mcp"), Some("s3cret".into())).unwrap()]);
+        let found = Found::remote(vec![Remote::parse(&format!("http://127.0.0.1:{port}/mcp"), Some("s3cret".into())).unwrap()]);
         found.ask_remotes(&shared).await;
         let phone = found.get("phone").expect("offered under the name it calls itself");
-        assert_eq!((phone.host.as_deref(), phone.says.as_str()), (Some("localhost"), "phone 0.2"));
+        assert_eq!((phone.host.as_deref(), phone.says.as_str()), (Some("127.0.0.1"), "phone 0.2"), "a told-of server at 127.0.0.1 is still one told of");
         let listed = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}).to_string();
         let answer = phone.call(&[("authorization", "Bearer guess")], listed.as_bytes()).await.unwrap();
         assert_eq!(answer.json_rpc().unwrap()["result"]["method"], json!("tools/list"), "the bridge's bearer goes, not the client's");
