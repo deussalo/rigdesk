@@ -100,7 +100,7 @@ const assigning = (pc: string, grantee: string, granted: boolean) => async (): P
 /** Who holds a standing grant to a stock PC, each a line with its unassign. */
 function Grants({ pc }: { readonly pc: PcRow }): ReactNode {
   return pc.assigned.map(each => (
-    <BoardBar key={each.grantee} apart={<Action label="unassign" tone="danger" pending="unassigning…" onInvoke={assigning(pc.name, each.grantee, false)} />}>
+    <BoardBar key={each.grantee} apart={<Action label="unassign" tone="outlined" pending="unassigning…" onInvoke={assigning(pc.name, each.grantee, false)} />}>
       {each.agent_id !== null && each.graph !== null ? <Link href={href('agent', { graph: each.graph, agent: each.agent_id })}>{each.label}</Link> : <span>{each.label}</span>}
     </BoardBar>
   ))
@@ -169,28 +169,28 @@ function Screenshot({ pc, now }: { readonly pc: PcRow; readonly now: number }): 
 /** Rig's switch for a PC's own MCP servers, kept in the PC's settings entry; off, Rig opens none of them. */
 const allowing = (pc: string) => (on: boolean): Promise<Refused | null> => editSettings(document => withPath(document, ['plugins', 'rigdesk', 'pcs', pc, 'mcp'], on))
 
-/** The MCP servers running on the PC, which the agent holding it calls as <pc>.<server>/<tool>: the switch, then each open server, or why there is none. */
-function McpServers({ pc, mcp, now }: { readonly pc: PcRow; readonly mcp: Mcp; readonly now: number }): ReactNode {
-  const [asked, setAsked] = useState<boolean | null>(null)
+/** Rig's switch for the PC's own MCP servers, as the server last read it, or why none is offered. */
+function McpSwitch({ pc, mcp }: { readonly pc: PcRow; readonly mcp: Mcp }): ReactNode {
   const [refused, setRefused] = useState<Refused | null>(null)
-  if (asked !== null && asked === mcp.allowed) setAsked(null)
-  const turned = (on: boolean): void => {
-    setAsked(on)
-    void allowing(pc.name)(on).then(failed => { setRefused(failed); if (failed !== null) setAsked(null) })
-  }
   const none = pc.state === 'down' || !mcp.allowed ? null : mcp.why ?? (mcp.on === null ? 'unchecked' : mcp.on ? 'none running' : 'off on the PC')
   return (
     <>
       <BoardForm label={`${pc.name} MCP`} onLeave={() => undefined}>
-        <Field kind="switch" label="MCP" value={asked ?? mcp.allowed} hint={mcp.servers.length > 0 && mcp.why === null ? null : none}
-          about="Rig opens the PC's own MCP servers to the agent holding it. Off, it opens none." onChange={on => { turned(on === true) }} />
+        <Field kind="switch" label="MCP" value={mcp.allowed} hint={mcp.servers.length > 0 && mcp.why === null ? null : none}
+          about="Rig opens the PC's own MCP servers to the agent holding it." onChange={on => { void allowing(pc.name)(on === true).then(setRefused) }} />
       </BoardForm>
       {refused === null ? null : <Refusal refused={refused} />}
-      {mcp.servers.length === 0 ? null : (
-        <BoardFacts label="MCP servers" facts={mcp.servers.map((each): Fact => [each.name,
-          <span key={each.key}>{each.says} <i>{`· ${String(each.tools.length)} ${each.tools.length === 1 ? 'tool' : 'tools'} as ${each.key}/… · opened ${agoOf(each.since_ms, now)}`}</i></span>])} />
-      )}
     </>
+  )
+}
+
+/** The MCP servers open on the PC, which the agent holding it calls as <pc>.<server>/<tool>. */
+function McpServers({ mcp, now }: { readonly mcp: Mcp; readonly now: number }): ReactNode {
+  return (
+    <BoardPart name="MCP servers">
+      <BoardFacts label="MCP servers" facts={mcp.servers.map((each): Fact => [each.name,
+        <span key={each.key}>{each.says} <i>{`· ${String(each.tools.length)} ${each.tools.length === 1 ? 'tool' : 'tools'} as ${each.key}/… · opened ${agoOf(each.since_ms, now)}`}</i></span>])} />
+    </BoardPart>
   )
 }
 
@@ -216,7 +216,7 @@ function StockButtons({ pc, minted }: { readonly pc: PcRow; readonly minted: (li
     <BoardBar apart={owned ? (
       <>
         {pc.holder === 'blocked' ? <Action label="unblock" tone="outlined" onInvoke={acting(pc, 'unblock')} /> : <Action label="block" tone="outlined" onInvoke={acting(pc, 'block')} />}
-        <Action label="end share" tone="danger" onInvoke={acting(pc, 'revoke')} />
+        <Action label="end share" tone="outlined" onInvoke={acting(pc, 'revoke')} />
       </>
     ) : undefined}>
       <Action label="share" tone="outlined" pending="minting…" disabled={pc.state !== 'up'} onInvoke={acting(pc, 'mint', minted)} />
@@ -231,21 +231,22 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
   const [open, setOpen] = useRememberedFold('rigdesk-pc', pc.name, 'closed')
   const [link, setLink] = useState<string | null>(null)
   const standing = standingOf(pc)
-  const ink: Ink = standing === 'blocked' ? 'fault' : INK[pc.state]
+  const ink: Ink = standing === 'blocked' ? 'hold' : INK[pc.state]
   const held = pc.owner === null ? null : <span>held by <OwnerOf owner={pc.owner} />{pc.owned_here ? '' : ' (joined elsewhere)'}</span>
   const assigned = pc.assigned.map(each => each.label)
   const servers = pc.mcp?.servers.length ?? 0
+  const mcpKnown = pc.state === 'up' && pc.mcp !== undefined && pc.mcp.on !== null
   const facts: readonly Fact[] = [
     ['client', pc.client || 'none'], ['kind', pc.stock ? 'stock RustDesk' : 'RigDesk'], ['address', pc.url], ['input', pc.holder === null ? 'no agent' : HOLDER[pc.holder]],
     ...(held === null ? [] : [['agent', held] as const]),
   ]
   return (
-    <BoardRow label={pc.name} open={open} onOpen={setOpen} mark={<Mark kind="status" shape="square" label={standing} ink={ink} fill={pc.state === 'up' ? 'solid' : 'open'} />}
+    <BoardRow label={pc.name} open={open} onOpen={setOpen} mark={<Mark kind="status" shape="square" label={standing} ink={ink} fill={pc.state === 'up' && standing !== 'blocked' ? 'solid' : 'open'} />}
       name={pc.name} under={[pc.client, pc.stock ? 'stock RustDesk' : 'RigDesk'].filter(Boolean).join(' · ')}
       state={{ word: standing, ink: standing === 'up' ? 'idle' : ink }}
-      why={pc.down_since_ms !== null ? agoOf(pc.down_since_ms, now) : pc.holder === null ? undefined : HOLDER[pc.holder]}
+      why={pc.down_since_ms !== null ? agoOf(pc.down_since_ms, now) : pc.holder !== null ? HOLDER[pc.holder] : pc.state === 'connecting' ? pc.url : undefined}
       telling={pc.state === 'down' ? 'no answer' : held ?? 'no agent on it'} tellingDim={held === null}
-      figures={!pc.stock ? { main: `${String(servers)} MCP ${servers === 1 ? 'server' : 'servers'}`, dim: servers === 0 } : assigned.length === 0 ? { main: 'assigned to no one', dim: true }
+      figures={!pc.stock ? (mcpKnown ? { main: `${String(servers)} MCP ${servers === 1 ? 'server' : 'servers'}`, dim: servers === 0 } : { main: 'MCP unknown', dim: true }) : assigned.length === 0 ? { main: 'assigned to no one', dim: true }
         : { main: assigned.length === 1 ? `assigned to ${assigned[0] ?? ''}` : `${String(assigned.length)} assigned`, under: assigned.length === 1 ? undefined : assigned.join(', ') }}
       verbs={pc.stock && pc.owner !== null ? <Action label="stop" tone="danger" onInvoke={acting(pc, 'stop')} /> : undefined}>
       <BoardProblems problems={pc.state === 'down' && pc.why !== null ? [pc.why] : []} />
@@ -256,10 +257,11 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
           <BoardBar><Action label="copy" lead="copy" tone="outlined" onInvoke={() => { copied('share link', link); return Promise.resolve(null) }} /><Text text="works once" ink="idle" size="xs" /></BoardBar>
         </BoardPart>
       )}
-      {pc.stock ? <Assign pc={pc} forFleet={forFleet} /> : null}
       {pc.assigned.length === 0 ? null : <BoardPart name="assigned"><Grants pc={pc} /></BoardPart>}
-      {pc.stock || pc.mcp === undefined ? null : <McpServers pc={pc} mcp={pc.mcp} now={now} />}
+      {pc.stock || pc.mcp === undefined || pc.mcp.servers.length === 0 ? null : <McpServers mcp={pc.mcp} now={now} />}
       <BoardPart name="screen"><Screenshot pc={pc} now={now} /></BoardPart>
+      {pc.stock ? <Assign pc={pc} forFleet={forFleet} /> : null}
+      {pc.stock || pc.mcp === undefined ? null : <McpSwitch pc={pc} mcp={pc.mcp} />}
       {pc.stock ? <StockButtons pc={pc} minted={setLink} /> : <Quiet>shared from the RigDesk viewer</Quiet>}
     </BoardRow>
   )
@@ -272,7 +274,7 @@ function ListenerRow({ each, now }: { readonly each: Listener; readonly now: num
   return (
     <BoardRow label={ROLE[each.role]} open={open} onOpen={setOpen} mark={<Mark kind="status" shape="square" label={each.state} ink={ink} fill={each.state === 'up' ? 'solid' : 'open'} />}
       name={ROLE[each.role]} under={each.role} state={{ word: each.state === 'unchecked' ? 'not checked' : each.state, ink: each.state === 'up' ? 'idle' : ink }}
-      why={each.since_ms === null ? undefined : agoOf(each.since_ms, now)} telling={each.why ?? each.address} tellingDim={each.why === null}
+      why={each.since_ms === null ? undefined : agoOf(each.since_ms, now)} telling={each.address} tellingDim
       figures={{ main: each.checked_ms === null ? 'never checked' : `checked ${agoOf(each.checked_ms, now)}`, dim: true }}>
       <BoardProblems problems={each.state === 'down' && each.why !== null ? [each.why] : []} />
       <BoardFacts facts={[['address', each.address], ['service', each.role]]} />
@@ -343,7 +345,7 @@ export function RigdeskPage(): ReactNode {
       {pcs.map(pc => <Pc key={pc.name} pc={pc} now={now} forFleet={view?.for_fleet === true} />)}
     </BoardRows>
   )
-  const none = view === null || pcs.length > 0 || adding ? null : <Quiet>{server === null ? 'no PCs, and no ID server to add one on: name it under plugins.rigdesk.id_server' : 'no PCs'}</Quiet>
+  const none = view === null || pcs.length > 0 || adding ? null : <Quiet>{server === null ? 'no PCs · no ID server (plugins.rigdesk.id_server)' : 'no PCs'}</Quiet>
   return (
     <Board label="RigDesk" title="RigDesk" columns={COLUMNS}>
       {refused === null ? null : <Refusal refused={refused} />}
