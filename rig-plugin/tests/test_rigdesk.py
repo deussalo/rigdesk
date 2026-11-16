@@ -389,6 +389,27 @@ def test_pc_health_is_reported_each_judging() -> None:
     assert reported == [("rigdesk.pc_health", "deus", "ok"), ("rigdesk.pc_health", "deus", "fault")], reported
 
 
+def test_a_screenshot_comes_back_as_an_image_at_its_own_pixels_or_says_how_to_map_a_shrunk_one() -> None:
+    import base64
+    import io
+
+    from PIL import Image
+
+    from rigdesk.shots import inline
+
+    def png(width: int, height: int) -> bytes:
+        out = io.BytesIO()
+        Image.effect_noise((width, height), 64).convert("RGB").save(out, "PNG")
+        return out.getvalue()
+
+    desktop = inline(png(1920, 1080))
+    assert Image.open(io.BytesIO(base64.b64decode(desktop.data))).size == (1920, 1080)
+    assert desktop.mime == "image/jpeg" and "multiply" not in desktop.note
+    wide = inline(png(3840, 2160))
+    assert Image.open(io.BytesIO(base64.b64decode(wide.data))).size == (2000, 1125)
+    assert "multiply x,y by 1.92" in wide.note
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

@@ -22,7 +22,7 @@ from core.kernel_api import RigReach, mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.endpoint import Request, endpoint
 from core.model import AgentId, Choice, Choices, GraphName, NodeId, Refused, RefusedOutcome, SeatId
-from core.mcp_call import TOOL_LIMIT_S, Answer, Call, ToolDef, ToolInput, gloss_of
+from core.mcp_call import TOOL_LIMIT_S, Answer, Call, ImageContent, TextContent, ToolContent, ToolDef, ToolInput, gloss_of
 from core.plugin_host import Live, PluginHost
 from core.provided import Provision, provider
 from core.policy import OPERATOR
@@ -30,6 +30,7 @@ from core.refusal import PluginCode
 
 from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
 from .health import figures_json, series
+from .shots import inline
 from .desks import PcName as DeskName
 
 BRANCH = "desk"
@@ -377,6 +378,9 @@ def _upstream(tool: str, listed: dict[str, Any]) -> tuple[str, JsonObject, bool]
 
 
 def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
+    if tool == "screenshot":
+        return _shot(desks, listed)
+
     async def run(call: Call, given: ToolInput) -> Answer:
         agent, graph, _ = _who(call)
         held = desks.held_by(agent, graph)
@@ -389,6 +393,30 @@ def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
     words, schema, read_only = _upstream(tool, listed)
     return ToolDef(f"{BRANCH}/{tool}", f"On the RigDesk PC you joined: {words}", PassInput, DeskAnswer, run, run, read_only=read_only, plugin=plugin_capability(ID),
                    denied_alone=(CAPABILITY, mcp_capability(BRANCH, tool)), upstream_schema=schema, gloss=gloss_of(words),
+                   limit_s=CALL_LIMIT_S + 10)
+
+
+def _shot(desks: Desks, listed: dict[str, Any]) -> ToolDef:
+    """desk/screenshot answers with the image, which a session shows the agent at once; the PNG is still kept as a file, as before."""
+    async def run(call: Call, given: ToolInput) -> Answer:
+        agent, graph, _ = _who(call)
+        held = desks.held_by(agent, graph)
+        if held is None:
+            return call.refused(UNSHARED, NO_SESSION)
+        try:
+            said = await desks.call(held, "screenshot", dict(given.model_extra or {}))
+        except Exception as failed:  # noqa: BLE001
+            return _refused(call, failed)
+        images: list[dict[str, Any]] = said.get("images") or []
+        if said.get("is_error") or not images:
+            return TextContent(type="text", text=str(said.get("text") or "the PC sent no screenshot"), is_error=True)
+        kept = Path(images[0]["file"])
+        shown = await asyncio.to_thread(lambda: inline(kept.read_bytes()))
+        return ImageContent(type="image", data=shown.data, mimeType=shown.mime, note=f"{said.get('text', '')} {shown.note} Kept as {kept}.")
+    _, schema, read_only = _upstream("screenshot", listed)
+    words = "One display right now, shown to you in this answer. Pointer tools take x,y in this image's pixels."
+    return ToolDef(f"{BRANCH}/screenshot", f"On the RigDesk PC you joined: {words}", PassInput, ToolContent, run, run, read_only=read_only, plugin=plugin_capability(ID),
+                   denied_alone=(CAPABILITY, mcp_capability(BRANCH, "screenshot")), upstream_schema=schema, gloss=gloss_of(words),
                    limit_s=CALL_LIMIT_S + 10)
 
 
