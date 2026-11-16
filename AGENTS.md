@@ -181,6 +181,7 @@ A refactor added to cover a corner case rarely converges. Each new counter, time
 
 ## Tests
 
+* On the Rig host every cargo and flutter build or test runs under Rig's heavy lock, one heavy build or gate at a time: `res/heavy.sh cargo test --workspace`, `res/heavy.sh flutter build linux`; `build.py` takes it by itself. `make -C /srv/rig/rig heavy-status` shows who holds it and who waits.
 * A fix gets regression tests for the reported behavior only: they fail on master and pass with the fix. One to three tests is normal.
 * Assert what the user sees or what the API returns. Do not test private state, the order an algorithm runs its steps in, or each corner case raised in review.
 * Do not add test infrastructure (browser runners, golden/screenshot harnesses, new mock layers, test-only hooks in production code) for a bug fix unless the maintainer asks.
