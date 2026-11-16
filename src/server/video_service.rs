@@ -1543,15 +1543,21 @@ fn get_rgba_from_pixelbuf<'a>(pixbuf: &scrap::PixelBuffer<'a>) -> ResultType<Vec
         scrap::convert(pixbuf, scrap::Pixfmt::RGBA, &mut rgba)?;
         Ok(rgba)
     } else {
-        let bgra = pixbuf.data();
-        let mut bit_flipped = Vec::with_capacity(w * h * 4);
+        // A padded row (Android's ImageReader pads RGBA rows) is copied pixel by pixel, in the buffer's own order.
+        let (r, b) = match pixbuf.pixfmt() {
+            scrap::Pixfmt::RGBA => (0, 2),
+            scrap::Pixfmt::BGRA => (2, 0),
+            other => bail!("Unsupported screenshot pixfmt {:?}", other),
+        };
+        let src = pixbuf.data();
+        let mut rgba = Vec::with_capacity(w * h * 4);
         for y in 0..h {
             for x in 0..w {
                 let i = s * y + 4 * x;
-                bit_flipped.extend_from_slice(&[bgra[i + 2], bgra[i + 1], bgra[i], bgra[i + 3]]);
+                rgba.extend_from_slice(&[src[i + r], src[i + 1], src[i + b], src[i + 3]]);
             }
         }
-        Ok(bit_flipped)
+        Ok(rgba)
     }
 }
 
