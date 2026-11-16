@@ -1,4 +1,4 @@
-package com.carriez.flutter_hbb
+package dev.rig.assistant
 
 import android.content.Context
 import android.os.Build
@@ -16,7 +16,7 @@ import java.util.Date
 import java.util.Locale
 
 /** The phone's shared storage (/storage: the internal "Phone storage" and any SD card) for the holder, with All files access. */
-class PhoneFiles(private val ctx: Context) {
+class Files(private val ctx: Context) {
     fun specs(): List<JSONObject> = listOf(
         toolSpec("files", "Files", true, "List a folder in the phone's shared storage: each entry's name, size or (dir), and when it " +
             "changed, folders first, at most $MAX_ENTRIES. A path not starting with / is under ${home()}.", emptyList(),

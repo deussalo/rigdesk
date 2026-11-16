@@ -1,4 +1,4 @@
-package com.carriez.flutter_hbb
+package dev.rig.assistant
 
 import android.Manifest
 import android.app.Activity
@@ -21,8 +21,6 @@ import android.provider.ContactsContract
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.telephony.SmsManager
-import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -31,7 +29,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-/** RigDesk's notification access: while the person has it on, the phone's tools read, answer and dismiss notifications. */
+/** Rig Assistant's notification access: while the person has it on, the phone's tools read, answer and dismiss notifications. */
 class RigNotifications : NotificationListenerService() {
     override fun onListenerConnected() { live = this }
     override fun onListenerDisconnected() { if (live === this) live = null }
@@ -43,7 +41,7 @@ class RigNotifications : NotificationListenerService() {
 }
 
 /** The phone's notification, SMS and contact tools. */
-class PhoneMessages(private val ctx: Context) {
+class Messages(private val ctx: Context) {
     private val posted = AtomicInteger(0)
 
     fun specs(): List<JSONObject> = listOf(
@@ -86,7 +84,7 @@ class PhoneMessages(private val ctx: Context) {
     }
 
     private fun listener(): RigNotifications = RigNotifications.live ?: throw Refusal(
-        "RigDesk has no notification access: turn it on in the phone's Settings > Notifications > Device & app notifications > RigDesk " +
+        "Rig Assistant has no notification access: turn it on in the phone's Settings > Notifications > Device & app notifications > Rig Assistant " +
             "(or adb shell cmd notification allow_listener ${ComponentName(ctx, RigNotifications::class.java).flattenToString()})")
 
     private fun active(): List<StatusBarNotification> = listener().activeNotifications?.toList().orEmpty()
@@ -161,7 +159,7 @@ class PhoneMessages(private val ctx: Context) {
     }
 
     /**
-     * Sends with RigDesk's own right to start an activity from the background (it holds the overlay permission). Since
+     * Sends with this app's own right to start an activity from the background (it is the phone's assistant). Since
      * Android 14 a sender targeting 34+ lends none unless it says so, and Android then drops the start without an error.
      */
     private fun sendLending(intent: PendingIntent) {
@@ -188,12 +186,11 @@ class PhoneMessages(private val ctx: Context) {
         if (!nm.areNotificationsEnabled()) throw Refusal("RigDesk's notifications are off: turn them on in the phone's Settings > Apps > RigDesk")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             nm.createNotificationChannel(NotificationChannel(CHANNEL, "From Rig", NotificationManager.IMPORTANCE_DEFAULT))
-        nm.notify(POSTED_BASE + posted.incrementAndGet() % 1000, NotificationCompat.Builder(ctx, CHANNEL).setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(title).setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text)).setAutoCancel(true).build())
+        nm.notify(POSTED_BASE + posted.incrementAndGet() % 1000, notification(ctx, CHANNEL, title, text))
         return "posted"
     }
 
-    private fun granted(permission: String) = ContextCompat.checkSelfPermission(ctx, permission) == PackageManager.PERMISSION_GRANTED
+    private fun granted(permission: String) = granted(ctx, permission)
 
     private fun sms(to: String, text: String): String {
         if (to.isEmpty() || text.isEmpty()) throw Refusal("sms_send takes to and text")

@@ -9,6 +9,7 @@ def legacyPluginNamespaces = [
 def java8JvmTarget = JavaVersion.VERSION_1_8.toString()
 def java8KotlinJvmTargets = [
     app: java8JvmTarget,
+    'rig-assistant': java8JvmTarget,
     external_path: java8JvmTarget,
     qr_code_scanner: java8JvmTarget,
 ]

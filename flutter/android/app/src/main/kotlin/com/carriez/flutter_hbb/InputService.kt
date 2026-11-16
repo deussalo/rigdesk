@@ -779,6 +779,7 @@ class InputService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         ctx = this
+        dev.rig.assistant.Host.input = this
         notifyInputState()
         val info = AccessibilityServiceInfo()
         if (Build.VERSION.SDK_INT >= 33) {
@@ -798,6 +799,7 @@ class InputService : AccessibilityService() {
 
     override fun onDestroy() {
         ctx = null
+        if (dev.rig.assistant.Host.input === this) dev.rig.assistant.Host.input = null
         // Keep this fallback even though onUnbind usually notifies first.
         notifyInputState()
         super.onDestroy()
@@ -805,6 +807,7 @@ class InputService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         ctx = null
+        if (dev.rig.assistant.Host.input === this) dev.rig.assistant.Host.input = null
         notifyInputState()
         return super.onUnbind(intent)
     }

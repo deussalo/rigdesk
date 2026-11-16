@@ -172,18 +172,8 @@ Known limits against a RigDesk PC:
   none by itself: it offers the servers its `stock.mcp_servers` name, each `{"url": "http://<host>[:port][/path]",
   "token_file": ...}` on the PC's own tailnet address (a phone's native tools, say), asked while an agent holds the PC
   and dropped when the address stops answering. The bridge sends the server its token; a client's never passes.
-  RigDesk Android serves its native tools (`apps`, `open`, `key`, `tell`; `notifications`, `notification_reply`,
-  `notification_action`, `notification_dismiss`, `notify`, `sms_send`, `contacts` once the person grants notification
-  access, SMS and contacts; `files`, `file_read`, `file_write` in shared storage with All files access) while it shares
-  the screen, at
-  `http://<phone's tailnet address>:8790/mcp`, to the token set in its Share screen > Rig bridge: name that same
-  token file.
-  Each switch hands Rig's agents something the person should know they give: notification access, the text of every
-  notification (messages, and sign-in codes where Android shows them; Android 15+ hides one-time codes from listeners
-  it does not trust); SMS, sending from their number at their cost; contacts, their address book; All files access, reading and
-  writing everything in the phone's shared storage (photos, downloads, documents). The server takes any
-  caller holding the bridge token, and that file is readable on Rig's host, so a shell there reaches the phone past the
-  bridge's holder, Block and touch-goes-first rules.
+  A phone's native tools are not RigDesk's: Rig Assistant, a module in the same Android app, serves them to the agent
+  resident on the phone through Rig's rig-assistant plugin, with its own setup and no screen sharing needed.
 * `desk/leave` — ends the session.
 
 ## Agent shell and health (RigDesk PCs)
