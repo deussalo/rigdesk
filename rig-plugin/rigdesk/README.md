@@ -168,7 +168,10 @@ Known limits against a RigDesk PC:
   name, and when one goes. They are `hidden`: in no seat's session notice, loadable by name, refused to any agent but
   the holder. A call goes through the PC under its holder and Block rules, as a desk call does, and is journaled there;
   a server that forgot its MCP session is opened again once. A PC's `mcp: false` in settings opens none, and turned off
-  closes those open and tells the holder; the person at the PC has a switch of their own. A stock PC, through its bridge, offers none.
+  closes those open and tells the holder; the person at the PC has a switch of their own. A stock PC's bridge finds
+  none by itself: it offers the servers its `stock.mcp_servers` name, each `{"url": "http://<host>[:port][/path]",
+  "token_file": ...}` on the PC's own tailnet address (a phone's native tools, say), asked while an agent holds the PC
+  and dropped when the address stops answering. The bridge sends the server its token; a client's never passes.
 * `desk/leave` — ends the session.
 
 ## Agent shell and health (RigDesk PCs)

@@ -106,6 +106,12 @@ def _web_address(url: str) -> str:
 type WebAddress = Annotated[str, AfterValidator(_web_address)]
 
 
+class StockMcpServer(Shape):
+    model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "An MCP server on the PC's own address, such as a phone's native tools: its bridge offers it to the holding agent as a found server."})
+    url: Annotated[str, StringConstraints(pattern=r"^http://[A-Za-z0-9.:\[\]-]{1,255}(/[^\s]*)?$"), Field(description="http://host[:port][/path] (path /mcp by default), reached over the tailnet.")]
+    token_file: Annotated[str | None, Field(description="A file readable by this user alone holding the bearer the server wants.")] = None
+
+
 class StockRemote(Shape):
     model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A PC running stock RustDesk: Rig runs rigdesk-bridge for it, which logs in with the PC's permanent password, "
                                                                                  "by direct IP over the tailnet (peer) or by its RustDesk ID through the ID server (id)."})
@@ -114,6 +120,7 @@ class StockRemote(Shape):
     password_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's RustDesk permanent password.")]
     viewer_port: Annotated[int | None, Field(ge=1, le=65535, description="Where the bridge relays its session to RigDesk GUIs, on loopback (publish it with tailscale serve --tcp); unset, no GUI can attach.")] = None
     viewer_password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the password GUIs log in to the bridge with.")] = None
+    mcp_servers: Annotated[list[StockMcpServer], Field(description="MCP servers on the PC's own address that the bridge offers the holding agent.")] = []
 
     @model_validator(mode="after")
     def _viewer_whole(self) -> StockRemote:
@@ -692,6 +699,8 @@ class Desks:
                 "--journal", str(self._dir / f"bridge-{link.name}.journal")]
         if stock.viewer_port is not None and stock.viewer_password_file is not None:
             argv += ["--viewer-port", str(stock.viewer_port), "--viewer-password-file", str(Path(stock.viewer_password_file).expanduser())]
+        for server in stock.mcp_servers:
+            argv += ["--mcp-server", server.url] + ([] if server.token_file is None else ["--mcp-token-file", str(Path(server.token_file).expanduser())])
         tries = 0
         while True:
             started = time.monotonic()

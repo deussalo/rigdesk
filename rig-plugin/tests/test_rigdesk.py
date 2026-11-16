@@ -45,6 +45,18 @@ def test_a_rigdesk_pc_says_whether_the_operator_can_start_a_session_there() -> N
     assert "takes no sessions started from Rig" in _reached_by(entry(None))  # type: ignore[arg-type]
 
 
+def test_a_stock_pc_names_the_mcp_servers_on_its_own_address_by_http_url() -> None:
+    from rigdesk.desks import StockRemote
+    phone = StockRemote(id="123456789", password_file="/dev/null", mcp_servers=[{"url": "http://100.81.214.29:8790/mcp", "token_file": "/dev/null"}])
+    assert phone.mcp_servers[0].url == "http://100.81.214.29:8790/mcp"
+    for url in ("https://moto-g57:8790", "http://moto g57", "http://moto-g57/a b"):
+        try:
+            StockRemote(id="123456789", password_file="/dev/null", mcp_servers=[{"url": url}])
+        except ValueError:
+            continue
+        raise AssertionError(f"{url} was accepted")
+
+
 def test_a_stock_pc_is_served_on_loopback() -> None:
     stock = {"peer": "front.tail1234.ts.net", "password_file": "/dev/null"}
     assert DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock).stock is not None

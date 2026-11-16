@@ -6,6 +6,10 @@
 //! `/servers/<name>/mcp` to its port, under the same holder and Block rules as the desk tools; an SSE server's event
 //! stream stays open while it is offered, as its one session (see [`Relay`]). No config file is read and nothing is
 //! opened beyond loopback.
+//!
+//! A bridge has no listeners of its PC to scan, so it is given its PC's servers instead ([`Remote`]): each is asked the
+//! same question at its address while an agent is connected, offered under the name it calls itself, and dropped when
+//! its address stops answering.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,11 +38,66 @@ const SSE_PATH: &str = "/sse";
 /// A server's answer larger than this is refused rather than held in memory.
 const ANSWER_CAP: usize = 64 << 20;
 
+/// Where a server is asked: a loopback port, or a named server's host with the bearer it wants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct At {
+    pub host: String,
+    pub port: u16,
+    pub bearer: Option<String>,
+}
+
+impl At {
+    pub fn loopback(port: u16) -> At {
+        At { host: "127.0.0.1".into(), port, bearer: None }
+    }
+
+    fn remote(&self) -> bool {
+        self.host != "127.0.0.1"
+    }
+}
+
+/// A server the bridge is told of, on its PC's network address: streamable HTTP only, as `http://host[:port][/path]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remote {
+    pub at: At,
+    pub path: String,
+}
+
+impl Remote {
+    /// The path defaults to /mcp and the port to 80. Plain http: the address is reached over the tailnet, which encrypts it.
+    pub fn parse(url: &str, bearer: Option<String>) -> Result<Remote, String> {
+        let rest = url.strip_prefix("http://").ok_or_else(|| format!("{url}: an MCP server is named as http://host[:port][/path]"))?;
+        let (authority, path) = rest.find('/').map_or((rest, "/mcp"), |at| rest.split_at(at));
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) if !host.ends_with(']') || authority.starts_with('[') => {
+                (host, port.parse::<u16>().map_err(|_| format!("{url}: {port} is not a port"))?)
+            }
+            _ => (authority, 80),
+        };
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':')) {
+            return Err(format!("{url}: {host:?} is not a host"));
+        }
+        if path.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(format!("{url}: the path holds a space or a control character"));
+        }
+        if bearer.as_deref().map_or(false, |b| b.is_empty() || b.contains(['\r', '\n'])) {
+            return Err(format!("{url}: its token is empty or spans lines"));
+        }
+        Ok(Remote { at: At { host: host.to_string(), port, bearer }, path: path.to_string() })
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Server {
     /// What it calls itself, made safe for Rig's server names: [a-z0-9_.-], at most 48 characters.
     pub name: String,
     pub port: u16,
+    /// Where a named server lives; absent for one found at loopback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip)]
+    at: At,
     pub path: String,
     /// Its own words for itself: serverInfo's name and version.
     pub says: String,
@@ -56,7 +115,7 @@ impl Server {
     /// One client message to the server, answered as streamable HTTP would answer it.
     pub async fn call(&self, headers: &[(&str, &str)], body: &[u8]) -> Result<Answer, String> {
         let Some(relay) = &self.relay else {
-            return post(self.port, &self.path, headers, body).await;
+            return post(&self.at, &self.path, headers, body).await;
         };
         let message: Value = serde_json::from_slice(body).map_err(|_| "the body is not one JSON-RPC message".to_string())?;
         if !message.is_object() {
@@ -93,12 +152,20 @@ pub struct Found {
     on: AtomicBool,
     /// The agent API's own port and RustDesk's: never asked.
     skip: HashSet<u16>,
+    /// Scan the listeners at loopback: on the PC itself, not on a bridge.
+    local: bool,
+    remotes: Vec<Remote>,
 }
 
 impl Found {
     /// `on` is the PC's MCP switch as it was left; on unless the person there turned it off.
     pub fn new(skip: impl IntoIterator<Item = u16>, on: bool) -> Arc<Self> {
-        Arc::new(Found { servers: Mutex::default(), not_mcp: Mutex::default(), on: AtomicBool::new(on), skip: skip.into_iter().collect() })
+        Arc::new(Found { servers: Mutex::default(), not_mcp: Mutex::default(), on: AtomicBool::new(on), skip: skip.into_iter().collect(), local: true, remotes: Vec::new() })
+    }
+
+    /// A bridge's: only the servers it was told of, at their own addresses.
+    pub fn remote(remotes: Vec<Remote>) -> Arc<Self> {
+        Arc::new(Found { servers: Mutex::default(), not_mcp: Mutex::default(), on: AtomicBool::new(true), skip: HashSet::new(), local: false, remotes })
     }
 
     pub fn on(&self) -> bool {
@@ -147,6 +214,10 @@ impl Found {
                 }
                 continue;
             }
+            self.ask_remotes(&shared).await;
+            if !self.local {
+                continue;
+            }
             let listening = match tokio::task::spawn_blocking(listeners).await {
                 Ok(Ok(found)) => found,
                 Ok(Err(why)) => {
@@ -159,12 +230,43 @@ impl Found {
         }
     }
 
+    /// Drops each told-of server whose address stopped answering, and asks each one not offered now.
+    async fn ask_remotes(&self, shared: &Shared) {
+        if self.remotes.is_empty() {
+            return;
+        }
+        let offered: Vec<Server> = self.servers().into_iter().filter(|s| s.at.remote()).collect();
+        let reached = futures_util::future::join_all(offered.iter().map(|s| reachable(&s.at))).await;
+        for (server, reached) in offered.iter().zip(reached) {
+            if let Err(why) = reached {
+                if self.servers.lock().unwrap_or_else(|p| p.into_inner()).remove(&server.name).is_some() {
+                    shared.events.push(EventKind::Server { name: server.name.clone(), found: false, says: server.says.clone(), why: Some(why) });
+                }
+            }
+        }
+        let offered: Vec<Server> = self.servers();
+        let asked: Vec<&Remote> = self.remotes.iter().filter(|r| !offered.iter().any(|s| s.at == r.at && s.path == r.path)).collect();
+        let heard = futures_util::future::join_all(asked.iter().map(|r| ask(&r.at, &r.path))).await;
+        for (remote, heard) in asked.into_iter().zip(heard) {
+            match heard {
+                Ok(info) => {
+                    let server = self.named(remote.at.clone(), &remote.path, &info, None);
+                    log::info!("mcp: {} at {}:{} ({})", server.name, remote.at.host, remote.at.port, server.says);
+                    shared.events.push(EventKind::Server { name: server.name.clone(), found: true, says: server.says.clone(), why: None });
+                    self.servers.lock().unwrap_or_else(|p| p.into_inner()).insert(server.name.clone(), server);
+                }
+                Err(why) => log::debug!("mcp: {}:{}{} is not offered: {why}", remote.at.host, remote.at.port, remote.path),
+            }
+        }
+    }
+
     async fn scan(&self, listening: &[Listener], shared: &Shared) {
         let ports: HashSet<u16> = listening.iter().map(|l| l.port).collect();
         let gone: Vec<(Server, String)> = {
             let mut servers = self.servers.lock().unwrap_or_else(|p| p.into_inner());
             let why: Vec<(String, String)> = servers
                 .values()
+                .filter(|s| !s.at.remote())
                 .filter_map(|s| if ports.contains(&s.port) { s.dropped() } else { Some(format!("nothing listens on port {} now", s.port)) }.map(|w| (s.name.clone(), w)))
                 .collect();
             why.into_iter().filter_map(|(n, w)| servers.remove(&n).map(|s| (s, w))).collect()
@@ -173,7 +275,7 @@ impl Found {
             server.close();
             shared.events.push(EventKind::Server { name: server.name, found: false, says: server.says, why: Some(why) });
         }
-        let known: HashSet<u16> = self.servers().iter().map(|s| s.port).collect();
+        let known: HashSet<u16> = self.servers().iter().filter(|s| !s.at.remote()).map(|s| s.port).collect();
         let now = Instant::now();
         self.not_mcp.lock().unwrap_or_else(|p| p.into_inner()).retain(|l, at| ports.contains(&l.port) && now.duration_since(*at) < NOT_MCP_FOR);
         let asked: Vec<Listener> = {
@@ -185,7 +287,7 @@ impl Found {
         for (listener, probed) in asked.iter().zip(heard) {
             match probed {
                 Some((path, info, relay)) => {
-                    let server = self.named(listener.port, path, &info, relay);
+                    let server = self.named(At::loopback(listener.port), path, &info, relay);
                     log::info!("mcp scan: {} on port {} ({})", server.name, server.port, server.says);
                     shared.events.push(EventKind::Server { name: server.name.clone(), found: true, says: server.says.clone(), why: None });
                     self.servers.lock().unwrap_or_else(|p| p.into_inner()).insert(server.name.clone(), server);
@@ -197,7 +299,8 @@ impl Found {
         }
     }
 
-    fn named(&self, port: u16, path: &str, info: &Value, relay: Option<Arc<Relay>>) -> Server {
+    fn named(&self, at: At, path: &str, info: &Value, relay: Option<Arc<Relay>>) -> Server {
+        let port = at.port;
         let said = info.get("name").and_then(Value::as_str).unwrap_or("");
         let version = info.get("version").and_then(Value::as_str).unwrap_or("");
         let mut name = server_name(said);
@@ -208,7 +311,8 @@ impl Found {
         if servers.contains_key(&name) {
             name = format!("{name}-{port}");
         }
-        Server { name, port, path: path.to_string(), says: format!("{said} {version}").trim().to_string(), since_ms: crate::now_ms(), relay }
+        let host = at.remote().then(|| at.host.clone());
+        Server { name, port, host, at, path: path.to_string(), says: format!("{said} {version}").trim().to_string(), since_ms: crate::now_ms(), relay }
     }
 }
 
@@ -257,28 +361,61 @@ enum Heard {
 }
 
 async fn probe_http(port: u16) -> Heard {
-    let ask = opening();
+    let at = At::loopback(port);
     let mut spoke = false;
     for path in PATHS {
-        let Ok(Ok(answer)) = tokio::time::timeout(PROBE_WAIT, post(port, path, &[], ask.to_string().as_bytes())).await else {
-            continue;
-        };
-        spoke = true;
-        if answer.status != 200 {
-            continue;
-        }
-        let Some(reply) = answer.json_rpc() else { continue };
-        if let Some(info) = server_info(&reply) {
-            if let Some(session) = answer.header("mcp-session-id") {
-                let _ = tokio::time::timeout(PROBE_WAIT, request(port, "DELETE", path, &[("mcp-session-id", session)], b"")).await;
-            }
-            return Heard::Mcp(path, info.clone());
+        match ask(&at, path).await {
+            Ok(info) => return Heard::Mcp(path, info),
+            Err(Asked::Silent(_)) => {}
+            Err(Asked::NotMcp(_)) => spoke = true,
         }
     }
     if spoke {
         Heard::Http
     } else {
         Heard::Silent
+    }
+}
+
+/// Why an address is not offered as an MCP server.
+enum Asked {
+    /// No HTTP answer within the wait.
+    Silent(String),
+    /// It answered, but not as MCP.
+    NotMcp(String),
+}
+
+impl std::fmt::Display for Asked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Asked::Silent(why) | Asked::NotMcp(why) => f.write_str(why),
+        }
+    }
+}
+
+/// MCP's opening question over streamable HTTP at one path; its serverInfo when it answers as MCP, its session ended.
+async fn ask(at: &At, path: &str) -> Result<Value, Asked> {
+    let answer = match tokio::time::timeout(PROBE_WAIT, post(at, path, &[], opening().to_string().as_bytes())).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(why)) => return Err(Asked::Silent(why)),
+        Err(_) => return Err(Asked::Silent(format!("no answer within {} s", PROBE_WAIT.as_secs()))),
+    };
+    if answer.status != 200 {
+        return Err(Asked::NotMcp(format!("{path} answered HTTP {}", answer.status)));
+    }
+    let info = answer.json_rpc().as_ref().and_then(server_info).cloned().ok_or_else(|| Asked::NotMcp(format!("{path} did not answer as MCP")))?;
+    if let Some(session) = answer.header("mcp-session-id") {
+        let _ = tokio::time::timeout(PROBE_WAIT, request(at, "DELETE", path, &[("mcp-session-id", session)], b"")).await;
+    }
+    Ok(info)
+}
+
+/// Whether a named server's address still takes a connection.
+async fn reachable(at: &At) -> Result<(), String> {
+    match tokio::time::timeout(PROBE_WAIT, TcpStream::connect((at.host.as_str(), at.port))).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(format!("{}:{} refused a connection: {e}", at.host, at.port)),
+        Err(_) => Err(format!("{}:{} took no connection within {} s", at.host, at.port, PROBE_WAIT.as_secs())),
     }
 }
 
@@ -497,18 +634,24 @@ impl Answer {
     }
 }
 
-/// POST a JSON-RPC body to a loopback port, as an MCP client does over streamable HTTP.
-pub async fn post(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Answer, String> {
+/// POST a JSON-RPC body to a server, as an MCP client does over streamable HTTP.
+pub async fn post(at: &At, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Answer, String> {
     let mut all = vec![("content-type", "application/json"), ("accept", "application/json, text/event-stream")];
     all.extend(headers.iter().filter(|(n, _)| !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("accept")));
-    request(port, "POST", path, &all, body).await
+    request(at, "POST", path, &all, body).await
 }
 
-/// One HTTP/1.1 request to 127.0.0.1:port, the connection closed after it so the answer ends with the stream.
-pub async fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Answer, String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| format!("cannot reach port {port}: {e}"))?;
-    let mut head = format!("{method} {path} HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\nconnection: close\r\ncontent-length: {}\r\n", body.len());
-    for (name, value) in headers {
+/// One HTTP/1.1 request, the connection closed after it so the answer ends with the stream. A named server's bearer
+/// goes with it; a client's own authorization never does.
+pub async fn request(at: &At, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Answer, String> {
+    let (host, port) = (at.host.as_str(), at.port);
+    let mut stream = TcpStream::connect((host, port)).await.map_err(|e| format!("cannot reach {host}:{port}: {e}"))?;
+    let shown = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+    let mut head = format!("{method} {path} HTTP/1.1\r\nhost: {shown}\r\nconnection: close\r\ncontent-length: {}\r\n", body.len());
+    if let Some(bearer) = &at.bearer {
+        head.push_str(&format!("authorization: Bearer {bearer}\r\n"));
+    }
+    for (name, value) in headers.iter().filter(|(n, _)| !n.eq_ignore_ascii_case("authorization")) {
         if !value.contains(['\r', '\n']) {
             head.push_str(&format!("{name}: {value}\r\n"));
         }
@@ -525,7 +668,7 @@ pub async fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str
         }
         raw.extend_from_slice(&chunk[..n]);
         if raw.len() > ANSWER_CAP {
-            return Err(format!("the answer from port {port} is over {} MiB", ANSWER_CAP >> 20));
+            return Err(format!("the answer from {host}:{port} is over {} MiB", ANSWER_CAP >> 20));
         }
     }
     parse_answer(&raw)
@@ -679,6 +822,78 @@ mod tests {
         assert_eq!(endpoint_path("http://evil.example:9/m", 9), None);
         assert_eq!(endpoint_path("https://127.0.0.1:9/m", 9), None);
         assert_eq!(endpoint_path("/m HTTP/1.1\r\nx: y", 9), None);
+    }
+
+    #[test]
+    fn a_remote_is_named_by_its_url() {
+        let phone = Remote::parse("http://100.81.214.29:8790", Some("t".into())).unwrap();
+        assert_eq!((phone.at.host.as_str(), phone.at.port, phone.path.as_str()), ("100.81.214.29", 8790, "/mcp"));
+        assert_eq!(Remote::parse("http://moto-g57/x", None).unwrap().at.port, 80);
+        assert_eq!(Remote::parse("http://[fd7a::1]:9/mcp", None).unwrap().at.host, "fd7a::1");
+        assert!(Remote::parse("https://moto-g57:9", None).is_err());
+        assert!(Remote::parse("http://moto-g57:x", None).is_err());
+        assert!(Remote::parse("http://a b:9", None).is_err());
+        assert!(Remote::parse("http://moto-g57:9", Some("a\nb".into())).is_err());
+    }
+
+    /// A server that answers MCP's opening as "phone" to its bearer alone, and echoes each other method's name.
+    async fn phone_server(bearer: &'static str) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let serving = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut raw = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let (head, body) = loop {
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    raw.extend_from_slice(&chunk[..n]);
+                    if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&raw[..at]).to_ascii_lowercase();
+                        let length: usize = head.lines().find_map(|l| l.strip_prefix("content-length:")).map_or(0, |v| v.trim().parse().unwrap());
+                        if raw.len() >= at + 4 + length || n == 0 {
+                            break (head, raw[at + 4..].to_vec());
+                        }
+                    }
+                };
+                let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let reply = if !head.contains(&format!("authorization: bearer {bearer}")) {
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".to_string()
+                } else {
+                    let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+                    let result = if method == "initialize" {
+                        json!({"protocolVersion": "2025-06-18", "serverInfo": {"name": "phone", "version": "0.2"}})
+                    } else {
+                        json!({"method": method})
+                    };
+                    let body = json!({"jsonrpc": "2.0", "id": message.get("id"), "result": result}).to_string();
+                    format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len())
+                };
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        (port, serving)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_told_of_server_is_offered_with_its_bearer_and_dropped_when_it_stops() {
+        let (port, serving) = phone_server("s3cret").await;
+        let shared = Shared::new(crate::events::Events::new(64));
+        let wrong = Found::remote(vec![Remote::parse(&format!("http://localhost:{port}/mcp"), Some("guess".into())).unwrap()]);
+        wrong.ask_remotes(&shared).await;
+        assert!(wrong.servers().is_empty(), "a server that refuses the bearer is not offered");
+        let found = Found::remote(vec![Remote::parse(&format!("http://localhost:{port}/mcp"), Some("s3cret".into())).unwrap()]);
+        found.ask_remotes(&shared).await;
+        let phone = found.get("phone").expect("offered under the name it calls itself");
+        assert_eq!((phone.host.as_deref(), phone.says.as_str()), (Some("localhost"), "phone 0.2"));
+        let listed = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}).to_string();
+        let answer = phone.call(&[("authorization", "Bearer guess")], listed.as_bytes()).await.unwrap();
+        assert_eq!(answer.json_rpc().unwrap()["result"]["method"], json!("tools/list"), "the bridge's bearer goes, not the client's");
+        found.ask_remotes(&shared).await;
+        assert_eq!(found.servers().len(), 1, "an offered server is not asked again");
+        serving.abort();
+        let _ = serving.await;
+        found.ask_remotes(&shared).await;
+        assert!(found.servers().is_empty(), "a server whose address stops answering is dropped");
     }
 
     #[cfg(target_os = "linux")]
