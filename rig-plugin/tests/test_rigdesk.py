@@ -102,7 +102,7 @@ class _Docs:
 
 def _granting(state: str, docs: _Docs) -> Desks:
     from rigdesk.desks import StockRemote
-    desks = Desks(SimpleNamespace(state_dir=Path(state), docs=docs))  # type: ignore[arg-type]
+    desks = Desks(SimpleNamespace(state_dir=Path(state), docs=docs, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
     stock = StockRemote(peer="deus.tail1234.ts.net", password_file="/dev/null")
     desks._pcs["deus"] = PcLink("deus", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
     desks._pcs["front"] = PcLink("front", DeskPc(url="https://front.tail1234.ts.net", token_file="/dev/null"))
@@ -315,35 +315,25 @@ def test_the_shell_allow_list_grants_user_or_system_per_agent_or_graph_on_rigdes
     asyncio.run(run())
 
 
-def test_pc_health_is_published_once_per_change_and_not_again_after_a_restart() -> None:
+def test_pc_health_is_reported_each_judging() -> None:
     from rigdesk.health import Thresholds
-    emitted: list[tuple[str, str, str]] = []
+    reported: list[tuple[str, str, str]] = []
     now = now_ms()
 
-    def emit(name: str, subject: str, fields: dict) -> None:
-        emitted.append((subject, fields["was"], fields["state"]))
+    def report(state: str, subject: str, value: str, why: str, fields: dict) -> None:
+        reported.append((state, subject, value))
 
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
-            def started() -> Desks:
-                desks = Desks(SimpleNamespace(state_dir=Path(state), emit=emit))  # type: ignore[arg-type]
-                desks._pcs["deus"] = PcLink("deus", PCS["deus"], state="up")
-                return desks
-            desks = started()
+            desks = Desks(SimpleNamespace(state_dir=Path(state), report=report))  # type: ignore[arg-type]
+            desks._pcs["deus"] = PcLink("deus", PCS["deus"], state="up")
             desks._history.add("deus", [_sample(1, now, stopped_services=[], volumes=[{"name": "C:", "total_mb": 100, "free_mb": 40}])], now)
             await desks._judge()
-            assert emitted == [], "a PC first judged ok says nothing"
             desks._thresholds = Thresholds(disk_free_fault_pct=50)
             await desks._judge()
-            await desks._judge()
-            again = started()
-            again._thresholds = Thresholds(disk_free_fault_pct=50)
-            await again._judge()
-            again._thresholds = Thresholds()
-            await again._judge()
 
     asyncio.run(run())
-    assert emitted == [("deus", "ok", "fault"), ("deus", "fault", "ok")], emitted
+    assert reported == [("rigdesk.pc_health", "deus", "ok"), ("rigdesk.pc_health", "deus", "fault")], reported
 
 
 if __name__ == "__main__":
