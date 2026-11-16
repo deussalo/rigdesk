@@ -1,6 +1,7 @@
 # RigDesk's GUI for Android (arm64): the Flutter viewer with the agent panel, for the operator's phone on the tailnet.
 # Derived from upstream's flutter-build.yml (v1.5.1) generate-bridge and build-rustdesk-android (aarch64 only), with
-# the vcpkg fetch and the public-host check of linux.yml. The release APK is debug-signed, as upstream's is by default.
+# the vcpkg fetch and the public-host check of linux.yml. The APK is signed with RigDesk's own release key when the repo's
+# RIGDESK_* secrets exist, so each build installs over the last; without them (a fork) it is debug-signed, as upstream's is.
 name: android
 
 on:
@@ -167,11 +168,26 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          RIGDESK_KEYSTORE_B64: ${{ secrets.RIGDESK_KEYSTORE_B64 }}
+          RIGDESK_STORE_PASSWORD: ${{ secrets.RIGDESK_STORE_PASSWORD }}
+          RIGDESK_KEY_PASSWORD: ${{ secrets.RIGDESK_KEY_PASSWORD }}
+          RIGDESK_KEY_ALIAS: ${{ secrets.RIGDESK_KEY_ALIAS }}
         run: |
           export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
           sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
-          # No release key: sign with the debug key, as upstream does without one.
-          sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+          if [ -n "$RIGDESK_KEYSTORE_B64" ]; then
+            # app/build.gradle's release signing reads flutter/android/key.properties.
+            printf '%s' "$RIGDESK_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/rigdesk.jks"
+            {
+              printf 'storeFile=%s\n' "$RUNNER_TEMP/rigdesk.jks"
+              printf 'storePassword=%s\n' "$RIGDESK_STORE_PASSWORD"
+              printf 'keyPassword=%s\n' "$RIGDESK_KEY_PASSWORD"
+              printf 'keyAlias=%s\n' "$RIGDESK_KEY_ALIAS"
+            } > ./flutter/android/key.properties
+          else
+            echo "::warning::no RIGDESK_KEYSTORE_B64 secret: debug-signed, so this APK will not install over a release-signed one"
+            sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+          fi
           jni=./flutter/android/app/src/main/jniLibs/arm64-v8a
           mkdir -p $jni
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so $jni/
@@ -183,6 +199,7 @@ jobs:
         run: |
           aapt=$(ls -d /usr/local/lib/android/sdk/build-tools/*/ | tail -n 1)aapt
           $aapt dump badging rigdesk-android-arm64.apk | grep -E "^package:|^application-label:|native-code"
+          $(ls -d /usr/local/lib/android/sdk/build-tools/*/ | tail -n 1)apksigner verify --print-certs rigdesk-android-arm64.apk | grep -E "DN|SHA-256"
       - name: No public RustDesk servers or keys in the build
         run: |
           mkdir apk && unzip -q rigdesk-android-arm64.apk -d apk
