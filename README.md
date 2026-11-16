@@ -19,8 +19,8 @@ README is kept at [docs/README-upstream.md](docs/README-upstream.md).
 - **Agent API.** The user-session server process serves MCP on `127.0.0.1:21119`, published on the tailnet at
   `https://<pc>.<tailnet>.ts.net/` by `tailscale serve`. Every request needs the PC's bearer token, and every tool
   call also needs the session token that `/claim` returns for a share link.
-- **Locked settings.** Server, network, proxy and security settings are hidden. The permanent password can be changed
-  only by running the install line again, and the admin settings PIN guards the rest.
+- **Settings.** The Security and Network pages are shown: the permanent password, and the ID and relay servers, can
+  be set at the PC as well as by the install line. The admin settings PIN guards them.
 - **Trimmed.** English only, Flutter UI only (the Sciter UI, iOS and Linux packaging are gone). Port forwarding,
   the remote terminal and the remote printer are switched off in the embedded settings.
 

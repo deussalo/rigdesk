@@ -9,11 +9,6 @@
     "allow-remote-config-modification": "N",
     "verification-method": "use-permanent-password",
     "approve-mode": "password",
-    "hide-server-settings": "Y",
-    "hide-network-settings": "Y",
-    "hide-proxy-settings": "Y",
-    "hide-security-settings": "Y",
-    "disable-change-permanent-password": "Y",
     "enable-tunnel": "N",
     "enable-terminal": "N",
     "enable-remote-printer": "N"
