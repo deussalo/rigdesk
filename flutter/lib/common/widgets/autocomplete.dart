@@ -298,7 +298,7 @@ class AutocompletePeerTileState extends State<AutocompletePeerTile> {
 
   @override
   Widget build(BuildContext context) {
-    final double tileRadius = 5;
+    final double tileRadius = 0;
     final name =
         '${widget.peer.username}${widget.peer.username.isNotEmpty && widget.peer.hostname.isNotEmpty ? '@' : ''}${widget.peer.hostname}';
     final greyStyle = TextStyle(

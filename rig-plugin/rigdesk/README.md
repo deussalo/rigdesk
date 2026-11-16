@@ -44,8 +44,8 @@ Each stock PC needs its own loopback port. Rig starts `rigdesk-bridge` with the 
 writes its output to `bridge-<pc>.log` in the plugin's state directory. It connects to the PC when the agent first
 acts and leaves after ten idle minutes, so the PC shows a RustDesk session only while the agent works.
 
-The **RigDesk** tab stands in for the viewer: **share with agent** mints a one-use link (copied to the clipboard)
-to give an agent for `desk/join`, and **hand to agent**, **stop**, **block**, **unblock** and **end share**
+The **RigDesk** tab stands in for the viewer: **share** mints a one-use link (copied to the clipboard)
+to give an agent for `desk/join`, and **hand over**, **stop**, **block**, **unblock** and **end share**
 act as the viewer's buttons do.
 
 ### Three parts: the PC, the bridge, the GUI
