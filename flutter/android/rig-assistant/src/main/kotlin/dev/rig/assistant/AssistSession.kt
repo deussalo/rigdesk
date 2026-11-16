@@ -50,6 +50,11 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
     /** Send was tapped: waiting for the recogniser's last words before sending. */
     private var finishing = false
     private var failures = 0
+    /** Sent once per showing: a second Send before the sheet hides sends nothing. */
+    private var sent = false
+    /** When the recogniser last said it was ready, and how many segments in a row ended at once with nothing heard. */
+    private var readyAt = 0L
+    private var quick = 0
     @Volatile private var image: JSONObject? = null
     private var shot = CountDownLatch(1)
 
@@ -103,6 +108,8 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
         hearing = ""
         finishing = false
         failures = 0
+        sent = false
+        quick = 0
         image = null
         shot = CountDownLatch(1)
         heard.text = ""
@@ -191,14 +198,17 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
         heard.text = if (hearing.isEmpty()) said.toString() else if (said.isEmpty()) hearing else "$said $hearing"
     }
 
-    /** The recogniser ended a segment: send if Send is waiting for it, else listen again. */
-    private fun segmentEnded() {
-        if (finishing) deliver()
-        else if (recording) main.post { if (recording) listen() }
+    /** The recogniser ended a segment: send if Send is waiting for it, else listen again. A recogniser that ends at once
+     *  every time (some ignore the silence extras) is restarted with a growing pause, up to 3 s, rather than spun. */
+    private fun segmentEnded(heardSome: Boolean) {
+        if (finishing) { deliver(); return }
+        if (!recording) return
+        quick = if (!heardSome && System.currentTimeMillis() - readyAt < QUICK_MS) quick + 1 else 0
+        main.postDelayed({ if (recording) listen() }, minOf(3_000L, 300L * quick))
     }
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) { failures = 0 }
+        override fun onReadyForSpeech(params: Bundle?) { failures = 0; readyAt = System.currentTimeMillis() }
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
@@ -215,14 +225,16 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
 
         override fun onResults(results: Bundle?) {
             failures = 0
-            settle(results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: hearing)
-            segmentEnded()
+            val words = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: hearing
+            settle(words)
+            segmentEnded(words.isNotBlank())
         }
 
         override fun onError(error: Int) {
+            val heardSome = hearing.isNotBlank()
             settle(hearing)  // keep what was heard before the error
             when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> segmentEnded()
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> segmentEnded(heardSome)
                 else -> {
                     // A busy or broken recogniser is let go and made again; the recording goes on unless it keeps failing.
                     recognizer?.destroy()
@@ -245,7 +257,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
     }
 
     private fun send() {
-        if (finishing) return
+        if (finishing || sent) return
         if (recording && recognizer != null) {
             finishing = true
             status.text = "Sending…"
@@ -257,6 +269,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
     /** Sends everything heard and typed, once. */
     private fun deliver() {
         main.removeCallbacks(deliverLate)
+        if (sent) return
         settle(hearing)
         stopRecording()
         val text = listOf(said.toString().trim(), typed.text.toString().trim()).filter { it.isNotEmpty() }.joinToString("\n")
@@ -264,6 +277,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
             status.text = "Nothing heard or typed to send"
             return
         }
+        sent = true
         val arrived = shot
         BACK.execute { Link.event("assist", text, imageAfter(arrived)) }
         status.text = if (Link.connected()) "Sent to ${target()}" else "Kept: sent to ${target()} once the phone reconnects"
@@ -279,6 +293,8 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
     companion object {
         private val BACK = Executors.newSingleThreadExecutor { Thread(it, "rig-assist") }
         private const val MAX_FAILURES = 5
+        /** A segment ending this soon after ready, with nothing heard, ended at once. */
+        private const val QUICK_MS = 500L
         /** How long Send waits for the recogniser's final words after stopping it. */
         private const val LAST_WORDS_MS = 2_000L
 
