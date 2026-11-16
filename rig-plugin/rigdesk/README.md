@@ -144,7 +144,11 @@ Known limits against a RigDesk PC:
   it now.
 * `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins
   the caller to it now for one session, as a share link would; `assign` gives it a standing grant. Refused at once for
-  an unknown PC, a RigDesk PC (its human shares it in the viewer), or one already assigned to the caller.
+  an unknown PC, or one already assigned to the caller.
+  On a RigDesk PC it takes `join` only. Accept has Rig's bearer ask the PC for the session (`POST /join`), with no share link.
+  The PC admits it only while its own switch is on (`-AgentJoin`, and the PIN-locked pause), no other agent holds its
+  session and the caller is not blocked there. The person at the PC is notified and can end the session from the tray.
+  The PC's switch is read when the agent asks, and a closed one refuses at once with the PC's words, before the operator is asked.
 * `desk/join(pc)` — joins a stock PC assigned to the caller, by name. A desk call with no session joins the caller's
   assigned PC by itself only when it has exactly one; with more it is refused and lists them.
 * `desk/<tool>` — the PC's own tools (screenshot, click, type, scroll, move, drag, key, shortcut, wait, clipboard

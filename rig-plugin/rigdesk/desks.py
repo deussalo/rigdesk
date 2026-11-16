@@ -227,6 +227,8 @@ class PcLink:
     asking: tuple[str, float] = ("GET /health", 15.0)
     # The PC's agent shell as it last said: {open, code, words}; None for a RigDesk without one, or a stock PC.
     shell: dict[str, Any] | None = None
+    # The PC's switch for sessions the operator starts from Rig, as it last said: {open, code, words}; None for a RigDesk without /join, or a stock PC.
+    join: dict[str, Any] | None = None
     sampling: asyncio.Lock = field(default_factory=asyncio.Lock)
     samples_why: str | None = None
 
@@ -266,6 +268,7 @@ class PcEntry(TypedDict):
     held_by: PcHolder | None
     shell: dict[str, Any] | None
     health: Health | None
+    join: dict[str, Any] | None
 
 
 def failure(failed: BaseException) -> str:
@@ -307,6 +310,8 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
         if by == "stop":
             return (f"RigDesk {pc}: the human pressed Stop at {at}. Stop what you are doing there and wait for them; "
                     "every call there is refused until they resume you.")
+        if by == "operator":
+            return None
         if holder == "agent" and by == "unblock":
             return f"RigDesk {pc}: the human resumed you at {at}. You may act there again; look first, the screen may have changed."
         if (holder == "human" and by != "unblock") or (holder == "agent" and by == "quiet"):
@@ -751,6 +756,7 @@ class Desks:
             health = await answer.json()
         link.standing = health.get("standing")
         link.shell = _object(health["shell"]) if isinstance(health.get("shell"), dict) else None
+        link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
         down = health.get("down")
         boot = str(health.get("boot", ""))
         if boot != self._boots.get(link.name):
@@ -1260,16 +1266,48 @@ class Desks:
         except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
             _LOG.warning("rigdesk_unassign_failed", f"RigDesk {pc}: ending the unassigned session failed: {failed}", pc=pc)
 
-    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str) -> Held:
-        """The operator accepted this agent's request to join a stock PC: a share link is minted and claimed for it, as the human would."""
+    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "") -> Held:
+        """The operator accepted this agent's request to join a PC: on a stock PC a share link is minted and claimed for it, as the human would;
+        a RigDesk PC is asked for the session itself."""
         mine = self.held_by(agent, graph)
         if mine is not None:
             raise DeskRefused(f"{title} already owns the session on {mine.pc}; it must desk/leave it first")
         other = self._sessions.get(pc)
         if other is not None and other.agent != agent:
             raise DeskRefused(f"{other.title} holds {pc} now")
+        if self._link(pc).spec.stock is None:
+            return await self._join_operator(pc, agent, graph, node, title, ask)
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title)
+
+    async def join_switch(self, pc: str) -> dict[str, Any] | None:
+        """A RigDesk PC's switch for sessions the operator starts, read from it now: {open, code, words}; None for a RigDesk without /join."""
+        link = self._link(pc)
+        async with self._client().get(f"{link.spec.url}/health", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
+            if answer.status != 200:
+                raise DeskRefused(f"{pc}'s /health answered HTTP {answer.status}")
+            health = _object(await answer.json(content_type=None))
+        link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
+        return link.join
+
+    async def _join_operator(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str) -> Held:
+        """Rig's bearer asks a RigDesk PC for its session for this agent, with no share link; the PC's own switch admits it."""
+        link = self._link(pc)
+        body = {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ask}
+        async with self._client().post(f"{link.spec.url}/join", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
+            said = _object(await answer.json(content_type=None)) if answer.content_type == "application/json" else {}
+            if answer.status == 404 and said.get("code") != "no_join":
+                raise DeskRefused(f"{pc}'s RigDesk is too old for sessions started from Rig (it has no /join); update it, or ask the human there for a share link")
+            if answer.status != 200:
+                raise DeskRefused(f"{pc} refused the session: {said.get('error') or f'HTTP {answer.status}'}")
+        session = said.get("session")
+        if not isinstance(session, str):
+            raise DeskRefused(f"{pc} accepted the session but sent no session token")
+        held = self._sessions[pc] = Held(pc, agent, graph, node, title, session, now_ms())
+        link.standing = said.get("standing")
+        await asyncio.to_thread(self._write_state)
+        self._resync(link)
+        return held
 
     async def join_assigned(self, pc: str, agent: str, graph: str, node: str, title: str) -> Held:
         """Joins a PC this agent is assigned, as a share link would, unless another agent holds it now."""
@@ -1392,7 +1430,7 @@ class Desks:
             held = self._sessions.get(name)
             rows.append(PcEntry(name=name, client=link.spec.client, stock=link.spec.stock is not None, state=link.state, why=link.remote_why or link.why,
                                 assigned=self.granted(name), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph),
-                                shell=link.shell, health=self.judged(name)))
+                                shell=link.shell, health=self.judged(name), join=link.join))
         return tuple(rows)
 
     def session_of(self, graph: str, agent: str) -> dict[str, Any] | None:

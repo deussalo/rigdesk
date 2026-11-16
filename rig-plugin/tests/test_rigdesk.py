@@ -27,9 +27,22 @@ def test_the_agent_hears_of_stop_and_block_but_not_of_the_humans_passing_input_o
     assert "resumed you" in str(words_of("deus", {"type": "holder", "holder": "agent", "by": "unblock", "at_ms": 0}))
     assert "blocked you" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "block", "at_ms": 0}))
     assert words_of("deus", {"type": "holder", "holder": "agent", "by": "share", "at_ms": 0}) is None
+    assert words_of("deus", {"type": "holder", "holder": "agent", "by": "operator", "at_ms": 0}) is None
     assert "pressed Stop" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "stop", "at_ms": 0}))
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
     assert "session there ended" in str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the human ended the share", "at_ms": 0}))
+
+
+def test_a_rigdesk_pc_says_whether_the_operator_can_start_a_session_there() -> None:
+    from rigdesk import _reached_by
+
+    def entry(join: object) -> object:
+        return {"stock": False, "join": join}
+
+    assert "desk/request (join" in _reached_by(entry({"open": True, "code": None, "words": None}))  # type: ignore[arg-type]
+    paused = _reached_by(entry({"open": False, "code": "join_paused", "words": "the person at this PC paused sessions started from Rig"}))  # type: ignore[arg-type]
+    assert paused.startswith("a share link") and "paused" in paused
+    assert "takes no sessions started from Rig" in _reached_by(entry(None))  # type: ignore[arg-type]
 
 
 def test_a_stock_pc_is_served_on_loopback() -> None:

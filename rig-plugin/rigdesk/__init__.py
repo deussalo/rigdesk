@@ -10,7 +10,7 @@ import os
 from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict, cast
+from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
@@ -61,6 +61,7 @@ class Requested(TypedDict):
     agent: str
     graph: str
     kind: RequestKind
+    ask: NotRequired[str]
 
 
 REQUESTED: TypeAdapter[Requested] = TypeAdapter(Requested)
@@ -76,7 +77,7 @@ class LeaveInput(ToolInput):
 
 
 class RequestInput(ToolInput):
-    pc: str = Field(description="The stock RustDesk PC you need, by its name in Rig; desk/pcs lists them.")
+    pc: str = Field(description="The PC you need, by its name in Rig; desk/pcs lists them. A RigDesk PC takes kind join only, and only while its own switch allows sessions started from Rig.")
     why: str = Field(min_length=1, max_length=1000, description="What you need it for, in a sentence or two; the operator reads it before deciding.")
     kind: RequestKind = Field(default="join", description="join: one session, now, until you leave or the human ends it. "
                                                            "assign: a standing grant, so you join it by name with desk/join(pc), across restarts, until unassigned.")
@@ -171,10 +172,21 @@ def _shell_words(desks: Desks, entry: PcEntry, agent: str, graph: str) -> str:
     return f"{may}; {pc_says}"
 
 
+def _reached_by(entry: PcEntry) -> str:
+    if entry["stock"]:
+        return "desk/request (join or assign), or a share link"
+    switch = entry["join"]
+    if switch is None:
+        return "a share link from the human in the RigDesk viewer only: its RigDesk takes no sessions started from Rig"
+    if switch.get("open"):
+        return "desk/request (join; the operator accepts in Rig), or a share link from the human in the RigDesk viewer"
+    return f"a share link from the human in the RigDesk viewer only: {switch.get('words')}"
+
+
 def _pc_entry(desks: Desks, entry: PcEntry, agent: str, graph: str, mine: set[str]) -> JsonObject:
     judged = entry["health"]
     return {"name": entry["name"], "client": entry["client"], "state": entry["state"],
-            "reached_by": "desk/request (join or assign), or a share link" if entry["stock"] else "a share link from the human in the RigDesk viewer only",
+            "reached_by": _reached_by(entry),
             "assigned_to_you": entry["name"] in mine, "held_by": _held_words(entry, agent), "shell": _shell_words(desks, entry, agent, graph),
             "health": None if judged is None else {"state": judged.state, "failing": [check.words for check in judged.failing]}}
 
@@ -266,7 +278,19 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     if entry is None:
         return call.refused(REFUSED, f"no RigDesk PC named {given.pc} is set up in Rig; desk/pcs lists those that are")
     if not entry["stock"]:
-        return call.refused(REFUSED, f"{given.pc} runs RigDesk: only the human in its viewer shares it; ask them for a share link and call desk/join with it")
+        if given.kind == "assign":
+            return call.refused(REFUSED, f"{given.pc} runs RigDesk, which is not assigned standing access; ask with kind join for one session, or ask the human there for a share link")
+        holder = entry["held_by"]
+        if holder is not None and holder["agent_id"] != agent:
+            return call.refused(REFUSED, f"{holder['title']} holds {given.pc} now; ask again once they leave or the share ends")
+        try:
+            switch = await desks.join_switch(given.pc)
+        except Exception as failed:  # noqa: BLE001
+            return _refused(call, failed)
+        if switch is None:
+            return call.refused(REFUSED, f"{given.pc}'s RigDesk is too old for sessions started from Rig; ask the human there for a share link and call desk/join with it")
+        if not switch.get("open"):
+            return call.refused(REFUSED, f"{given.pc}: {switch.get('words')} ({switch.get('code')}); ask the human there for a share link instead")
     assigned = given.pc in desks.assigned_pcs(agent, graph)
     if given.kind == "assign" and assigned:
         return call.refused(REFUSED, f"{given.pc} is already assigned to you: desk/join(pc) joins it")
@@ -276,18 +300,20 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     if given.kind == "join" and held is not None and held.pc == given.pc:
         return call.refused(REFUSED, f"you already own the session on {given.pc}")
     seat, asked = call.contract.place.seat, new_id("desk")
-    lets = ("Accept joins it to that PC now, for one session: until it leaves, or you end the share." if given.kind == "join" else
+    lets = ("Accept starts its session on that RigDesk PC now, with no share link: until it leaves, or the person at the PC ends it from RigDesk's tray "
+            "icon, where they are told who it is." if not entry["stock"] else
+            "Accept joins it to that PC now, for one session: until it leaves, or you end the share." if given.kind == "join" else
             "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the RigDesk page.")
     wants = "to join" if given.kind == "join" else "a standing grant to"
     reason = f"{title} ({agent}, in {graph}) asks {wants} RigDesk PC {given.pc}:\n\n{given.why.strip()}\n\n{lets}"[:2000]
     state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                     Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind}))
+                                     Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind, "ask": asked}))
     return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
             "said": "Nothing is granted yet: the operator is asked to Accept, and the decision arrives as your next input."}
 
 
 async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
-    """The operator's Accept: the agent that asked joins the PC now, or is assigned it, if it still stands at its seat and the PC is still stock."""
+    """The operator's Accept: the agent that asked joins the PC now, or is assigned a stock PC, if it still stands at its seat."""
     given = REQUESTED.validate_python(asked["given"])
     seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
     identity = await host.roster.identity(seat)
@@ -296,7 +322,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
     desks = host.live(Desks)
     try:
         if given["kind"] == "join":
-            held = await desks.join_approved(given["pc"], given["agent"], given["graph"], seat.node, identity.label)
+            held = await desks.join_approved(given["pc"], given["agent"], given["graph"], seat.node, identity.label, given.get("ask", ""))
             return f"You joined {held.pc}: its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there."
         changed = await desks.assign(given["pc"], f"agent:{given['agent']}")
     except DeskRefused as refused:
@@ -378,7 +404,7 @@ def _built(desks: Desks) -> tuple[ToolDef, ...]:
             _native(desks, "shell", "Run a command on a RigDesk PC: named by pc, with no session and nothing on its screen, as SYSTEM or its user, where the operator "
                                     "allowed you; unnamed, on the PC you joined. background starts a job; job reads one.", ShellInput, _shell,
                     limit_s=CALL_LIMIT_S + SHELL_LIMIT_S + 10),
-            _native(desks, "request", "Ask the operator to let you join a stock RustDesk PC now (kind join), or to assign it to you (kind assign).", RequestInput, _request),
+            _native(desks, "request", "Ask the operator to let you join a PC now (kind join), or to assign a stock RustDesk PC to you (kind assign).", RequestInput, _request),
             _native(desks, "attachment", "An image the human sent you from the RigDesk viewer, as a PNG file you can read.", AttachmentInput, _attachment, read_only=True),
             *(_passed(desks, name, listed) for name, listed in desks.catalog().items() if name not in NATIVE),
             *(_served(desks, server, listed) for server in desks.pc_servers() for listed in server.tools))
