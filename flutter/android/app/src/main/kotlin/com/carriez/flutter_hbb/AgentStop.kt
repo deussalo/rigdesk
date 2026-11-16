@@ -131,7 +131,8 @@ class AgentStop(private val ctx: Context) {
             "claimed" -> main.post { holder = "agent"; lastActionAtMs = maxOf(lastActionAtMs, atMs); refresh() }
             "holder" -> main.post { holder = e.optString("holder"); refresh() }
             "revoked" -> main.post { holder = ""; refresh() }
-            "action" -> main.post { lastActionAtMs = maxOf(lastActionAtMs, atMs); refresh() }
+            // Live only, never replayed: the phone's own clock, so the window needs no clocks in agreement.
+            "action" -> main.post { lastActionAtMs = System.currentTimeMillis(); refresh() }
         }
         return e.optLong("id")
     }
