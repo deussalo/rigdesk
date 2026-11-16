@@ -150,8 +150,13 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
 
     private fun listen() {
         if (!granted(context, Manifest.permission.RECORD_AUDIO)) {
-            status.text = "Rig Assistant may not use the microphone: allow it on its setup screen, or type"
             recording = false
+            status.text = "Allow the microphone, and the sheet opens again listening. Or type."
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val asked = mutableListOf(Manifest.permission.RECORD_AUDIO)
+                if (Build.VERSION.SDK_INT >= 33) asked.add(Manifest.permission.POST_NOTIFICATIONS)
+                startAssistantActivity(Switch.runtime(context, *asked.toTypedArray()).putExtra(GrantActivity.REOPEN, true))
+            }
             return
         }
         val r = recognizer ?: recognizer(context)?.also { made ->

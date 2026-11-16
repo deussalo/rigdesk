@@ -23,7 +23,22 @@ import android.util.Log
 class AssistService : VoiceInteractionService() {
     override fun onReady() {
         super.onReady()
+        live = this
         LinkService.start(this)
+    }
+
+    override fun onShutdown() {
+        if (live === this) live = null
+        super.onShutdown()
+    }
+
+    companion object {
+        @Volatile private var live: AssistService? = null
+
+        /** Opens the sheet again, as a hold of Home would: after the microphone is allowed from it. */
+        fun reopen() {
+            live?.showSession(Bundle(), VoiceInteractionSession.SHOW_WITH_SCREENSHOT)
+        }
     }
 }
 

@@ -2,6 +2,7 @@ package dev.rig.assistant
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -95,6 +96,38 @@ class SetupActivity : Activity() {
             startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
         }
         setContentView(ScrollView(this).apply { addView(column) })
+        pair(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        pair(intent)
+    }
+
+    /** A pairing link: rigassistant://pair?url=…&token=…&phone=…. Anyone can fire one, so it takes the person's Pair tap. */
+    private fun pair(intent: Intent?) {
+        val link = intent?.data ?: return
+        if (link.scheme != "rigassistant" || link.host != "pair") return
+        val url = link.getQueryParameter("url").orEmpty().trim()
+        val token = link.getQueryParameter("token").orEmpty().trim()
+        val phone = link.getQueryParameter("phone").orEmpty().trim().ifEmpty { Config.defaultPhone() }
+        val host = try { Uri.parse(url).host } catch (e: Exception) { null }
+        if (host == null || token.isEmpty()) {
+            state.text = "That pairing link is incomplete: it needs Rig's address and a token"
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Pair with Rig?")
+            .setMessage("Connect this phone to the Rig at $host as \"$phone\". Its agent can then use the phone's tools you allow.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Pair") { _, _ ->
+                Config.prefs(this).edit().putString("url", url).putString("token", token).putString("phone", phone).apply()
+                Link.redial()
+                recreate()
+                if (!isAssistant()) startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
+            }
+            .show()
+        setIntent(Intent(this, SetupActivity::class.java))
     }
 
     override fun onResume() {

@@ -33,5 +33,6 @@ fun notification(ctx: Context, channel: String, title: String, text: String): No
 
 private fun channelName(channel: String) = when (channel) {
     "rig-told" -> "What the agent tells you"
+    "rig-asks" -> "What Rig asks you to allow"
     else -> "From Rig"
 }

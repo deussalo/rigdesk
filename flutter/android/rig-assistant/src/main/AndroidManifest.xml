@@ -29,13 +29,28 @@
             android:exported="true"
             android:icon="@android:drawable/ic_btn_speak_now"
             android:label="Rig Assistant"
+            android:launchMode="singleTop"
             android:taskAffinity="dev.rig.assistant"
             android:theme="@android:style/Theme.DeviceDefault">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Pairing: rigassistant://pair?url=…&token=…&phone=…, from a QR code or a tapped link; the person confirms it. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="rigassistant" android:host="pair" />
+            </intent-filter>
         </activity>
+
+        <activity
+            android:name="dev.rig.assistant.GrantActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="dev.rig.assistant.grant"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service
             android:name="dev.rig.assistant.LinkService"

@@ -83,9 +83,9 @@ class Messages(private val ctx: Context) {
         else -> null
     }
 
-    private fun listener(): RigNotifications = RigNotifications.live ?: throw Refusal(
+    private fun listener(): RigNotifications = RigNotifications.live ?: throw Needs(
         "Rig Assistant has no notification access: turn it on in the phone's Settings > Notifications > Device & app notifications > Rig Assistant " +
-            "(or adb shell cmd notification allow_listener ${ComponentName(ctx, RigNotifications::class.java).flattenToString()})")
+            "(or adb shell cmd notification allow_listener ${ComponentName(ctx, RigNotifications::class.java).flattenToString()})", "notification access (to read and answer notifications)", Switch.notificationAccess())
 
     private fun active(): List<StatusBarNotification> = listener().activeNotifications?.toList().orEmpty()
 
@@ -195,7 +195,8 @@ class Messages(private val ctx: Context) {
     private fun sms(to: String, text: String): String {
         if (to.isEmpty() || text.isEmpty()) throw Refusal("sms_send takes to and text")
         if (!granted(Manifest.permission.SEND_SMS))
-            throw Refusal("RigDesk may not send SMS: allow it in the phone's Settings > Apps > RigDesk > Permissions > SMS (or adb shell pm grant ${ctx.packageName} android.permission.SEND_SMS)")
+            throw Needs("Rig Assistant may not send SMS: allow it in the phone's Settings > Apps > RigDesk > Permissions > SMS (or adb shell pm grant ${ctx.packageName} android.permission.SEND_SMS)",
+                "SMS (to send texts from your number)", Switch.runtime(ctx, Manifest.permission.SEND_SMS))
         val sms: SmsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) ctx.getSystemService(SmsManager::class.java)
             else SmsManager.getDefault()
         val parts = sms.divideMessage(text)
@@ -226,7 +227,8 @@ class Messages(private val ctx: Context) {
     private fun contacts(query: String): String {
         if (query.isEmpty()) throw Refusal("contacts takes a query")
         if (!granted(Manifest.permission.READ_CONTACTS))
-            throw Refusal("RigDesk may not read contacts: allow it in the phone's Settings > Apps > RigDesk > Permissions > Contacts (or adb shell pm grant ${ctx.packageName} android.permission.READ_CONTACTS)")
+            throw Needs("Rig Assistant may not read contacts: allow it in the phone's Settings > Apps > RigDesk > Permissions > Contacts (or adb shell pm grant ${ctx.packageName} android.permission.READ_CONTACTS)",
+                "contacts (to look people up)", Switch.runtime(ctx, Manifest.permission.READ_CONTACTS))
         val found = LinkedHashMap<Long, String>()
         fun match(uri: Uri, idColumn: String, nameColumn: String) {
             ctx.contentResolver.query(uri, arrayOf(idColumn, nameColumn), null, null, null)?.use { c ->

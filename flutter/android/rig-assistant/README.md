@@ -14,7 +14,17 @@ The phone's assistant inside the RigDesk Android app, as a module of its own: it
 
 ## Setting a phone up
 
-Either open **Rig Assistant** on the phone and fill its setup screen, switch by switch, or from a machine whose adb the
+The short path, with nothing else set up first:
+
+1. Install the app.
+2. Open a pairing link on the phone, `rigassistant://pair?url=<Rig's address>&token=<access token>&phone=<name>`, and tap
+   **Pair**. Android's default-assistant screen opens next: choose RigDesk.
+3. Hold Home. The first time, allow the microphone; the sheet opens again, listening.
+
+Everything else is asked for when an agent first needs it: a tool refused for a missing switch posts one notification
+naming what it is for, and tapping it opens the screen that turns it on.
+
+Or open **Rig Assistant** on the phone and fill its setup screen, switch by switch, or from a machine whose adb the
 phone trusts run `phone-setup.sh <serial> <Rig's address> <phone name> [apk]`, which does all of it:
 
 1. installs the APK (if given);

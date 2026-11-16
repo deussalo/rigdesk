@@ -25,7 +25,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /** A tool call the phone will not or cannot do, and why: the call's error. */
-class Refusal(why: String) : Exception(why)
+open class Refusal(why: String) : Exception(why)
 
 /** One tool's MCP description. */
 fun toolSpec(name: String, title: String, readOnly: Boolean, description: String, required: List<String>, vararg props: Pair<String, JSONObject>): JSONObject =
@@ -76,6 +76,9 @@ class Tools(private val ctx: Context) {
             else -> messages.call(name, args) ?: files.call(name, args) ?: throw Refusal("the phone has no tool $name")
         }
         result(text, false)
+    } catch (e: Needs) {
+        Switch.prompt(ctx, e)
+        result("${e.message} The phone now shows a prompt asking the person to allow ${e.what}.", true)
     } catch (e: Refusal) {
         result(e.message ?: "refused", true)
     } catch (e: Exception) {
