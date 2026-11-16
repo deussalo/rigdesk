@@ -88,18 +88,17 @@ impl FrameRaw {
         {
             return None;
         }
-        dst.clear();
-        dst.extend_from_slice(&self.data);
+        std::mem::swap(dst, &mut self.data);
         Some(())
     }
 
-    // The latest frame whatever its age: Android sends none while the screen is still.
-    fn last(&self, dst: &mut Vec<u8>) -> Option<()> {
-        if self.enable.not() || self.data.is_empty() {
+    // A frame that arrived and expired untaken, whatever its age: Android sends none while the screen is still.
+    fn last(&mut self, dst: &mut Vec<u8>) -> Option<()> {
+        if self.enable.not() || !self.ready {
             return None;
         }
-        dst.clear();
-        dst.extend_from_slice(&self.data);
+        self.ready = false;
+        std::mem::swap(dst, &mut self.data);
         Some(())
     }
 }

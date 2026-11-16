@@ -214,4 +214,25 @@ mod tests {
         assert!(!events[2].down && events[2].chr() == 'c' as u32);
         assert!(!events[3].down && events[3].control_key() == ControlKey::Control);
     }
+
+    fn masks(msgs: &[Message]) -> Vec<i32> {
+        msgs.iter().map(|m| m.mouse_event().mask).collect()
+    }
+
+    // The masks RustDesk's InputService.kt turns into global actions: BACK_UP 66, WHEEL_BUTTON_DOWN 33, WHEEL_BUTTON_UP 34.
+    #[test]
+    fn android_navigation_keys_are_the_input_service_masks() {
+        assert_eq!(masks(&android_nav("back").unwrap()), vec![66]);
+        assert_eq!(masks(&android_nav("Home").unwrap()), vec![33, 34]);
+        assert_eq!(masks(&android_nav("recents").unwrap()), vec![33]);
+        assert!(android_nav("enter").is_none());
+    }
+
+    #[test]
+    fn android_scroll_sends_one_wheel_event_per_notch() {
+        let msgs = android_scroll(-3);
+        assert_eq!(masks(&msgs), vec![MOUSE_TYPE_WHEEL; 3]);
+        assert!(msgs.iter().all(|m| m.mouse_event().y == -1));
+        assert!(android_scroll(0).is_empty());
+    }
 }

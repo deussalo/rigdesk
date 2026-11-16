@@ -1504,11 +1504,13 @@ fn check_qos(
 // A still Android screen sends no frame, so a screenshot waiting on it takes the last one.
 #[cfg(target_os = "android")]
 fn answer_screenshot_from_last_frame(c: &mut CapturerInfo, key: (VideoSource, usize)) {
-    let Some(screenshot) = SCREENSHOTS.lock().unwrap().remove(&key) else {
+    if !SCREENSHOTS.lock().unwrap().contains_key(&key) {
+        return;
+    }
+    let Some(scrap::Frame::PixelBuffer(f)) = c.last_frame() else {
         return;
     };
-    let Some(scrap::Frame::PixelBuffer(f)) = c.last_frame() else {
-        SCREENSHOTS.lock().unwrap().insert(key, screenshot);
+    let Some(screenshot) = SCREENSHOTS.lock().unwrap().remove(&key) else {
         return;
     };
     let (msg, w, h, data) = match get_rgba_from_pixelbuf(&f) {
