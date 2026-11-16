@@ -159,6 +159,7 @@ under `plugins.rigdesk.pcs` as `{name: {url, token_file, client}}`. See [rig-plu
 | `POST /leave` | the owning agent ends its session |
 | `GET /log?n=N` | the action log |
 | `GET /frame?display=N` | a PNG of the screen now, for the bearer's holder (the viewer's note, Rig's screenshot on demand); journaled |
+| `POST /viewer/note` | bridge only: `{text, pngs, key?}`, the human's message to the owning agent; a note sent again with a `key` already sent to the same agent answers the first event (`replayed: true`) and is not told twice. Keys are forgotten when the bridge restarts, so a note replayed across a restart is told again |
 | `GET /health` | boot id, current standing and the agent shell's switch (`{open, code, words}`, null without one) |
 | `POST /join` | `{agent: {id, title, graph}, ask}`: a session the operator accepted in Rig, with no share link; answers `{session, standing}` as `/claim` does; refused with `join_off`, `join_paused`, `held` (another agent holds the session, named) or `blocked`; journaled either way; 404 `no_join` where the host offers none |
 | `POST /shell` | `{agent: {id, title, graph}, command, as, timeout_s, background}` or `{agent, job}`: the management lane, no session; refused with `shell_off`, `shell_paused`, `blocked`, `jobs_full`, `no_job` or `bad_request`; journaled either way |

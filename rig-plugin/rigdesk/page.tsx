@@ -481,7 +481,7 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
         </BoardPart>
       )}
       {pc.assigned.length === 0 ? null : <BoardPart name="assigned"><Grants pc={pc} /></BoardPart>}
-      {pc.stock || pc.mcp === undefined || pc.mcp.servers.length === 0 ? null : <McpServers mcp={pc.mcp} now={now} />}
+      {pc.mcp === undefined || pc.mcp.servers.length === 0 ? null : <McpServers mcp={pc.mcp} now={now} />}
       {health === null ? null : <BoardPart name="health"><Health pc={pc} now={now} /></BoardPart>}
       {pc.shell == null ? null : <BoardPart name="agent shell"><Shell pc={pc} shell={pc.shell} now={now} forFleet={forFleet} /></BoardPart>}
       <BoardPart name="screen"><Screenshot pc={pc} now={now} /></BoardPart>
