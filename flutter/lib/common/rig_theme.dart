@@ -45,7 +45,22 @@ class RigTheme {
   static const accent50 = Color(0x77BB7744);
   static const accent80 = Color(0xAABB7744);
 
-  /// RustDesk's dark theme with every colour taken from the tokens.
+  static const square = RoundedRectangleBorder();
+  static const focusRing = BorderSide(color: accent, width: 2);
+
+  static InputBorder _field(BorderSide side) =>
+      OutlineInputBorder(borderRadius: BorderRadius.zero, borderSide: side);
+
+  /// Rig's Action: flat and square, with a 2 px ring when focused.
+  static ButtonStyle _action(BorderSide ring) => ButtonStyle(
+        shape: const WidgetStatePropertyAll(square),
+        elevation: const WidgetStatePropertyAll(0),
+        side: WidgetStateProperty.resolveWith((states) =>
+            states.contains(WidgetState.focused) ? ring : BorderSide.none),
+      );
+
+  /// RustDesk's dark theme with every colour taken from the tokens and every
+  /// corner square.
   static ThemeData apply(ThemeData upstream) {
     final scheme = ColorScheme.dark(
       primary: accent,
@@ -54,8 +69,6 @@ class RigTheme {
       onSecondary: bg,
       surface: surface,
       onSurface: text,
-      background: bg,
-      onBackground: text,
       error: toneFault,
       onError: text,
     );
@@ -94,10 +107,35 @@ class RigTheme {
       ),
       dialogTheme: upstream.dialogTheme.copyWith(
         backgroundColor: surface,
-        shape: _withSide(upstream.dialogTheme.shape, BorderSide(color: border)),
+        elevation: 0,
+        shape: square.copyWith(side: BorderSide(color: border)),
       ),
+      cardTheme: upstream.cardTheme.copyWith(
+        color: surface,
+        elevation: 0,
+        shape: square,
+      ),
+      chipTheme: upstream.chipTheme.copyWith(shape: square),
+      bottomSheetTheme: upstream.bottomSheetTheme.copyWith(
+        backgroundColor: surface,
+        shape: square,
+      ),
+      floatingActionButtonTheme: upstream.floatingActionButtonTheme.copyWith(
+        backgroundColor: accent,
+        foregroundColor: bg,
+        shape: square,
+      ),
+      scrollbarTheme:
+          upstream.scrollbarTheme.copyWith(radius: Radius.zero),
       inputDecorationTheme: upstream.inputDecorationTheme.copyWith(
+        filled: true,
         fillColor: overlaySoftStrong,
+        border: _field(BorderSide.none),
+        enabledBorder: _field(BorderSide.none),
+        disabledBorder: _field(BorderSide.none),
+        focusedBorder: _field(focusRing),
+        errorBorder: _field(const BorderSide(color: toneFault)),
+        focusedErrorBorder: _field(const BorderSide(color: toneFault, width: 2)),
         hintStyle: TextStyle(color: textDim),
         labelStyle: TextStyle(color: textDim),
         floatingLabelStyle: TextStyle(color: accent),
@@ -105,6 +143,7 @@ class RigTheme {
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(foregroundColor: text)
+            .merge(_action(focusRing))
             .merge(upstream.textButtonTheme.style),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
@@ -113,46 +152,58 @@ class RigTheme {
           foregroundColor: bg,
           disabledBackgroundColor: overlaySoftStrong,
           disabledForegroundColor: textFaint,
-        ).merge(upstream.elevatedButtonTheme.style),
+        )
+            .merge(_action(const BorderSide(color: text, width: 2)))
+            .merge(upstream.elevatedButtonTheme.style),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
           backgroundColor: surfaceRaised,
           foregroundColor: text,
           disabledForegroundColor: textFaint,
-          side: BorderSide.none,
-        ).merge(upstream.outlinedButtonTheme.style),
+        )
+            .merge(_action(focusRing))
+            .merge(upstream.outlinedButtonTheme.style),
       ),
       switchTheme: upstream.switchTheme.copyWith(
         thumbColor: _onOff(accent, textDim),
         trackColor: _onOff(overlayAccent, overlaySoftStrong),
-        trackOutlineColor: const MaterialStatePropertyAll(Colors.transparent),
+        trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
       ),
       checkboxTheme: upstream.checkboxTheme.copyWith(
         fillColor: _onOff(accent, Colors.transparent),
-        checkColor: const MaterialStatePropertyAll(bg),
+        checkColor: const WidgetStatePropertyAll(bg),
         side: BorderSide(color: textDim, width: 1.5),
+        shape: square,
       ),
       radioTheme: upstream.radioTheme.copyWith(fillColor: _onOff(accent, textDim)),
       tabBarTheme: upstream.tabBarTheme.copyWith(
         labelColor: text,
         unselectedLabelColor: textDim,
         indicatorColor: accent,
+        indicator: const UnderlineTabIndicator(
+            borderSide: BorderSide(color: accent, width: 2)),
       ),
       listTileTheme: upstream.listTileTheme.copyWith(
         iconColor: text,
         textColor: text,
         selectedColor: accent,
         selectedTileColor: surfaceRaised,
+        shape: square,
       ),
       popupMenuTheme: upstream.popupMenuTheme.copyWith(
         color: surface,
-        shape: _withSide(upstream.popupMenuTheme.shape, BorderSide(color: border)),
+        shape: square.copyWith(side: BorderSide(color: border)),
       ),
       menuBarTheme: MenuBarThemeData(
-          style: MenuStyle(backgroundColor: MaterialStatePropertyAll(surface))),
+          style: MenuStyle(
+              backgroundColor: const WidgetStatePropertyAll(surface),
+              shape: const WidgetStatePropertyAll(square))),
       menuTheme: MenuThemeData(
-          style: MenuStyle(backgroundColor: MaterialStatePropertyAll(surface))),
+          style: MenuStyle(
+              backgroundColor: const WidgetStatePropertyAll(surface),
+              shape: WidgetStatePropertyAll(
+                  square.copyWith(side: BorderSide(color: border))))),
       tooltipTheme: upstream.tooltipTheme.copyWith(
         decoration: BoxDecoration(color: surfaceRaised),
         textStyle: TextStyle(color: text),
@@ -161,6 +212,7 @@ class RigTheme {
         backgroundColor: surfaceRaised,
         contentTextStyle: TextStyle(color: text),
         actionTextColor: accent,
+        shape: square,
       ),
       progressIndicatorTheme: ProgressIndicatorThemeData(color: accent),
       bottomNavigationBarTheme: BottomNavigationBarThemeData(
@@ -198,10 +250,7 @@ class RigTheme {
     );
   }
 
-  static MaterialStateProperty<Color?> _onOff(Color on, Color off) =>
-      MaterialStateProperty.resolveWith((states) =>
-          states.contains(MaterialState.selected) ? on : off);
-
-  static ShapeBorder? _withSide(ShapeBorder? shape, BorderSide side) =>
-      shape is OutlinedBorder ? shape.copyWith(side: side) : shape;
+  static WidgetStateProperty<Color?> _onOff(Color on, Color off) =>
+      WidgetStateProperty.resolveWith((states) =>
+          states.contains(WidgetState.selected) ? on : off);
 }

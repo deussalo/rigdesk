@@ -1033,9 +1033,7 @@ void showToast(String text,
             child: Container(
               decoration: BoxDecoration(
                 color: MyTheme.color(context).toastBg,
-                borderRadius: const BorderRadius.all(
-                  Radius.circular(20),
-                ),
+                borderRadius: BorderRadius.zero,
               ),
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
               child: Text(
@@ -3725,7 +3723,7 @@ class ComboBox extends StatelessWidget {
               : MyTheme.border,
         ),
         borderRadius:
-            BorderRadius.circular(8), //border raiuds of dropdown button
+            BorderRadius.zero, //border raiuds of dropdown button
       ),
       height: 42, // should be the height of a TextField
       child: Obx(() => DropdownButton<String>(

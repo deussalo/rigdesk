@@ -152,7 +152,7 @@ class _PeerTabPageState extends State<PeerTabPage>
           final hover = false.obs;
           final deco = BoxDecoration(
               color: Theme.of(context).colorScheme.background,
-              borderRadius: BorderRadius.circular(6));
+              borderRadius: BorderRadius.zero);
           final decoBorder = BoxDecoration(
               border: Border(
             bottom: BorderSide(width: 2, color: color!),
@@ -726,7 +726,7 @@ class _PeerSearchBarState extends State<PeerSearchBar> {
           width: stateGlobal.isPortrait.isTrue ? 120 : 140,
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.background,
-            borderRadius: BorderRadius.circular(6),
+            borderRadius: BorderRadius.zero,
           ),
           child: Row(
             children: [
@@ -995,7 +995,7 @@ class RefreshWidgetState extends State<RefreshWidget> {
   Widget build(BuildContext context) {
     final deco = BoxDecoration(
       color: Theme.of(context).colorScheme.background,
-      borderRadius: BorderRadius.circular(6),
+      borderRadius: BorderRadius.zero,
     );
     return AnimatedRotation(
         turns: turns,
@@ -1037,7 +1037,7 @@ Widget _hoverAction(
   final hover = false.obs;
   final deco = BoxDecoration(
     color: Theme.of(context).colorScheme.background,
-    borderRadius: BorderRadius.circular(6),
+    borderRadius: BorderRadius.zero,
   );
   return Tooltip(
     message: toolTip,

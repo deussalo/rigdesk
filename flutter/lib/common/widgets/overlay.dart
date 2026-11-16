@@ -206,7 +206,7 @@ class DraggableMobileActions extends StatelessWidget {
                     decoration: BoxDecoration(
                         color: MyTheme.accent.withOpacity(0.4),
                         borderRadius:
-                            BorderRadius.all(Radius.circular(15 * scale))),
+                            BorderRadius.zero),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [

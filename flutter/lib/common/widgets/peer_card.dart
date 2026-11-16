@@ -49,8 +49,8 @@ class _PeerCard extends StatefulWidget {
 class _PeerCardState extends State<_PeerCard>
     with AutomaticKeepAliveClientMixin {
   var _menuPos = RelativeRect.fill;
-  final double _cardRadius = 16;
-  final double _tileRadius = 5;
+  final double _cardRadius = 0;
+  final double _tileRadius = 0;
   final double _borderWidth = 2;
 
   @override
@@ -300,7 +300,7 @@ class _PeerCardState extends State<_PeerCard>
         () => Container(
           foregroundDecoration: deco.value,
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(_cardRadius - _borderWidth),
+            borderRadius: BorderRadius.zero,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
@@ -1489,7 +1489,7 @@ Widget build_more(BuildContext context,
     {bool invert = false, VoidCallback? onTap}) {
   final RxBool hover = false.obs;
   final button = InkWell(
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.zero,
       onTap: onTap ?? () {},
       onHover: (value) => hover.value = value,
       child: Obx(() => CircleAvatar(

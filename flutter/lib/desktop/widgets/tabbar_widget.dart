@@ -1240,7 +1240,7 @@ class _CloseButton extends StatelessWidget {
               if (visible) {
                 return InkWell(
                   hoverColor: MyTheme.tabbar(context).closeHoverColor,
-                  customBorder: const CircleBorder(),
+                  customBorder: const RoundedRectangleBorder(),
                   onTap: () => onClose(),
                   child: Icon(
                     Icons.close,
