@@ -405,10 +405,15 @@ def _served(desks: Desks, server: PcServer, listed: dict[str, Any]) -> ToolDef:
             return await desks.mcp_call(held, key, tool, dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
             return _refused(call, failed)
+
+    def holds(call: Call) -> bool:
+        agent, graph, _ = _who(call)
+        held = desks.held_by(agent, graph)
+        return held is not None and held.pc == server.pc
     words, schema, read_only = _upstream(tool, listed)
     return ToolDef(f"{key}/{tool}", f"On RigDesk PC {server.pc}, MCP server {server.name} ({server.says}): {words}", PassInput, DeskAnswer, run, run,
-                   read_only=read_only, plugin=plugin_capability(ID), denied_alone=(mcp_capability(key), mcp_capability(key, tool)), upstream_schema=schema,
-                   gloss=gloss_of(words), limit_s=MCP_CALL_LIMIT_S + 10)
+                   read_only=read_only, plugin=plugin_capability(ID), family=ID, denied_alone=(mcp_capability(key), mcp_capability(key, tool)), upstream_schema=schema,
+                   gloss=gloss_of(words), limit_s=MCP_CALL_LIMIT_S + 10).applying(holds)
 
 
 def _native[I: ToolInput](desks: Desks, tool: str, words: str, shape: type[I], handler: Any, read_only: bool = False, limit_s: float = TOOL_LIMIT_S) -> ToolDef:
@@ -416,7 +421,7 @@ def _native[I: ToolInput](desks: Desks, tool: str, words: str, shape: type[I], h
         if not isinstance(given, shape):
             return call.refused("invalid_params", f"{BRANCH}/{tool} takes {shape.__name__}")
         return await handler(desks, call, given)
-    return ToolDef(f"{BRANCH}/{tool}", words, shape, DeskAnswer, run, run, read_only=read_only, plugin=plugin_capability(ID),
+    return ToolDef(f"{BRANCH}/{tool}", words, shape, DeskAnswer, run, run, read_only=read_only, plugin=plugin_capability(ID), family=ID,
                    denied_alone=(CAPABILITY, mcp_capability(BRANCH, tool)), gloss=gloss_of(words), limit_s=limit_s)
 
 
@@ -464,11 +469,11 @@ def _capabilities(host: PluginHost) -> Mapping[str, str]:
 
 
 def _reach(host: PluginHost) -> Mapping[str, RigReach]:
-    """A PC's servers are named in no seat's notice: the agent holding the PC is told their tools by name, and any other is refused."""
+    """A PC's servers load on request, `<pc>.<server>/` listing their tools, in the lists of the agent holding the PC alone: any other is shown none and refused."""
     desks = host.live(Desks)
     reach: dict[str, RigReach] = {BRANCH: "listed" if desks.for_fleet else "withheld"}
     for server in desks.pc_servers():
-        reach[server.key] = "hidden"
+        reach[server.key] = "server"
     return reach
 
 
