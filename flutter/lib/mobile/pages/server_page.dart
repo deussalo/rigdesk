@@ -11,6 +11,8 @@ import 'package:provider/provider.dart';
 import '../../common.dart';
 import '../../common/widgets/dialog.dart';
 import '../../consts.dart';
+import '../../desktop/widgets/agent_overlay.dart';
+import '../../models/agent_bridge.dart';
 import '../../models/platform_model.dart';
 import '../../models/server_model.dart';
 import '../../utils/android_documents.dart';
@@ -690,7 +692,39 @@ class _PermissionCheckerState extends State<PermissionChecker> {
             serverModel.toggleClipboard,
             enabled: !permissionChangeLocked,
           ),
+          if (isAndroid) const _RigBridgeRow(),
         ]));
+  }
+}
+
+/// The rigdesk-bridge that shares this phone with Rig: the phone's own Stop/Resume and touches reach the agent there.
+class _RigBridgeRow extends StatefulWidget {
+  const _RigBridgeRow();
+
+  @override
+  State<_RigBridgeRow> createState() => _RigBridgeRowState();
+}
+
+class _RigBridgeRowState extends State<_RigBridgeRow> {
+  static const _key = 'rigdesk-agent-host-self';
+
+  @override
+  Widget build(BuildContext context) {
+    final host = AgentHost.fromJson(bind.mainGetLocalOption(key: _key));
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      title: const Text('Rig bridge'),
+      subtitle: Text(host?.url ?? 'Not set: Stop and your touches do not reach the agent'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () async {
+        final set = await showDialog<AgentHost>(
+            context: context, builder: (_) => AgentHostDialog(initial: host, peer: 'this phone'));
+        if (set == null) return;
+        await bind.mainSetLocalOption(key: _key, value: set.toJson());
+        if (mounted) setState(() {});
+      },
+    );
   }
 }
 

@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.widget.EditText
 import android.view.accessibility.AccessibilityEvent
@@ -74,6 +75,8 @@ class InputService : AccessibilityService() {
 
     companion object {
         var ctx: InputService? = null
+        // When the phone last injected input for a controller: AgentStop's touch watcher ignores touches this made.
+        @Volatile var lastInjectedMs = 0L
         val isOpen: Boolean
             get() = ctx != null
     }
@@ -119,6 +122,7 @@ class InputService : AccessibilityService() {
      */
     @RequiresApi(Build.VERSION_CODES.N)
     fun onMouseInput(mask: Int, _x: Int, _y: Int) {
+        lastInjectedMs = SystemClock.uptimeMillis()
         val x = max(0, _x)
         val y = max(0, _y)
 
@@ -442,6 +446,7 @@ class InputService : AccessibilityService() {
 
     @RequiresApi(Build.VERSION_CODES.N)
     fun onKeyEvent(data: ByteArray) {
+        lastInjectedMs = SystemClock.uptimeMillis()
         val keyEvent = KeyEvent.parseFrom(data)
         val keyboardMode = keyEvent.getMode()
 
