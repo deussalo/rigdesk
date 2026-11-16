@@ -1,14 +1,15 @@
 //! The management lane on Windows (see `rigdesk_agent::manage`): Rig's commands, and the PC's own health script, as
 //! SYSTEM in session 0 with no console window. The service's `--server` is SYSTEM in the console session, where whatever
 //! it started, a GUI program included, would show on the user's desktop with SYSTEM's rights; a copy of its token moved to
-//! session 0, on the non-interactive window station, can draw nowhere anyone sees. `as: user` runs through
+//! session 0, on the non-interactive window station, can draw nowhere anyone sees; the lane's own helpers (icacls,
+//! taskkill) start there too, so nothing the lane does starts a process where the user is. `as: user` runs through
 //! `run_shell_as_user`, as the desktop's own shell does.
 //!
 //! The lane's directories are SYSTEM's and administrators' alone. What ran is also kept, in brief, in a file every user of
 //! the PC can read and no one but SYSTEM and administrators can change: the tray's "Managed by Rig" opens it.
 
 use std::{
-    os::windows::{ffi::OsStrExt, process::CommandExt},
+    os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -45,6 +46,8 @@ const SWITCH_FILE: &str = "agent-shell";
 const DIGEST_LINES: usize = 200;
 /// After a time-out, how long the ended process tree has to go before its status is read anyway.
 const KILL_WAIT: Duration = Duration::from_secs(5);
+/// How long a helper (icacls, taskkill) has before its exit code is read anyway.
+const HELPER_WAIT: Duration = Duration::from_secs(30);
 
 struct WindowsRunner {
     switch: PathBuf,
@@ -100,12 +103,22 @@ fn private_dir(dir: &Path) -> Result<(), String> {
 }
 
 fn icacls(path: &Path, args: &[&str]) -> Result<(), String> {
-    let out = std::process::Command::new("icacls.exe").arg(path).args(args).creation_flags(CREATE_NO_WINDOW.0).output().map_err(|e| format!("icacls on {}: {e}", path.display()))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!("icacls on {} failed: {}", path.display(), String::from_utf8_lossy(&out.stdout).trim()))
+    let line = format!("icacls.exe \"{}\" {}", path.display(), args.join(" "));
+    match helper(&line, path.parent().unwrap_or(path)).map_err(|e| format!("icacls on {}: {e}", path.display()))? {
+        0 => Ok(()),
+        code => Err(format!("icacls on {} exited {code}", path.display())),
     }
+}
+
+/// Runs one of the lane's own helpers as SYSTEM in session 0, like its commands, and waits for its exit code.
+fn helper(line: &str, dir: &Path) -> Result<u32, String> {
+    let process = launch(line, dir)?;
+    if unsafe { WaitForSingleObject(process.handle, HELPER_WAIT.as_millis() as u32) } != WAIT_OBJECT_0 {
+        return Err(format!("still running after {} s", HELPER_WAIT.as_secs()));
+    }
+    let mut code = 0u32;
+    unsafe { GetExitCodeProcess(process.handle, &mut code) }.map_err(|e| format!("cannot read its exit code: {e}"))?;
+    Ok(code)
 }
 
 impl Runner for WindowsRunner {
@@ -240,7 +253,9 @@ fn system_token_in_session_0() -> Result<Token, String> {
 
 /// Ends a process and every process it started.
 fn end_tree(pid: u32) {
-    let _ = std::process::Command::new("taskkill.exe").args(["/T", "/F", "/PID", &pid.to_string()]).creation_flags(CREATE_NO_WINDOW.0).output();
+    if let Err(why) = helper(&format!("taskkill.exe /T /F /PID {pid}"), &std::env::temp_dir()) {
+        log::warn!("agent shell: taskkill of {pid}: {why}");
+    }
 }
 
 /// Windows counts its boots; failing that, the minute it booted.
