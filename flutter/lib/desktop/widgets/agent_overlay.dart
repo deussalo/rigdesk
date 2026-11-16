@@ -22,7 +22,7 @@ void onAgentStateEvent(SessionID sessionId, String stateJson) {
   final link = update.link;
   if (link != null) {
     Clipboard.setData(ClipboardData(text: link));
-    showToast('Share link copied. Paste it to a Rig agent; it works once.');
+    showToast('link copied for a Rig agent: it works once');
   }
   if (update.note.isNotEmpty) showToast(update.note);
 }
@@ -55,7 +55,7 @@ Future<void> agentAsk(FFI ffi, String verb,
   }
   final bridge = _bridges['${ffi.sessionId}'];
   if (bridge == null) {
-    showToast('Set up the agent host for this PC first.');
+    showToast('no agent host for this PC');
     return;
   }
   await bridge.ask(verb, text: text, png: png, display: display);
@@ -234,10 +234,10 @@ class _AgentOverlayState extends State<AgentOverlay> {
     final servers = agent.mcpServers;
     return Tooltip(
       message: !agent.mcpOn
-          ? 'MCP is off: the agent sees no MCP server on this PC. Click to turn it on.'
+          ? 'MCP off'
           : servers.isEmpty
-              ? 'MCP servers running on this PC are offered to the agent; none is running now. Click to turn MCP off.'
-              : 'Offered to the agent: ${servers.join(', ')}. Click to turn MCP off.',
+              ? 'MCP on: no server running'
+              : 'MCP on: ${servers.join(', ')}',
       child: FilterChip(
         label: Text(agent.mcpOn && servers.isNotEmpty
             ? 'MCP · ${servers.length}'
@@ -256,19 +256,19 @@ class _AgentOverlayState extends State<AgentOverlay> {
         child: TextButton.icon(
           onPressed: () => _setUp(context),
           icon: const AgentDiamond(size: 18),
-          label: const Text('Set up agent host'),
+          label: const Text('set up'),
         ),
       );
     }
     final items = <Widget>[
       Tooltip(
-        message: 'Copy a one-time link that hands this session to a Rig agent',
+        message: 'one-time link for a Rig agent',
         child: TextButton.icon(
           onPressed: () => _ask(ffi, 'share'),
           icon: const Icon(Icons.share, size: 18),
           label: Text(agent.linkOpen && !agent.isShared
-              ? 'Link copied, waiting for the agent'
-              : 'Share with agent'),
+              ? 'waiting'
+              : 'share'),
         ),
       ),
     ];
@@ -279,7 +279,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
               ? 'has input'
               : 'waiting';
       items.add(Tooltip(
-        message: 'Rig agent ${agent.ownerTitle} in ${agent.ownerGraph}',
+        message: '${agent.ownerTitle} in ${agent.ownerGraph}',
         child: Chip(
           avatar: const AgentDiamond(size: 18, color: _agentGreen),
           label: Text('${agent.ownerTitle} · $holds'),
@@ -288,14 +288,14 @@ class _AgentOverlayState extends State<AgentOverlay> {
       if (agent.holder == 'human') {
         items.add(TextButton(
             onPressed: () => _ask(ffi, 'hand'),
-            child: const Text('Hand to agent')));
+            child: const Text('hand over')));
       } else if (agent.agentHolds) {
         items.add(TextButton(
             onPressed: () => _ask(ffi, 'take_back'),
-            child: const Text('Take back')));
+            child: const Text('take back')));
       }
       items.add(Tooltip(
-        message: 'Message the agent, with a screenshot',
+        message: 'message',
         child: IconButton(
           onPressed: () => showDialog(
             context: context,
@@ -306,7 +306,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
         ),
       ));
       items.add(Tooltip(
-        message: 'End the share',
+        message: 'end share',
         child: IconButton(
           onPressed: () => _ask(ffi, 'revoke'),
           icon: const Icon(Icons.link_off),
@@ -314,13 +314,13 @@ class _AgentOverlayState extends State<AgentOverlay> {
       ));
       items.add(TextButton(
         onPressed: () => _ask(ffi, agent.isBlocked ? 'unblock' : 'block'),
-        child: Text(agent.isBlocked ? 'Unblock' : 'Block'),
+        child: Text(agent.isBlocked ? 'unblock' : 'block'),
       ));
       items.add(const SizedBox(width: 6));
       items.add(Tooltip(
         message: agent.isBlocked
-            ? 'Let the agent act again'
-            : 'Stop the agent until you resume it (Ctrl+Alt+Esc)',
+            ? 'resume'
+            : 'stop (ctrl+alt+esc)',
         child: ElevatedButton.icon(
           style: ElevatedButton.styleFrom(
             backgroundColor: agent.isBlocked ? _agentGreen : _blockRed,
@@ -331,13 +331,13 @@ class _AgentOverlayState extends State<AgentOverlay> {
           ),
           onPressed: () => _ask(ffi, agent.isBlocked ? 'unblock' : 'stop'),
           icon: Icon(agent.isBlocked ? Icons.play_circle : Icons.stop_circle),
-          label: Text(agent.isBlocked ? 'Resume' : 'Stop'),
+          label: Text(agent.isBlocked ? 'resume' : 'stop'),
         ),
       ));
     }
     if (agent.fromPc) items.add(_mcpChip(agent));
     items.add(Tooltip(
-      message: 'Agent host settings for this PC',
+      message: 'agent host',
       child: IconButton(
         onPressed: () => _setUp(context),
         icon: const Icon(Icons.settings, size: 18),
@@ -386,7 +386,7 @@ class _AgentHostDialogState extends State<AgentHostDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text('Agent host for ${widget.peer}'),
+      title: Text('agent host for ${widget.peer}'),
       content: SizedBox(
         width: 460,
         child: Column(
@@ -395,29 +395,29 @@ class _AgentHostDialogState extends State<AgentHostDialog> {
             TextField(
                 controller: _url,
                 decoration: const InputDecoration(
-                    labelText: 'Agent host URL',
-                    helperText: 'The rigdesk-bridge Rig runs for this PC')),
+                    labelText: 'url',
+                    helperText: 'rigdesk-bridge for this PC')),
             TextField(
                 controller: _token,
                 obscureText: true,
-                decoration: const InputDecoration(labelText: 'Token')),
+                decoration: const InputDecoration(labelText: 'token')),
             TextField(
                 controller: _name,
                 decoration: const InputDecoration(
-                    labelText: 'PC name in Rig',
-                    helperText: 'As named in plugins.rigdesk.pcs')),
+                    labelText: 'name in Rig',
+                    helperText: 'as in plugins.rigdesk.pcs')),
           ],
         ),
       ),
       actions: [
         TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel')),
+            child: const Text('cancel')),
         ElevatedButton(
             onPressed: () {
               if (_host.isComplete) Navigator.of(context).pop(_host);
             },
-            child: const Text('Save')),
+            child: const Text('save')),
       ],
     );
   }
@@ -499,7 +499,7 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
       _frame = image;
       _loading = false;
       if (image == null) {
-        _error = 'No screenshot could be taken; the message goes without one.';
+        _error = 'no screenshot: it goes without one';
       }
     });
   }
@@ -559,7 +559,7 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
     final text = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Label'),
+        title: const Text('label'),
         content: TextField(
           controller: controller,
           autofocus: true,
@@ -568,10 +568,10 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
         actions: [
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel')),
+              child: const Text('cancel')),
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(controller.text),
-              child: const Text('Add')),
+              child: const Text('add')),
         ],
       ),
     );
@@ -594,11 +594,11 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
 
   Widget _tools() {
     const labels = {
-      NoteTool.clip: 'Clip',
-      NoteTool.pen: 'Pen',
-      NoteTool.arrow: 'Arrow',
-      NoteTool.box: 'Box',
-      NoteTool.text: 'Text',
+      NoteTool.clip: 'clip',
+      NoteTool.pen: 'pen',
+      NoteTool.arrow: 'arrow',
+      NoteTool.box: 'box',
+      NoteTool.text: 'text',
     };
     return Wrap(
       spacing: 6,
@@ -614,11 +614,11 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
           onPressed: _marks.isEmpty
               ? null
               : () => setState(() => _marks.removeLast()),
-          child: const Text('Undo'),
+          child: const Text('undo'),
         ),
         TextButton(
           onPressed: _clip == null ? null : () => setState(() => _clip = null),
-          child: const Text('Whole screen'),
+          child: const Text('whole screen'),
         ),
       ],
     );
@@ -671,7 +671,7 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Message ${AgentModel.of(widget.ffi.sessionId).ownerTitle}',
+            Text('message ${AgentModel.of(widget.ffi.sessionId).ownerTitle}',
                 style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             if (_frame != null) _tools(),
@@ -686,7 +686,7 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
                 minLines: 1,
                 maxLines: 4,
                 decoration: const InputDecoration(
-                    hintText: 'What should the agent know or do?'),
+                    hintText: 'what should the agent know or do?'),
               ),
             ),
             const SizedBox(height: 8),
@@ -695,11 +695,11 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
               children: [
                 TextButton(
                     onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel')),
+                    child: const Text('cancel')),
                 const SizedBox(width: 8),
                 ElevatedButton(
                     onPressed: _sending ? null : _send,
-                    child: Text(_clip == null ? 'Send with screenshot' : 'Send with clip')),
+                    child: Text(_clip == null ? 'send' : 'send clip')),
               ],
             ),
           ],

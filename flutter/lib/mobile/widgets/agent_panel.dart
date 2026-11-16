@@ -151,13 +151,13 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
   Widget _badge(AgentModel agent) {
     final String label;
     if (!_ready) {
-      label = 'Set up bridge';
+      label = 'set up';
     } else if (agent.isShared) {
       label = '${agent.ownerTitle} · ${_holds(agent)}';
     } else if (agent.linkOpen) {
-      label = 'Waiting for the agent';
+      label = 'waiting';
     } else {
-      label = 'Agent';
+      label = 'agent';
     }
     return Material(
       elevation: 4,
@@ -200,7 +200,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
       ),
       onPressed: () => _ask(blocked ? 'unblock' : 'stop'),
       icon: Icon(blocked ? Icons.play_circle : Icons.stop_circle),
-      label: Text(blocked ? 'Resume' : 'Stop'),
+      label: Text(blocked ? 'resume' : 'stop'),
     );
   }
 
@@ -230,34 +230,32 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                           const AgentDiamond(color: _agentGreen),
                       title: Text(agent.ownerTitle),
                       subtitle: Text(
-                          'Rig agent in ${agent.ownerGraph} · ${_holds(agent)}'),
+                          '${agent.ownerGraph} · ${_holds(agent)}'),
                     ),
                   ListTile(
                     leading: const Icon(Icons.share),
                     title: Text(agent.linkOpen && !agent.isShared
-                        ? 'Link copied, waiting for the agent'
-                        : 'Share with agent'),
-                    subtitle: const Text(
-                        'Copy a one-time link that hands this session to a Rig agent'),
+                        ? 'waiting'
+                        : 'share'),
+                    subtitle: const Text('one-time link for a Rig agent'),
                     onTap: () => run(() => _ask('share')),
                   ),
                   if (agent.isShared && agent.holder == 'human')
                     ListTile(
                       leading: const Icon(Icons.pan_tool_alt),
-                      title: const Text('Hand to agent'),
+                      title: const Text('hand over'),
                       onTap: () => run(() => _ask('hand')),
                     ),
                   if (agent.agentHolds)
                     ListTile(
                       leading: const Icon(Icons.back_hand),
-                      title: const Text('Take back'),
+                      title: const Text('take back'),
                       onTap: () => run(() => _ask('take_back')),
                     ),
                   if (agent.isShared)
                     ListTile(
                       leading: const Icon(Icons.chat_bubble_outline),
-                      title: const Text('Message the agent'),
-                      subtitle: const Text('With a screenshot to clip and mark'),
+                      title: const Text('message'),
                       onTap: () => run(_message),
                     ),
                   if (agent.isShared)
@@ -265,31 +263,31 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                       leading: Icon(agent.isBlocked
                           ? Icons.play_circle_outline
                           : Icons.block),
-                      title: Text(agent.isBlocked ? 'Unblock' : 'Block'),
+                      title: Text(agent.isBlocked ? 'unblock' : 'block'),
                       onTap: () => run(
                           () => _ask(agent.isBlocked ? 'unblock' : 'block')),
                     ),
                   if (agent.isShared)
                     ListTile(
                       leading: const Icon(Icons.link_off),
-                      title: const Text('End share'),
+                      title: const Text('end share'),
                       onTap: () => run(() => _ask('revoke')),
                     ),
                   if (agent.fromPc)
                     SwitchListTile(
                       secondary: const Icon(Icons.extension),
-                      title: const Text('MCP servers'),
+                      title: const Text('MCP'),
                       subtitle: Text(!agent.mcpOn
-                          ? 'Off: the agent sees no MCP server on this PC'
+                          ? 'off'
                           : agent.mcpServers.isEmpty
-                              ? 'Offered to the agent; none running now'
-                              : 'Offered to the agent: ${agent.mcpServers.join(', ')}'),
+                              ? 'no server running'
+                              : agent.mcpServers.join(', ')),
                       value: agent.mcpOn,
                       onChanged: (on) => run(() => _ask(on ? 'mcp_on' : 'mcp_off')),
                     ),
                   ListTile(
                     leading: const Icon(Icons.settings),
-                    title: const Text('Bridge settings'),
+                    title: const Text('bridge'),
                     onTap: () => run(_setUp),
                   ),
                   if (agent.isShared)
@@ -446,7 +444,7 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
       _frame = image;
       _loading = false;
       if (image == null) {
-        _error = 'No screenshot could be taken; the message goes without one.';
+        _error = 'no screenshot: it goes without one';
       }
     });
   }
@@ -507,7 +505,7 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
     final text = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Label'),
+        title: const Text('label'),
         content: TextField(
           controller: controller,
           autofocus: true,
@@ -517,10 +515,10 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
         actions: [
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel')),
+              child: const Text('cancel')),
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(controller.text),
-              child: const Text('Add')),
+              child: const Text('add')),
         ],
       ),
     );
@@ -544,11 +542,11 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
 
   Widget _tools() {
     const labels = {
-      NoteTool.clip: 'Clip',
-      NoteTool.pen: 'Pen',
-      NoteTool.arrow: 'Arrow',
-      NoteTool.box: 'Box',
-      NoteTool.text: 'Text',
+      NoteTool.clip: 'clip',
+      NoteTool.pen: 'pen',
+      NoteTool.arrow: 'arrow',
+      NoteTool.box: 'box',
+      NoteTool.text: 'text',
     };
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -568,12 +566,12 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
             onPressed: _marks.isEmpty
                 ? null
                 : () => setState(() => _marks.removeLast()),
-            child: const Text('Undo'),
+            child: const Text('undo'),
           ),
           TextButton(
             onPressed:
                 _clip == null ? null : () => setState(() => _clip = null),
-            child: const Text('Whole screen'),
+            child: const Text('whole screen'),
           ),
         ],
       ),
@@ -625,7 +623,7 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
       child: Scaffold(
         appBar: AppBar(
           title: Text(
-              'Message ${AgentModel.of(widget.ffi.sessionId).ownerTitle}'),
+              'message ${AgentModel.of(widget.ffi.sessionId).ownerTitle}'),
         ),
         body: SafeArea(
           child: Column(
@@ -642,13 +640,13 @@ class _MobileAgentNotePageState extends State<MobileAgentNotePage> {
                         minLines: 1,
                         maxLines: 4,
                         decoration: const InputDecoration(
-                            hintText: 'What should the agent know or do?'),
+                            hintText: 'what should the agent know or do?'),
                       ),
                     ),
                     IconButton(
                       tooltip: _clip == null
-                          ? 'Send with screenshot'
-                          : 'Send with clip',
+                          ? 'send'
+                          : 'send clip',
                       onPressed: _sending ? null : _send,
                       icon: const Icon(Icons.send),
                     ),
