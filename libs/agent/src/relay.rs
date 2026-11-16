@@ -92,7 +92,7 @@ impl Relay {
                 stdin.flush().await.map_err(|e| e.to_string())
             }
             Upstream::Posted { port, endpoint } => {
-                let answer = crate::found::post(*port, endpoint, &[], message.to_string().as_bytes()).await?;
+                let answer = crate::found::post(&crate::found::At::loopback(*port), endpoint, &[], message.to_string().as_bytes()).await?;
                 if (200..300).contains(&answer.status) {
                     return Ok(());
                 }

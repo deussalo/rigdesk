@@ -10,7 +10,10 @@
 //!   rigdesk-bridge --id <RustDesk ID> --id-server <hbbs host[:port]> --key-file <hbbs public key file> ...
 //!                  [--port 21120] [--journal <file>] [--name "Rig agent"]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
+//!                  [--mcp-server http://<host>[:port][/path] [--mcp-token-file <file>]]...
 //!
+//! Each `--mcp-server` names an MCP server on the PC's own address (a phone's native tools, say), offered to the holding
+//! agent as a found server; the `--mcp-token-file` after it holds the bearer that server wants.
 //! The passwords and the API bearer are read from files (0600) so they never sit on a command line.
 
 mod desk;
@@ -24,7 +27,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hbb_common::{log, tokio};
-use rigdesk_agent::{Api, Events, Journal, Shared};
+use rigdesk_agent::found::Remote;
+use rigdesk_agent::{Api, Events, Found, Journal, Shared};
 
 const JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 const EVENT_RING: usize = 512;
@@ -37,6 +41,7 @@ struct Args {
     journal: Option<PathBuf>,
     name: String,
     viewer: Option<(u16, PathBuf)>,
+    servers: Vec<Remote>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -51,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
     let mut name = "Rig agent".to_string();
     let mut viewer_port = None;
     let mut viewer_password_file = None;
+    let mut servers: Vec<(String, Option<PathBuf>)> = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -66,6 +72,11 @@ fn parse_args() -> Result<Args, String> {
             "--name" => name = value()?,
             "--viewer-port" => viewer_port = Some(value()?.parse().map_err(|_| "--viewer-port needs a number".to_string())?),
             "--viewer-password-file" => viewer_password_file = Some(PathBuf::from(value()?)),
+            "--mcp-server" => servers.push((value()?, None)),
+            "--mcp-token-file" => match servers.last_mut() {
+                Some((_, file @ None)) => *file = Some(PathBuf::from(value()?)),
+                _ => return Err("--mcp-token-file follows the --mcp-server it is for, once".into()),
+            },
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -84,6 +95,10 @@ fn parse_args() -> Result<Args, String> {
         (Some(_), _, _, _) => return Err("--peer goes alone; --id, --id-server and --key-file are the other way".into()),
         _ => return Err("--id, --id-server and --key-file go together".into()),
     };
+    let servers = servers
+        .into_iter()
+        .map(|(url, file)| Remote::parse(&url, file.map(|f| read_secret(&f, "MCP server token")).transpose()?))
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(Args {
         route,
         password_file: password_file.ok_or("--password-file is required")?,
@@ -92,6 +107,7 @@ fn parse_args() -> Result<Args, String> {
         journal,
         name,
         viewer,
+        servers,
     })
 }
 
@@ -155,7 +171,8 @@ fn main() {
                 }
             }
         }
-        let api = Api::hosted(shared, Arc::new(desk::RemoteDesk::new(link)), Arc::new(journal), &bearer);
+        let found = (!args.servers.is_empty()).then(|| Found::remote(args.servers));
+        let api = Api::hosted(shared, Arc::new(desk::RemoteDesk::new(link)), Arc::new(journal), &bearer, found);
         match api.serve(args.port).await {
             Ok(port) => {
                 log::info!("rigdesk-bridge: agent API for {what} on 127.0.0.1:{port}");

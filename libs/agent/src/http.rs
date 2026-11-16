@@ -12,13 +12,15 @@
 //!   POST /debug/mint, /debug/viewer/<hand|human|block|unblock> - only with RIGDESK_AGENT_DEBUG_MINT set, for CI
 //!   POST /viewer/mint, /viewer/<hand|human|stop|block|unblock|revoke> - only from `Api::hosted`, where no RigDesk viewer
 //!        carries the human's buttons (a stock RustDesk PC driven from the Rig host), so the bearer's holder presses them
-//!   POST /viewer/note {text, pngs: [base64]} - from `Api::hosted`: the human's message to the owning agent
+//!   POST /viewer/note {text, pngs: [base64], key?} - from `Api::hosted`: the human's message to the owning agent; a note
+//!        sent again with a key already sent to the same owning agent is answered with the first one's event, not told twice
 //!   GET  /frame?display=N  - a PNG of the PC's screen now, for the bearer's holder: the human to clip and draw on, or the operator's
 //!        screenshot on demand; journaled
 //!   GET  /health           - liveness, this process's boot id, the current standing, and whether the agent shell is open
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 //!   GET  /servers          - the MCP servers found on the PC while an agent is connected, and whether MCP is on
-//!   POST /servers/<name>/mcp - MCP to that server, forwarded to its loopback port; X-Desk-Session as for /mcp
+//!   POST /servers/<name>/mcp - MCP to that server, forwarded to its loopback port (on a bridge, to the address it was
+//!        told of); X-Desk-Session as for /mcp
 //!   POST /shell {agent, command, timeout_s, as, background} or {agent, job} - the management lane (see `manage`): no
 //!        session, admitted by the PC's agent-shell switch and the human's Block on that agent; only where the host offers it
 //!   GET  /samples?after=ID - the PC's health samples after ID (see `health`); only where the host offers them
@@ -64,7 +66,18 @@ pub struct Api {
     lane: std::sync::OnceLock<Arc<Lane>>,
     collector: std::sync::OnceLock<Arc<Collector>>,
     operator: std::sync::OnceLock<Arc<dyn crate::operator::Switch>>,
+    noted: std::sync::Mutex<Noted>,
 }
+
+/// The note keys sent to the owning agent, newest last; forgotten when another agent owns the session.
+#[derive(Default)]
+struct Noted {
+    agent: String,
+    keys: std::collections::VecDeque<(String, u64)>,
+}
+
+/// How many note keys are remembered: far more than a device sends again after one reconnect.
+const NOTE_KEYS: usize = 256;
 
 fn full(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).boxed()
@@ -108,14 +121,15 @@ impl Api {
     pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default() })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() })
     }
 
     /// As `new`, plus the `/viewer/*` routes: the human's share and holder buttons, for a host with no RigDesk viewer.
-    pub fn hosted(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
+    /// `found` offers the MCP servers the host was told of on the PC (see [`Found::remote`]).
+    pub fn hosted(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, found: None, lane: Default::default(), collector: Default::default(), operator: Default::default() })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() })
     }
 
     /// Offers the management lane at /shell and, with a collector, health samples at /samples. Before `serve`, once.
@@ -331,9 +345,14 @@ impl Api {
         let Some(body) = Self::body_json(request).await else {
             return text(StatusCode::BAD_REQUEST, "note wants a JSON body");
         };
-        if self.shared.standing().owner.is_none() {
+        let Some(owner) = self.shared.standing().owner else {
             return text(StatusCode::CONFLICT, "no agent has joined: share the PC with one first");
-        }
+        };
+        let key = match body.get("key") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(key)) if !key.is_empty() && key.len() <= 200 => Some(key.clone()),
+            Some(_) => return text(StatusCode::BAD_REQUEST, "key is a string of 1 to 200 characters"),
+        };
         let text_said = body.get("text").and_then(Value::as_str).unwrap_or("").to_string();
         let mut pngs = Vec::new();
         for png in body.get("pngs").and_then(Value::as_array).into_iter().flatten() {
@@ -345,7 +364,22 @@ impl Api {
         if text_said.trim().is_empty() && pngs.is_empty() {
             return text(StatusCode::BAD_REQUEST, "an empty note");
         }
+        let Some(key) = key else {
+            let id = self.shared.events.message(text_said, pngs);
+            return json_response(StatusCode::OK, &json!({"event": id}));
+        };
+        let mut noted = self.noted.lock().unwrap_or_else(|p| p.into_inner());
+        if noted.agent != owner.agent_id {
+            *noted = Noted { agent: owner.agent_id.clone(), keys: Default::default() };
+        }
+        if let Some((_, id)) = noted.keys.iter().find(|(k, _)| *k == key) {
+            return json_response(StatusCode::OK, &json!({"event": id, "replayed": true}));
+        }
         let id = self.shared.events.message(text_said, pngs);
+        noted.keys.push_back((key, id));
+        if noted.keys.len() > NOTE_KEYS {
+            noted.keys.pop_front();
+        }
         json_response(StatusCode::OK, &json!({"event": id}))
     }
 
@@ -752,7 +786,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_viewer_stops_the_agent_and_sends_it_a_note() {
         let shared = Arc::new(Shared::new(Events::new(64)));
-        let api = Api::hosted(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::memory()), "b");
+        let api = Api::hosted(shared.clone(), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
         let port = api.serve(0).await.unwrap();
         let minted = post(port, "/viewer/mint", "", &json!({})).await;
         let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
@@ -769,5 +803,14 @@ mod tests {
         post(port, "/viewer/note", "", &json!({"text": "look here", "pngs": [png]})).await;
         let note = events.recv().await.unwrap();
         assert!(matches!(note.kind, EventKind::Message { ref text, ref attachments } if text == "look here" && attachments.len() == 1), "{note:?}");
+        let first = post(port, "/viewer/note", "", &json!({"text": "turn it on", "key": "phone:1:7"})).await;
+        let again = post(port, "/viewer/note", "", &json!({"text": "turn it on", "key": "phone:1:7"})).await;
+        assert_eq!((again["event"].clone(), again["replayed"].clone()), (first["event"].clone(), json!(true)), "a note sent again is told once");
+        let told = events.recv().await.unwrap();
+        assert!(matches!(told.kind, EventKind::Message { ref text, .. } if text == "turn it on"), "{told:?}");
+        let next = post(port, "/viewer/note", "", &json!({"text": "and the other", "key": "phone:1:8"})).await;
+        let told = events.recv().await.unwrap();
+        assert!(matches!(told.kind, EventKind::Message { ref text, .. } if text == "and the other"), "the replay made no event: {told:?}");
+        assert_eq!(told.id, next["event"].as_u64().unwrap());
     }
 }
