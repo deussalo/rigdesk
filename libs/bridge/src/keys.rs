@@ -83,8 +83,12 @@ const ANDROID_BACK_UP: i32 = 0x08 << 3 | MOUSE_TYPE_UP;
 const ANDROID_WHEEL_DOWN: i32 = 0x04 << 3 | MOUSE_TYPE_DOWN;
 const ANDROID_WHEEL_UP: i32 = 0x04 << 3 | MOUSE_TYPE_UP;
 
+/// The most notches one scroll sends to an Android PC: each is a swipe gesture the phone plays out in turn.
+pub const ANDROID_SCROLL_MAX: i32 = 20;
+
 /// Android's InputService swipes once per wheel event whatever its delta, so each notch is its own event.
 pub fn android_scroll(dy: i32) -> Vec<Message> {
+    let dy = dy.clamp(-ANDROID_SCROLL_MAX, ANDROID_SCROLL_MAX);
     (0..dy.unsigned_abs()).map(|_| mouse(MOUSE_TYPE_WHEEL, 0, dy.signum())).collect()
 }
 
@@ -234,5 +238,6 @@ mod tests {
         assert_eq!(masks(&msgs), vec![MOUSE_TYPE_WHEEL; 3]);
         assert!(msgs.iter().all(|m| m.mouse_event().y == -1));
         assert!(android_scroll(0).is_empty());
+        assert_eq!(android_scroll(1000).len(), ANDROID_SCROLL_MAX as usize, "a huge scroll is capped, not queued as that many swipes");
     }
 }

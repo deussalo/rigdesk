@@ -66,7 +66,7 @@ fn scroll_rate(peer: &Peer) -> &'static str {
     if peer.platform == "Windows" {
         "1 notch is 3 lines unless the PC's WheelScrollLines setting differs; apps that scroll by pixels vary"
     } else if peer.platform == "Android" {
-        "on Android 1 notch is a short swipe at the pointer (desk/move it onto the list first); sideways scrolls are not sent"
+        "on Android 1 notch is a short swipe at the pointer (desk/move it onto the list first), at most 20 a call; sideways scrolls are not sent"
     } else {
         "how far a notch goes is up to the app"
     }
@@ -169,6 +169,7 @@ impl RemoteDesk {
             }
             "scroll" => {
                 let (dx, dy) = (int(args, "dx").unwrap_or(0), int(args, "dy").unwrap_or(0));
+                let dy = if peer.platform == "Android" { dy.clamp(-keys::ANDROID_SCROLL_MAX, keys::ANDROID_SCROLL_MAX) } else { dy };
                 send(if peer.platform == "Android" { keys::android_scroll(dy) } else { keys::scroll(dx, dy) })?;
                 ok(scrolled(if peer.platform == "Android" { 0 } else { dx }, dy, scroll_rate(&peer)))
             }
