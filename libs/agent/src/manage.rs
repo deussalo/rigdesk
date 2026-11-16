@@ -522,7 +522,7 @@ impl Runner for ShRunner {
     }
 
     fn start_system(&self, command: &str, dir: &Path) -> Result<u32, String> {
-        let script = format!("{command}\necho $? > x.new && mv x.new x\n");
+        let script = format!("(\n{command}\n)\necho $? > x.new && mv x.new x\n");
         let mut child = Self::sh(&script, dir).map_err(|e| e.to_string())?;
         let pid = child.id();
         std::thread::spawn(move || child.wait());
@@ -594,7 +594,7 @@ mod tests {
         let (lane, runner, _shared, dir) = lane();
         let owner = Owner { agent_id: "a1".into(), title: "Ops".into(), graph: "fleet".into() };
         let start = |command: &str| lane.serve(&owner, Request::Start { command: command.into(), run_as: RunAs::System });
-        let quick: Value = serde_json::from_str(&start("echo done").unwrap().text).unwrap();
+        let quick: Value = serde_json::from_str(&start("echo done; exit 4").unwrap().text).unwrap();
         let mut ids = Vec::new();
         for _ in 0..MAX_JOBS - 1 {
             let started: Value = serde_json::from_str(&start("sleep 30").unwrap().text).unwrap();
@@ -606,7 +606,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let done = read(quick["job"].as_str().unwrap());
-        assert_eq!((done["exit_code"].clone(), done["output"].as_str().unwrap().trim()), (json!(0), "done"));
+        assert_eq!((done["exit_code"].clone(), done["output"].as_str().unwrap().trim()), (json!(4), "done"));
         start("sleep 30").unwrap();
         assert_eq!(start("sleep 30").unwrap_err().code(), "jobs_full");
 

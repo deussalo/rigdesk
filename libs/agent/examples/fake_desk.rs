@@ -10,25 +10,34 @@
 //! `$FAKE_DESK_DIR` (a fresh temp directory if unset), so they outlive a restart, and samples every `$FAKE_DESK_HEALTH_S`
 //! seconds (600 if unset) from `$FAKE_DESK_FIGURES`, a file of figures (a Windows PC's if unset).
 
+#[cfg(target_os = "linux")]
 use std::io::BufRead;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use base64::Engine;
+#[cfg(target_os = "linux")]
 use rigdesk_agent::{
     health::{self, Collector, Samples},
     manage::{Lane, ShRunner},
     Api, Called, Content, Desk, Events, Journal, Shared, ToolSpec,
 };
+#[cfg(target_os = "linux")]
 use serde_json::{json, Value};
 
+#[cfg(target_os = "linux")]
 const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
+#[cfg(target_os = "linux")]
 fn pixel() -> Vec<u8> {
     base64::engine::general_purpose::STANDARD.decode(PIXEL).unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
 struct FakeDesk;
 
+#[cfg(target_os = "linux")]
 impl Desk for FakeDesk {
     fn tools(&self) -> Vec<ToolSpec> {
         vec![
@@ -56,6 +65,7 @@ impl Desk for FakeDesk {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -119,4 +129,9 @@ async fn main() -> std::io::Result<()> {
     .await
     .ok();
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("fake_desk runs its management lane through sh, on Linux only");
 }
