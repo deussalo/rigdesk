@@ -6,7 +6,8 @@ function Probe([string] $name, [scriptblock] $block) {
     try { & $block } catch { $errors.Add("${name}: $($_.Exception.Message)"); $null }
 }
 function UnixMs($when) {
-    if ($null -eq $when) { return $null }
+    # Windows Update history keeps some entries with no date, as 0001-01-01: that is no date, not a negative time.
+    if ($null -eq $when -or ([datetime] $when).Year -lt 1971) { return $null }
     ([DateTimeOffset] [datetime] $when).ToUnixTimeMilliseconds()
 }
 function Mb($bytes) { [int64] ([double] $bytes / 1MB) }
