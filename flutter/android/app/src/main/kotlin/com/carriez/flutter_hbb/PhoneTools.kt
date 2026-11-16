@@ -223,6 +223,7 @@ fun toolProp(type: String, description: String, choices: List<String>? = null): 
 /** The tools themselves: what each takes, and running one call. A refusal says why, as the call's error. */
 class PhoneTools(private val ctx: Context) {
     private val messages = PhoneMessages(ctx)
+    private val files = PhoneFiles(ctx)
 
     private val main = Handler(Looper.getMainLooper())
     private val speaker = Speaker(ctx)
@@ -247,7 +248,7 @@ class PhoneTools(private val ctx: Context) {
             "unless speak is false, spoken aloud.", listOf("text"),
             "text" to toolProp("string", "What to tell them, short."),
             "speak" to toolProp("boolean", "Speak it as well (default true).")))
-        .also { all -> messages.specs().forEach { all.put(it) } }
+        .also { all -> (messages.specs() + files.specs()).forEach { all.put(it) } }
 
     fun call(name: String, args: JSONObject): JSONObject = try {
         val text = when (name) {
@@ -255,7 +256,7 @@ class PhoneTools(private val ctx: Context) {
             "open" -> open(args.optString("package").trim(), args.optString("uri").trim())
             "key" -> key(args.optString("name"))
             "tell" -> tell(args.optString("text").trim(), args.optBoolean("speak", true))
-            else -> messages.call(name, args) ?: throw Refusal("the phone has no tool $name")
+            else -> messages.call(name, args) ?: files.call(name, args) ?: throw Refusal("the phone has no tool $name")
         }
         result(text, false)
     } catch (e: Refusal) {
