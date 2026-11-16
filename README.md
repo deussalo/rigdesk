@@ -85,6 +85,27 @@ RigDesk's PIN-locked security settings. Have the client sign the text below befo
 > Turning the agent shell off (rerunning the install line with `-AgentShell off`) stops remote commands; uninstalling
 > RigDesk stops the readings too.
 
+`-AgentJoin on|off` (on when left out; `agent_join` in a Linux PC's enroll.json) sets whether the operator may start an
+agent's desktop session from Rig, with no share link: an agent asks with `desk/request`, the operator accepts in Rig,
+and Rig's bearer token asks the PC for the session (`POST /join`). The person at the PC is told and can end it; *Pause
+sessions started from Rig*, in the PIN-locked security settings, refuses new ones until it is unticked. With this on,
+Rig's agent API token starts desktop sessions on the PC, so it is as strong as a share link from a viewer. Have the
+client sign this text too before you run the line with it on.
+
+> **Agent sessions started by the operator**
+>
+> While this is on, **<operator>** may let an automated agent take this computer's desktop through Rig, without anyone
+> connecting to it: the agent sees the screen, moves the pointer, types and runs commands as the signed-in user. The
+> operator approves each session in Rig, for one agent at a time.
+>
+> **You are told and you can end it.** When such a session starts, a notification names the agent, and while it runs
+> the RigDesk tray icon names it with *End the agent's session*. Your own mouse and keyboard always go first: while you
+> use the computer, the agent's actions are refused until you pause for 3 seconds. Every action the agent takes is
+> logged on this computer.
+>
+> *Pause sessions started from Rig*, in RigDesk's security settings behind the admin PIN, refuses new sessions until it
+> is unticked. Rerunning the install line with `-AgentJoin off` turns them off.
+
 ### Tailnet policy
 
 ```jsonc
@@ -139,6 +160,7 @@ under `plugins.rigdesk.pcs` as `{name: {url, token_file, client}}`. See [rig-plu
 | `GET /log?n=N` | the action log |
 | `GET /frame?display=N` | a PNG of the screen now, for the bearer's holder (the viewer's note, Rig's screenshot on demand); journaled |
 | `GET /health` | boot id, current standing and the agent shell's switch (`{open, code, words}`, null without one) |
+| `POST /join` | `{agent: {id, title, graph}, ask}`: a session the operator accepted in Rig, with no share link; answers `{session, standing}` as `/claim` does; refused with `join_off`, `join_paused`, `held` (another agent holds the session, named) or `blocked`; journaled either way; 404 `no_join` where the host offers none |
 | `POST /shell` | `{agent: {id, title, graph}, command, as, timeout_s, background}` or `{agent, job}`: the management lane, no session; refused with `shell_off`, `shell_paused`, `blocked`, `jobs_full`, `no_job` or `bad_request`; journaled either way |
 | `GET /samples?after=ID` | the health samples taken after ID (the PC keeps 24 h); a `health` event on `/events` says each new one |
 
