@@ -16,6 +16,8 @@ function Show-State {
   }
 }
 function Fail($why) { Write-Host "::error::install smoke: $why"; Show-State; exit 1 }
+# An error nothing caught (a request the server cut) shows the same state as a failed check.
+trap { Fail "uncaught: $_ at $($_.InvocationInfo.PositionMessage)" }
 
 $zip = Join-Path $PWD "rigdesk-windows-x64.zip"
 Compress-Archive -Path ".\rigdesk\*" -DestinationPath $zip -Force
@@ -149,6 +151,8 @@ if (-not $resumed.ok) { Fail "the lane did not run once resumed: $($resumed | Co
 $cut = (Lane @{ job = $long.job }).text | ConvertFrom-Json
 if ($cut.state -ne "ended" -or $cut.why -notmatch "paused") { Fail "pausing did not cut the running job: $($cut | ConvertTo-Json -Compress)" }
 Write-Host "lane pause: refused $($paused.code); job $($cut.why)"
+$after = Invoke-RestMethod -Uri "http://127.0.0.1:21119/health" -Headers $auth
+if ($after.boot -ne $health.boot) { Fail "the agent API restarted while the lane was paused and resumed: boot $($health.boot) became $($after.boot)" }
 
 $minted = Post "/debug/mint" @{}
 $own = Post "/claim" @{ grant = $minted.grant; secret = $minted.secret; agent = $lane }
