@@ -207,9 +207,22 @@ class PhoneMcp(private val ctx: Context) {
     }
 }
 
+/** A tool call the phone will not or cannot do, and why: the call's error. */
+class Refusal(why: String) : Exception(why)
+
+/** One tool's MCP description. */
+fun toolSpec(name: String, title: String, readOnly: Boolean, description: String, required: List<String>, vararg props: Pair<String, JSONObject>): JSONObject =
+    JSONObject().put("name", name).put("title", title).put("description", description)
+        .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject().also { p -> props.forEach { p.put(it.first, it.second) } })
+            .put("required", JSONArray(required)).put("additionalProperties", false))
+        .put("annotations", JSONObject().put("readOnlyHint", readOnly).put("openWorldHint", false))
+
+fun toolProp(type: String, description: String, choices: List<String>? = null): JSONObject =
+    JSONObject().put("type", type).put("description", description).also { if (choices != null) it.put("enum", JSONArray(choices)) }
+
 /** The tools themselves: what each takes, and running one call. A refusal says why, as the call's error. */
 class PhoneTools(private val ctx: Context) {
-    private class Refusal(why: String) : Exception(why)
+    private val messages = PhoneMessages(ctx)
 
     private val main = Handler(Looper.getMainLooper())
     private val speaker = Speaker(ctx)
@@ -222,27 +235,19 @@ class PhoneTools(private val ctx: Context) {
 
     fun close() = speaker.close()
 
-    private fun spec(name: String, title: String, readOnly: Boolean, description: String, required: List<String>, vararg props: Pair<String, JSONObject>) =
-        JSONObject().put("name", name).put("title", title).put("description", description)
-            .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject().also { p -> props.forEach { p.put(it.first, it.second) } })
-                .put("required", JSONArray(required)).put("additionalProperties", false))
-            .put("annotations", JSONObject().put("readOnlyHint", readOnly).put("openWorldHint", false))
-
-    private fun prop(type: String, description: String, choices: List<String>? = null) =
-        JSONObject().put("type", type).put("description", description).also { if (choices != null) it.put("enum", JSONArray(choices)) }
-
-    fun specs() = JSONArray()
-        .put(spec("apps", "Apps", true, "Every app with a launcher icon on the phone: its label and package, one per line.", emptyList()))
-        .put(spec("open", "Open", false, "Open an app by its package (apps lists them), or a URI (https://…, tel:…, sms:…, mailto:…, geo:…, " +
+    fun specs(): JSONArray = JSONArray()
+        .put(toolSpec("apps", "Apps", true, "Every app with a launcher icon on the phone: its label and package, one per line.", emptyList()))
+        .put(toolSpec("open", "Open", false, "Open an app by its package (apps lists them), or a URI (https://…, tel:…, sms:…, mailto:…, geo:…, " +
             "whatsapp://send?phone=…&text=…) in whatever app takes it, or in the package named.", emptyList(),
-            "package" to prop("string", "An app's package, such as com.android.chrome."),
-            "uri" to prop("string", "A URI to view.")))
-        .put(spec("key", "Key", false, "Press a system key the screen has no button for.", listOf("name"),
-            "name" to prop("string", "Which key.", KEYS.keys.toList())))
-        .put(spec("tell", "Tell", false, "Tell the person at the phone something: shown at the top of the screen for a few seconds and, " +
+            "package" to toolProp("string", "An app's package, such as com.android.chrome."),
+            "uri" to toolProp("string", "A URI to view.")))
+        .put(toolSpec("key", "Key", false, "Press a system key the screen has no button for.", listOf("name"),
+            "name" to toolProp("string", "Which key.", KEYS.keys.toList())))
+        .put(toolSpec("tell", "Tell", false, "Tell the person at the phone something: shown at the top of the screen for a few seconds and, " +
             "unless speak is false, spoken aloud.", listOf("text"),
-            "text" to prop("string", "What to tell them, short."),
-            "speak" to prop("boolean", "Speak it as well (default true).")))
+            "text" to toolProp("string", "What to tell them, short."),
+            "speak" to toolProp("boolean", "Speak it as well (default true).")))
+        .also { all -> messages.specs().forEach { all.put(it) } }
 
     fun call(name: String, args: JSONObject): JSONObject = try {
         val text = when (name) {
@@ -250,7 +255,7 @@ class PhoneTools(private val ctx: Context) {
             "open" -> open(args.optString("package").trim(), args.optString("uri").trim())
             "key" -> key(args.optString("name"))
             "tell" -> tell(args.optString("text").trim(), args.optBoolean("speak", true))
-            else -> throw Refusal("the phone has no tool $name: apps, open, key or tell")
+            else -> messages.call(name, args) ?: throw Refusal("the phone has no tool $name")
         }
         result(text, false)
     } catch (e: Refusal) {

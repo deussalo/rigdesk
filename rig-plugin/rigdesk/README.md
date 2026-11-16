@@ -172,7 +172,9 @@ Known limits against a RigDesk PC:
   none by itself: it offers the servers its `stock.mcp_servers` name, each `{"url": "http://<host>[:port][/path]",
   "token_file": ...}` on the PC's own tailnet address (a phone's native tools, say), asked while an agent holds the PC
   and dropped when the address stops answering. The bridge sends the server its token; a client's never passes.
-  RigDesk Android serves its native tools (`apps`, `open`, `key`, `tell`) while it shares the screen, at
+  RigDesk Android serves its native tools (`apps`, `open`, `key`, `tell`; `notifications`, `notification_reply`,
+  `notification_action`, `notification_dismiss`, `notify`, `sms_send`, `contacts` once the person grants notification
+  access, SMS and contacts) while it shares the screen, at
   `http://<phone's tailnet address>:8790/mcp`, to the token set in its Share screen > Rig bridge: name that same
   token file.
 * `desk/leave` — ends the session.
