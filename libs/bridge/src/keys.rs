@@ -83,6 +83,11 @@ const ANDROID_BACK_UP: i32 = 0x08 << 3 | MOUSE_TYPE_UP;
 const ANDROID_WHEEL_DOWN: i32 = 0x04 << 3 | MOUSE_TYPE_DOWN;
 const ANDROID_WHEEL_UP: i32 = 0x04 << 3 | MOUSE_TYPE_UP;
 
+/// Android's InputService swipes once per wheel event whatever its delta, so each notch is its own event.
+pub fn android_scroll(dy: i32) -> Vec<Message> {
+    (0..dy.unsigned_abs()).map(|_| mouse(MOUSE_TYPE_WHEEL, 0, dy.signum())).collect()
+}
+
 /// A phone's navigation key on an Android PC: back, home (the home screen) or recents.
 pub fn android_nav(name: &str) -> Option<Vec<Message>> {
     match name.to_ascii_lowercase().as_str() {
