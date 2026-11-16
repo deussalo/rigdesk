@@ -607,7 +607,8 @@ mod tests {
         }
         let done = read(quick["job"].as_str().unwrap());
         assert_eq!((done["exit_code"].clone(), done["output"].as_str().unwrap().trim()), (json!(4), "done"));
-        start("sleep 30").unwrap();
+        let last: Value = serde_json::from_str(&start("sleep 30").unwrap().text).unwrap();
+        ids.push(last["job"].as_str().unwrap().to_string());
         assert_eq!(start("sleep 30").unwrap_err().code(), "jobs_full");
 
         for id in &ids {
