@@ -134,6 +134,12 @@ pub trait TraitCapturer {
     #[cfg(not(any(target_os = "ios")))]
     fn frame<'a>(&'a mut self, timeout: std::time::Duration) -> std::io::Result<Frame<'a>>;
 
+    /// The last frame captured, for a capturer that sends none while the screen is still.
+    #[cfg(not(any(target_os = "ios")))]
+    fn last_frame<'a>(&'a mut self) -> Option<Frame<'a>> {
+        None
+    }
+
     #[cfg(windows)]
     fn is_gdi(&self) -> bool;
     #[cfg(windows)]

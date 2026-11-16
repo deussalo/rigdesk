@@ -88,13 +88,28 @@ impl FrameRaw {
         {
             return None;
         }
-        std::mem::swap(dst, &mut self.data);
+        dst.clear();
+        dst.extend_from_slice(&self.data);
+        Some(())
+    }
+
+    // The latest frame whatever its age: Android sends none while the screen is still.
+    fn last(&self, dst: &mut Vec<u8>) -> Option<()> {
+        if self.enable.not() || self.data.is_empty() {
+            return None;
+        }
+        dst.clear();
+        dst.extend_from_slice(&self.data);
         Some(())
     }
 }
 
 pub fn get_video_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
     VIDEO_RAW.lock().ok()?.take(dst, last)
+}
+
+pub fn get_last_video_raw(dst: &mut Vec<u8>) -> Option<()> {
+    VIDEO_RAW.lock().ok()?.last(dst)
 }
 
 pub fn get_audio_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {

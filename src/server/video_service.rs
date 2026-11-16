@@ -900,6 +900,8 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         match res {
             Err(ref e) if e.kind() == WouldBlock => {
+                #[cfg(target_os = "android")]
+                answer_screenshot_from_last_frame(&mut c, (vs.source, display_idx));
                 #[cfg(windows)]
                 if dxgi_recovery_started
                     .map(|started| started.elapsed() >= DXGI_RECOVERY_FRAME_GRACE)
@@ -1497,6 +1499,23 @@ fn check_qos(
     }
     drop(video_qos);
     Ok(())
+}
+
+// A still Android screen sends no frame, so a screenshot waiting on it takes the last one.
+#[cfg(target_os = "android")]
+fn answer_screenshot_from_last_frame(c: &mut CapturerInfo, key: (VideoSource, usize)) {
+    let Some(screenshot) = SCREENSHOTS.lock().unwrap().remove(&key) else {
+        return;
+    };
+    let Some(scrap::Frame::PixelBuffer(f)) = c.last_frame() else {
+        SCREENSHOTS.lock().unwrap().insert(key, screenshot);
+        return;
+    };
+    let (msg, w, h, data) = match get_rgba_from_pixelbuf(&f) {
+        Ok(rgba) => ("".to_owned(), f.width(), f.height(), rgba),
+        Err(e) => (format!("Convert pixfmt: {}", e), 0, 0, vec![]),
+    };
+    std::thread::spawn(move || handle_screenshot(screenshot, msg, w, h, data));
 }
 
 pub fn set_take_screenshot(source: VideoSource, display_idx: usize, sid: String, tx: Sender) {
