@@ -4,8 +4,7 @@
 //! who can write it can already edit the config beside it. The server applies it once at startup, before it serves
 //! IPC, and deletes it. Nothing here logs or prints a secret.
 //!
-//! The permanent password is otherwise locked (`disable-change-permanent-password`), so this is the only way it
-//! changes: through the install line again.
+//! The permanent password can also be set at the PC, on the Security settings page.
 
 #[cfg(windows)]
 use std::path::Path;
