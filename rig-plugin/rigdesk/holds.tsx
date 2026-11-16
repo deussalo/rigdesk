@@ -38,7 +38,7 @@ export function RigdeskHold({ graph, agent }: ListProps<'agent_holds'>): ReactNo
   if (session === null) return null
   const shown = shownOf(session)
   return (
-    <HeldRow mark={<Mark kind="icon" icon="bento" label="RigDesk PC" ink={shown.ink} />} text={`${session.pc} · ${shown.word}`}
+    <HeldRow mark={<Mark kind="icon" icon="desktop" label="RigDesk PC" ink={shown.ink} />} text={`${session.pc} · ${shown.word}`}
       time={durationOf(now - session.joined_ms, 1000)} href={href('plugin', { plugin: 'rigdesk', path: 'all' })} action={null} />
   )
 }
