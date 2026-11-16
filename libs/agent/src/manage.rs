@@ -534,7 +534,7 @@ impl Runner for ShRunner {
     }
 
     fn end(&self, pid: u32) {
-        let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{pid}")]).status();
+        let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
     }
 
     fn boot(&self) -> String {
