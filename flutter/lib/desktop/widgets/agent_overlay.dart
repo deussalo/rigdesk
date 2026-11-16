@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart' hide Dialog;
+import 'package:flutter_hbb/common/rig_theme.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/agent_bridge.dart';
 import 'package:flutter_hbb/models/agent_model.dart';
@@ -13,8 +14,8 @@ import 'package:flutter_hbb/models/agent_note.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
-const _agentGreen = Color(0xFF22C55E);
-const _blockRed = Color(0xFFDC2626);
+const _live = RigTheme.toneLive;
+const _fault = RigTheme.toneFault;
 
 /// One `agent_state` event from the session: mirror it, copy a fresh share link, and show the PC's words.
 void onAgentStateEvent(SessionID sessionId, String stateJson) {
@@ -22,7 +23,7 @@ void onAgentStateEvent(SessionID sessionId, String stateJson) {
   final link = update.link;
   if (link != null) {
     Clipboard.setData(ClipboardData(text: link));
-    showToast('Share link copied. Paste it to a Rig agent; it works once.');
+    showToast('link copied for a Rig agent: it works once');
   }
   if (update.note.isNotEmpty) showToast(update.note);
 }
@@ -55,7 +56,7 @@ Future<void> agentAsk(FFI ffi, String verb,
   }
   final bridge = _bridges['${ffi.sessionId}'];
   if (bridge == null) {
-    showToast('Set up the agent host for this PC first.');
+    showToast('no agent host for this PC');
     return;
   }
   await bridge.ask(verb, text: text, png: png, display: display);
@@ -177,25 +178,29 @@ class _AgentOverlayState extends State<AgentOverlay> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 14,
-              height: 14,
-              decoration: BoxDecoration(
-                color: _agentGreen,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
+            SizedBox.square(
+              dimension: 14,
+              child: Center(
+                child: Transform.rotate(
+                  angle: math.pi / 4,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: _live,
+                      border: Border.all(color: RigTheme.bg, width: 2),
+                    ),
+                  ),
+                ),
               ),
             ),
             const SizedBox(width: 4),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: _agentGreen,
-                borderRadius: BorderRadius.circular(4),
-              ),
+              color: _live,
               child: Text(
                 '${point.agentTitle}: ${point.summary}',
-                style: const TextStyle(color: Colors.white, fontSize: 12),
+                style: const TextStyle(color: RigTheme.bg, fontSize: RigTheme.fontSm),
               ),
             ),
           ],
@@ -209,8 +214,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
       constraints: const BoxConstraints(maxWidth: 380),
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.6),
-        borderRadius: BorderRadius.circular(6),
+        color: RigTheme.bg.withOpacity(0.85),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -221,8 +225,8 @@ class _AgentOverlayState extends State<AgentOverlay> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      color: a.ok ? Colors.white : Colors.orangeAccent,
-                      fontSize: 12),
+                      color: a.ok ? RigTheme.text : RigTheme.toneFaultInk,
+                      fontSize: RigTheme.fontSm),
                 ))
             .toList(),
       ),
@@ -234,10 +238,10 @@ class _AgentOverlayState extends State<AgentOverlay> {
     final servers = agent.mcpServers;
     return Tooltip(
       message: !agent.mcpOn
-          ? 'MCP is off: the agent sees no MCP server on this PC. Click to turn it on.'
+          ? 'MCP off'
           : servers.isEmpty
-              ? 'MCP servers running on this PC are offered to the agent; none is running now. Click to turn MCP off.'
-              : 'Offered to the agent: ${servers.join(', ')}. Click to turn MCP off.',
+              ? 'MCP on: no server running'
+              : 'MCP on: ${servers.join(', ')}',
       child: FilterChip(
         label: Text(agent.mcpOn && servers.isNotEmpty
             ? 'MCP · ${servers.length}'
@@ -251,24 +255,24 @@ class _AgentOverlayState extends State<AgentOverlay> {
   Widget _bar(BuildContext context, AgentModel agent) {
     if (!_hasHost) {
       return Material(
-        elevation: 4,
-        borderRadius: BorderRadius.circular(8),
+        color: RigTheme.surface,
+        shape: RigTheme.square.copyWith(side: BorderSide(color: RigTheme.border)),
         child: TextButton.icon(
           onPressed: () => _setUp(context),
           icon: const AgentDiamond(size: 18),
-          label: const Text('Set up agent host'),
+          label: const Text('set up'),
         ),
       );
     }
     final items = <Widget>[
       Tooltip(
-        message: 'Copy a one-time link that hands this session to a Rig agent',
+        message: 'one-time link for a Rig agent',
         child: TextButton.icon(
           onPressed: () => _ask(ffi, 'share'),
           icon: const Icon(Icons.share, size: 18),
           label: Text(agent.linkOpen && !agent.isShared
-              ? 'Link copied, waiting for the agent'
-              : 'Share with agent'),
+              ? 'waiting'
+              : 'share'),
         ),
       ),
     ];
@@ -279,23 +283,23 @@ class _AgentOverlayState extends State<AgentOverlay> {
               ? 'has input'
               : 'waiting';
       items.add(Tooltip(
-        message: 'Rig agent ${agent.ownerTitle} in ${agent.ownerGraph}',
+        message: '${agent.ownerTitle} in ${agent.ownerGraph}',
         child: Chip(
-          avatar: const AgentDiamond(size: 18, color: _agentGreen),
+          avatar: const AgentDiamond(size: 18, color: _live),
           label: Text('${agent.ownerTitle} · $holds'),
         ),
       ));
       if (agent.holder == 'human') {
         items.add(TextButton(
             onPressed: () => _ask(ffi, 'hand'),
-            child: const Text('Hand to agent')));
+            child: const Text('hand over')));
       } else if (agent.agentHolds) {
         items.add(TextButton(
             onPressed: () => _ask(ffi, 'take_back'),
-            child: const Text('Take back')));
+            child: const Text('take back')));
       }
       items.add(Tooltip(
-        message: 'Message the agent, with a screenshot',
+        message: 'message',
         child: IconButton(
           onPressed: () => showDialog(
             context: context,
@@ -306,7 +310,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
         ),
       ));
       items.add(Tooltip(
-        message: 'End the share',
+        message: 'end share',
         child: IconButton(
           onPressed: () => _ask(ffi, 'revoke'),
           icon: const Icon(Icons.link_off),
@@ -314,38 +318,38 @@ class _AgentOverlayState extends State<AgentOverlay> {
       ));
       items.add(TextButton(
         onPressed: () => _ask(ffi, agent.isBlocked ? 'unblock' : 'block'),
-        child: Text(agent.isBlocked ? 'Unblock' : 'Block'),
+        child: Text(agent.isBlocked ? 'unblock' : 'block'),
       ));
       items.add(const SizedBox(width: 6));
       items.add(Tooltip(
         message: agent.isBlocked
-            ? 'Let the agent act again'
-            : 'Stop the agent until you resume it (Ctrl+Alt+Esc)',
+            ? 'resume'
+            : 'stop (ctrl+alt+esc)',
         child: ElevatedButton.icon(
           style: ElevatedButton.styleFrom(
-            backgroundColor: agent.isBlocked ? _agentGreen : _blockRed,
-            foregroundColor: Colors.white,
+            backgroundColor: agent.isBlocked ? _live : _fault,
+            foregroundColor: RigTheme.bg,
             padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
-            textStyle:
-                const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            textStyle: const TextStyle(
+                fontSize: RigTheme.fontMd, fontWeight: RigTheme.strong),
           ),
           onPressed: () => _ask(ffi, agent.isBlocked ? 'unblock' : 'stop'),
           icon: Icon(agent.isBlocked ? Icons.play_circle : Icons.stop_circle),
-          label: Text(agent.isBlocked ? 'Resume' : 'Stop'),
+          label: Text(agent.isBlocked ? 'resume' : 'stop'),
         ),
       ));
     }
     if (agent.fromPc) items.add(_mcpChip(agent));
     items.add(Tooltip(
-      message: 'Agent host settings for this PC',
+      message: 'agent host',
       child: IconButton(
         onPressed: () => _setUp(context),
         icon: const Icon(Icons.settings, size: 18),
       ),
     ));
     return Material(
-      elevation: 4,
-      borderRadius: BorderRadius.circular(8),
+      color: RigTheme.surface,
+      shape: RigTheme.square.copyWith(side: BorderSide(color: RigTheme.border)),
       child: Padding(
         padding: const EdgeInsets.all(6),
         child: Row(mainAxisSize: MainAxisSize.min, children: items),
@@ -386,7 +390,7 @@ class _AgentHostDialogState extends State<AgentHostDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text('Agent host for ${widget.peer}'),
+      title: Text('agent host for ${widget.peer}'),
       content: SizedBox(
         width: 460,
         child: Column(
@@ -395,29 +399,29 @@ class _AgentHostDialogState extends State<AgentHostDialog> {
             TextField(
                 controller: _url,
                 decoration: const InputDecoration(
-                    labelText: 'Agent host URL',
-                    helperText: 'The rigdesk-bridge Rig runs for this PC')),
+                    labelText: 'url',
+                    helperText: 'rigdesk-bridge for this PC')),
             TextField(
                 controller: _token,
                 obscureText: true,
-                decoration: const InputDecoration(labelText: 'Token')),
+                decoration: const InputDecoration(labelText: 'token')),
             TextField(
                 controller: _name,
                 decoration: const InputDecoration(
-                    labelText: 'PC name in Rig',
-                    helperText: 'As named in plugins.rigdesk.pcs')),
+                    labelText: 'name in Rig',
+                    helperText: 'as in plugins.rigdesk.pcs')),
           ],
         ),
       ),
       actions: [
         TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel')),
+            child: const Text('cancel')),
         ElevatedButton(
             onPressed: () {
               if (_host.isComplete) Navigator.of(context).pop(_host);
             },
-            child: const Text('Save')),
+            child: const Text('save')),
       ],
     );
   }
@@ -499,7 +503,7 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
       _frame = image;
       _loading = false;
       if (image == null) {
-        _error = 'No screenshot could be taken; the message goes without one.';
+        _error = 'no screenshot: it goes without one';
       }
     });
   }
@@ -559,7 +563,7 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
     final text = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Label'),
+        title: const Text('label'),
         content: TextField(
           controller: controller,
           autofocus: true,
@@ -568,10 +572,10 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
         actions: [
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel')),
+              child: const Text('cancel')),
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(controller.text),
-              child: const Text('Add')),
+              child: const Text('add')),
         ],
       ),
     );
@@ -594,11 +598,11 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
 
   Widget _tools() {
     const labels = {
-      NoteTool.clip: 'Clip',
-      NoteTool.pen: 'Pen',
-      NoteTool.arrow: 'Arrow',
-      NoteTool.box: 'Box',
-      NoteTool.text: 'Text',
+      NoteTool.clip: 'clip',
+      NoteTool.pen: 'pen',
+      NoteTool.arrow: 'arrow',
+      NoteTool.box: 'box',
+      NoteTool.text: 'text',
     };
     return Wrap(
       spacing: 6,
@@ -614,11 +618,11 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
           onPressed: _marks.isEmpty
               ? null
               : () => setState(() => _marks.removeLast()),
-          child: const Text('Undo'),
+          child: const Text('undo'),
         ),
         TextButton(
           onPressed: _clip == null ? null : () => setState(() => _clip = null),
-          child: const Text('Whole screen'),
+          child: const Text('whole screen'),
         ),
       ],
     );
@@ -671,7 +675,7 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Message ${AgentModel.of(widget.ffi.sessionId).ownerTitle}',
+            Text('message ${AgentModel.of(widget.ffi.sessionId).ownerTitle}',
                 style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             if (_frame != null) _tools(),
@@ -686,7 +690,7 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
                 minLines: 1,
                 maxLines: 4,
                 decoration: const InputDecoration(
-                    hintText: 'What should the agent know or do?'),
+                    hintText: 'what should the agent know or do?'),
               ),
             ),
             const SizedBox(height: 8),
@@ -695,11 +699,11 @@ class _AgentNoteDialogState extends State<AgentNoteDialog> {
               children: [
                 TextButton(
                     onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel')),
+                    child: const Text('cancel')),
                 const SizedBox(width: 8),
                 ElevatedButton(
                     onPressed: _sending ? null : _send,
-                    child: Text(_clip == null ? 'Send with screenshot' : 'Send with clip')),
+                    child: Text(_clip == null ? 'send' : 'send clip')),
               ],
             ),
           ],
@@ -734,11 +738,11 @@ class _NotePainter extends CustomPainter {
         ..fillType = PathFillType.evenOdd
         ..addRect(full)
         ..addRect(region);
-      canvas.drawPath(shade, Paint()..color = Colors.black45);
+      canvas.drawPath(shade, Paint()..color = RigTheme.bg.withOpacity(0.55));
       canvas.drawRect(
           region,
           Paint()
-            ..color = Colors.white
+            ..color = RigTheme.accent
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2 / scale);
     }

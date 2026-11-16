@@ -457,7 +457,7 @@ class _CmHeaderState extends State<_CmHeader>
     super.build(context);
     return Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(10.0),
+        borderRadius: BorderRadius.zero,
         gradient: LinearGradient(
           begin: Alignment.topRight,
           end: Alignment.bottomLeft,
@@ -599,7 +599,7 @@ class _CmHeaderState extends State<_CmHeader>
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: str2color(client.name),
-        borderRadius: BorderRadius.circular(15.0),
+        borderRadius: BorderRadius.zero,
       ),
       child: Text(
         client.name.isNotEmpty ? client.name[0] : '?',
@@ -635,7 +635,7 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
           color: enabled
               ? (canModify ? MyTheme.accent : MyTheme.accent.withOpacity(0.6))
               : Colors.grey[700],
-          borderRadius: BorderRadius.circular(10.0),
+          borderRadius: BorderRadius.zero,
         ),
         padding: EdgeInsets.all(8.0),
         child: InkWell(
@@ -672,7 +672,7 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
       margin: EdgeInsets.all(5.0),
       padding: EdgeInsets.all(5.0),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(10.0),
+        borderRadius: BorderRadius.zero,
         color: Theme.of(context).colorScheme.background,
         boxShadow: [
           BoxShadow(
@@ -1159,7 +1159,7 @@ class _CmControlPanel extends StatelessWidget {
         ),
       );
     }
-    final borderRadius = BorderRadius.circular(10.0);
+    final borderRadius = BorderRadius.zero;
     final btn = Container(
       height: 28,
       decoration: BoxDecoration(
@@ -1265,7 +1265,7 @@ class __FileTransferLogPageState extends State<_FileTransferLogPage> {
       decoration: BoxDecoration(
         color: Theme.of(context).cardColor,
         borderRadius: BorderRadius.all(
-          Radius.circular(15.0),
+          Radius.zero,
         ),
       ),
       child: child,
@@ -1407,7 +1407,7 @@ class __FileTransferLogPageState extends State<_FileTransferLogPage> {
                                               center: Text(
                                                 '${(item.finishedSize / item.totalSize * 100).toStringAsFixed(0)}%',
                                               ),
-                                              barRadius: Radius.circular(15),
+                                              barRadius: Radius.zero,
                                               percent: item.finishedSize /
                                                   item.totalSize,
                                               progressColor: MyTheme.accent,

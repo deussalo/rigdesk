@@ -1027,7 +1027,7 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           //limits the touch area to the button area
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(5.0),
+            borderRadius: BorderRadius.zero,
           ),
           backgroundColor: active == true ? MyTheme.accent80 : null,
         ),
@@ -1327,7 +1327,7 @@ void showOptions(
               height: 40,
               decoration: BoxDecoration(
                   border: Border.all(color: Theme.of(context).hintColor),
-                  borderRadius: BorderRadius.circular(2),
+                  borderRadius: BorderRadius.zero,
                   color: i == cur ? numBgSelected : null),
               child: Center(
                   child: Text((i + 1).toString(),

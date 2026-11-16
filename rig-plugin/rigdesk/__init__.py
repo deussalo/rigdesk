@@ -232,7 +232,6 @@ def _shell_said(text: str) -> JsonObject:
 
 async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
     agent, graph, _ = _who(call)
-    title = await call.kernel.caller_title()
     if (given.job is None) == (given.command is None):
         return call.refused("invalid_params", "desk/shell takes a command to run, or a job to read, not both")
     held = desks.held_by(agent, graph)
@@ -259,7 +258,7 @@ async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
         return call.refused(SYSTEM_NOT_GRANTED, f"on {pc} you may run commands as its signed-in user only (as: user): running as SYSTEM, and background jobs, "
                                                 "need the operator's SYSTEM grant on the RigDesk page")
     try:
-        status, said = await desks.shell(pc, agent, graph, title, _shell_asked(given, run_as))
+        status, said = await desks.shell(pc, agent, graph, await call.kernel.caller_title(), _shell_asked(given, run_as))
     except Exception as failed:  # noqa: BLE001
         return _refused(call, failed)
     if status == HTTPStatus.OK:
