@@ -444,7 +444,6 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
     ['client', pc.client || 'none'], ['kind', pc.stock ? 'stock RustDesk' : 'RigDesk'], ['address', pc.url], ['input', pc.holder === null ? 'no agent' : HOLDER[pc.holder]],
     ...(held === null ? [] : [['agent', held] as const]),
     ...(pc.down_since_ms === null ? [] : [['down since', new Date(pc.down_since_ms).toLocaleString()] as const]),
-    ...(health === null ? [] : [['health', health.state === null ? 'no sample yet' : `${health.state}${health.sample_ms === null ? '' : `, sampled ${agoOf(health.sample_ms, now)}`}`] as const]),
   ]
   const problems = [...(pc.state === 'down' && pc.why !== null ? [pc.why] : []), ...(health?.why == null ? [] : [health.why]),
     ...(health?.failing ?? []).filter(check => check.state === 'fault').map(check => check.words)]
