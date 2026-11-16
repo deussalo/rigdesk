@@ -38,7 +38,7 @@ import java.util.concurrent.Executors
 
 /**
  * The phone's native tools (apps, open, key, tell) as an MCP server over streamable HTTP at http://<tailnet address>:[PORT]/mcp,
- * for the rigdesk-bridge that shares this phone with Rig: the bridge offers it to the agent holding the phone, beside desk/*.
+ * for the rigdesk-bridge that shares this phone with Rig: the bridge offers it to the agent holding the phone, beside the desk tools.
  * It answers only on the tailnet and loopback, and only to the bearer set in Share screen > Rig bridge, the same token the
  * phone presents to that bridge; with no Rig bridge set it refuses every call.
  */
