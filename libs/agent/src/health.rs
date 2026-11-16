@@ -93,6 +93,11 @@ pub struct Service {
     pub name: String,
     #[serde(default)]
     pub display: String,
+    /// Set to start a while after boot.
+    #[serde(default)]
+    pub delayed: bool,
+    /// The code it last stopped with: 0 is a clean stop, 1077 never started since boot.
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -128,6 +133,8 @@ pub struct Figures {
     pub stopped_services: Vec<Service>,
     pub system_errors_24h: Option<u32>,
     pub battery: Option<Battery>,
+    /// The CPU time the script's own process used.
+    pub cpu_ms: Option<u64>,
     #[serde(default)]
     pub errors: Vec<String>,
 }
@@ -148,7 +155,6 @@ pub struct Sample {
     pub boot: String,
     pub rigdesk: String,
     pub took_ms: u64,
-    pub cpu_ms: Option<u64>,
     #[serde(flatten)]
     pub taken: Taken,
 }
@@ -253,22 +259,18 @@ impl Collector {
             let _ = std::fs::remove_file(self.dir.join("o"));
             self.lane.runner().run_system(self.script, &self.dir, SCRIPT_LIMIT)
         });
-        let (taken, cpu_ms) = match ran {
-            Err(why) => (Taken::Failed { why: format!("the script did not run: {why}") }, None),
-            Ok(ran) => {
+        let taken = match ran {
+            Err(why) => Taken::Failed { why: format!("the script did not run: {why}") },
+            Ok(crate::shell::Ended::TimedOut(after)) => Taken::Failed { why: format!("the script ran past {} s and was ended", after.as_secs()) },
+            Ok(crate::shell::Ended::Exited(_)) => {
                 let printed = crate::shell::printed_file(&self.dir.join("o")).unwrap_or_default();
-                let output = crate::shell::plain(&[printed.head, printed.tail].concat());
-                let taken = match ran.ended {
-                    crate::shell::Ended::TimedOut(after) => Taken::Failed { why: format!("the script ran past {} s and was ended", after.as_secs()) },
-                    crate::shell::Ended::Exited(_) => match figures(&output) {
-                        Ok(figures) => Taken::Ok { figures },
-                        Err(why) => Taken::Failed { why },
-                    },
-                };
-                (taken, ran.cpu_ms)
+                match figures(&crate::shell::plain(&[printed.head, printed.tail].concat())) {
+                    Ok(figures) => Taken::Ok { figures },
+                    Err(why) => Taken::Failed { why },
+                }
             }
         };
-        let sample = Sample { id: self.samples.next_id(at_ms), at_ms, boot: self.lane.runner().boot(), rigdesk: self.rigdesk.clone(), took_ms: began.elapsed().as_millis() as u64, cpu_ms, taken };
+        let sample = Sample { id: self.samples.next_id(at_ms), at_ms, boot: self.lane.runner().boot(), rigdesk: self.rigdesk.clone(), took_ms: began.elapsed().as_millis() as u64, taken };
         if let Taken::Failed { why } = &sample.taken {
             log::warn!("health: sample {} failed: {why}", sample.id);
         }

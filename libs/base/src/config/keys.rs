@@ -54,6 +54,8 @@ pub const OPTION_ALLOW_SCOPE_VIOLATION_CLOSE: &str = "allow-scope-violation-clos
 pub const OPTION_ALLOW_SCOPE_VIOLATION_ALARM: &str = "allow-scope-violation-alarm";
 pub const OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION: &str = "allow-remote-config-modification";
 pub const OPTION_ENABLE_LAN_DISCOVERY: &str = "enable-lan-discovery";
+/// "Y" while the person at a RigDesk PC has paused the agent shell, from the PIN-locked security settings.
+pub const OPTION_AGENT_SHELL_PAUSED: &str = "agent-shell-paused";
 pub const OPTION_DIRECT_ACCESS_PORT: &str = "direct-access-port";
 pub const OPTION_WHITELIST: &str = "whitelist";
 pub const OPTION_ID_WHITELIST: &str = "id-whitelist";

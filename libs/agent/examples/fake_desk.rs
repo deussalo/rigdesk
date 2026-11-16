@@ -4,7 +4,7 @@
 //!
 //! It prints `listening <port>`, then reads the viewer's side from stdin, one command a line:
 //! `mint` (prints `link <grant> <secret>`), `hand`, `human`, `block`, `unblock`, `revoke`, `msg <text>` (sent with one image),
-//! `shell on|off` (the PC's agent-shell switch), `reboot` (a new boot id), `sample` (a health sample now).
+//! `shell on|off` (the PC's agent-shell switch), `pause on|off` (the person's pause), `reboot` (a new boot id), `sample` (a health sample now).
 //!
 //! Its management lane runs commands through `sh` as the user running it. It keeps its journal, jobs and health samples in
 //! `$FAKE_DESK_DIR` (a fresh temp directory if unset), so they outlive a restart, and samples every `$FAKE_DESK_HEALTH_S`
@@ -100,6 +100,10 @@ async fn main() -> std::io::Result<()> {
                 "msg" => format!("ok {}", viewer.events.message(rest.to_string(), vec![pixel()])),
                 "shell" => {
                     runner.on.store(rest == "on", std::sync::atomic::Ordering::SeqCst);
+                    format!("ok {}", rest == "on")
+                }
+                "pause" => {
+                    runner.paused.store(rest == "on", std::sync::atomic::Ordering::SeqCst);
                     format!("ok {}", rest == "on")
                 }
                 "reboot" => {

@@ -10,7 +10,8 @@
 
   It never prints a secret back. It installs Tailscale and joins the tailnet as tag:pc,tag:client-<client>; installs
   RigDesk from the release, checking its SHA-256; hands the permanent password, the admin settings PIN and the agent
-  API token to the service through enroll.json (under Program Files, admin-only, deleted once applied); lets the
+  API token to the service through enroll.json (under Program Files, admin-only, deleted once applied), with
+  -AgentShell on|off (on by default: Rig's agents may run commands as SYSTEM, every one logged); lets the
   direct port 21118 in from the tailnet only; and publishes the agent API with `tailscale serve`. Rerunning it with
   new secrets rotates them.
 #>
@@ -21,6 +22,8 @@ param(
     [Parameter(Mandatory)] [ValidateLength(8, 64)] [string] $Password,
     [Parameter(Mandatory)] [ValidateLength(4, 32)] [string] $Pin,
     [Parameter(Mandatory)] [ValidatePattern('^[A-Za-z0-9_-]{32,128}$')] [string] $AgentToken,
+    # Whether Rig's agents may run commands on this PC as SYSTEM without a session (the client's written consent, README).
+    [ValidateSet('on', 'off')] [string] $AgentShell = 'on',
     # Pinned by the release that ships this script; override only to test a build.
     [string] $PackageUrl = 'https://github.com/deussalo/rigdesk/releases/download/__TAG__/rigdesk-windows-x64.zip',
     [string] $PackageSha256 = '__SHA256__',
@@ -113,9 +116,9 @@ try {
     if (-not $installDir) { $installDir = Join-Path $env:ProgramFiles $AppName }
 
     # 3. The PC's secrets, applied by the service at startup and deleted.
-    Step 'Setting the permanent password, admin PIN and agent API token'
+    Step "Setting the permanent password, admin PIN and agent API token; agent shell $AgentShell"
     $enroll = Join-Path $installDir 'enroll.json'
-    $json = @{ password = $Password; pin = $Pin; agent_token = $AgentToken } | ConvertTo-Json -Compress
+    $json = @{ password = $Password; pin = $Pin; agent_token = $AgentToken; agent_shell = $AgentShell } | ConvertTo-Json -Compress
     [IO.File]::WriteAllText($enroll, $json, (New-Object Text.UTF8Encoding($false)))
     $acl = New-Object Security.AccessControl.FileSecurity
     $acl.SetAccessRuleProtection($true, $false)

@@ -26,6 +26,9 @@ struct Enrollment {
     pin: String,
     #[serde(default)]
     agent_token: String,
+    /// `on` or `off`: whether agents may run commands on this PC without a session, from `-AgentShell`.
+    #[serde(default)]
+    agent_shell: String,
 }
 
 /// The enrollment file of the installed binary, if this process is that binary.
@@ -82,6 +85,15 @@ pub fn apply() {
             Ok(()) => log::info!("enroll: agent API token set"),
             Err(e) => log::error!("enroll: could not write the agent API token: {e}"),
         }
+    }
+    match enrollment.agent_shell.as_str() {
+        "" => {}
+        on @ ("on" | "off") => match super::data_dir().map(|dir| std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("agent-shell"), on))) {
+            Some(Ok(())) => log::info!("enroll: agent shell {on}"),
+            Some(Err(e)) => log::error!("enroll: could not keep the agent shell switch: {e}"),
+            None => log::error!("enroll: no config dir for the agent shell switch"),
+        },
+        other => log::error!("enroll: agent_shell is on or off, not {other}; the switch is left as it was"),
     }
 }
 

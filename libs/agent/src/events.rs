@@ -28,6 +28,8 @@ pub enum EventKind {
     Mcp { on: bool },
     /// A command on the management lane was refused, ran, started as a job, or its job ended; `command` is its start.
     Shell { owner: Owner, run_as: Option<crate::manage::RunAs>, command: String, outcome: String, took_ms: Option<u64>, job: Option<String> },
+    /// The PC's agent shell opened, or closed: switched off, or paused by the person at the PC.
+    ShellSwitch { open: bool, code: Option<String>, words: Option<String> },
     /// The PC took a health sample, read at GET /samples.
     Health { sample: u64 },
 }

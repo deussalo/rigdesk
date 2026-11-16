@@ -41,20 +41,14 @@ pub enum RunAs {
     User,
 }
 
-/// What a SYSTEM run gave: how it ended, and the CPU time its process used where the host can tell.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Ran {
-    pub ended: Ended,
-    pub cpu_ms: Option<u64>,
-}
-
 /// How the host runs commands. Every call blocks.
 pub trait Runner: Send + Sync + 'static {
-    /// Whether this PC lets agents run commands: Err says why not, such as its agent-shell switch being off.
-    fn allowed(&self) -> Result<(), String>;
+    /// Whether this PC lets agents run commands now: `Refused::Off` while its agent-shell switch is off, `Refused::Paused`
+    /// while the person at the PC has paused it.
+    fn allowed(&self) -> Result<(), Refused>;
     /// One command as SYSTEM, off every desktop, with its output and errors in `dir/o`; its whole process tree is ended
     /// after `limit`.
-    fn run_system(&self, command: &str, dir: &Path, limit: Duration) -> Result<Ran, String>;
+    fn run_system(&self, command: &str, dir: &Path, limit: Duration) -> Result<Ended, String>;
     /// One command as the signed-in user, as the desktop's own shell runs it; Err when nobody is signed in.
     fn run_user(&self, command: &str, limit: Duration) -> Result<(Printed, Ended), String>;
     /// Starts a command as SYSTEM, off every desktop, and returns its process id at once: its output goes to `dir/o`,
@@ -73,6 +67,8 @@ pub trait Runner: Send + Sync + 'static {
 pub enum Refused {
     /// The PC's agent shell is off.
     Off(String),
+    /// The person at the PC paused the agent shell.
+    Paused,
     Blocked { since_ms: u64 },
     JobsFull,
     NoJob(String),
@@ -83,6 +79,7 @@ impl Refused {
     pub fn code(&self) -> &'static str {
         match self {
             Refused::Off(_) => "shell_off",
+            Refused::Paused => "shell_paused",
             Refused::Blocked { .. } => "blocked",
             Refused::JobsFull => "jobs_full",
             Refused::NoJob(_) => "no_job",
@@ -93,6 +90,7 @@ impl Refused {
     pub fn words(&self) -> String {
         match self {
             Refused::Off(why) => format!("this PC's agent shell is off: {why}"),
+            Refused::Paused => "the person at this PC paused the agent shell; nothing runs until they resume it".into(),
             Refused::Blocked { since_ms } => crate::session::Refusal::Blocked { since_ms: *since_ms }.words(),
             Refused::JobsFull => format!("this PC already runs {MAX_JOBS} background jobs, its most; read one until it ends, then start another"),
             Refused::NoJob(id) => format!("no background job {id} on this PC: it never ran here, or ended over a day ago and was removed"),
@@ -192,11 +190,13 @@ pub struct Lane {
     journal: Arc<Journal>,
     /// Held while a job starts, so two starts cannot both pass the cap.
     starting: Mutex<()>,
+    /// Whether the PC let commands run at the last sweep, so each change is journaled once.
+    was_open: Mutex<Option<bool>>,
 }
 
 impl Lane {
     pub fn new(runner: Arc<dyn Runner>, dir: PathBuf, shared: Arc<Shared>, journal: Arc<Journal>) -> Arc<Self> {
-        Arc::new(Lane { runner, dir, shared, journal, starting: Mutex::new(()) })
+        Arc::new(Lane { runner, dir, shared, journal, starting: Mutex::new(()), was_open: Mutex::new(None) })
     }
 
     pub fn runner(&self) -> &Arc<dyn Runner> {
@@ -204,7 +204,7 @@ impl Lane {
     }
 
     fn admit(&self, owner: &Owner) -> Result<(), Refused> {
-        self.runner.allowed().map_err(Refused::Off)?;
+        self.runner.allowed()?;
         match self.shared.blocked_since(&owner.agent_id) {
             Some(since_ms) => Err(Refused::Blocked { since_ms }),
             None => Ok(()),
@@ -281,9 +281,9 @@ impl Lane {
     fn run_in_own_dir(&self, command: &str, limit: Duration) -> Result<(Printed, Ended), String> {
         let dir = self.dir.join("runs").join(format!("r-{:08x}", rand::random::<u32>()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
-        let ran = self.runner.run_system(command, &dir, limit).and_then(|ran| {
+        let ran = self.runner.run_system(command, &dir, limit).and_then(|ended| {
             let printed = shell::printed_file(&dir.join("o")).map_err(|e| format!("cannot read the command's output: {e}"))?;
-            Ok((printed, ran.ended))
+            Ok((printed, ended))
         });
         let _ = std::fs::remove_dir_all(&dir);
         ran
@@ -365,14 +365,30 @@ impl Lane {
         Ok(Answer { ok, text: answer.to_string() })
     }
 
-    /// Ends jobs past their limits, marks those a reboot ended, journals each end once, and removes jobs a day after they
-    /// ended. Run every few seconds; blocks on the disk and the host's process calls.
+    /// Ends jobs past their limits, or all of them while the PC lets nothing run, marks those a reboot ended, journals each
+    /// end and each change of the PC's switch once, and removes jobs a day after they ended. Run every few seconds; blocks
+    /// on the disk and the host's process calls.
     pub fn sweep(&self) {
+        let closed = self.runner.allowed().err();
+        let was_open = self.was_open.lock().unwrap().replace(closed.is_none());
+        if was_open.is_some() && was_open != Some(closed.is_none()) {
+            let outcome = match &closed {
+                None => "open".to_string(),
+                Some(refused) => refused.code().to_string(),
+            };
+            self.journal.record(&Entry::new("rigdesk", "agent shell", &outcome, json!({"reason": closed.as_ref().map(Refused::words)})));
+            self.shared.events.push(EventKind::ShellSwitch { open: closed.is_none(), code: closed.as_ref().map(|r| r.code().to_string()), words: closed.as_ref().map(Refused::words) });
+        }
         for (dir, mut meta) in self.metas() {
             let mut state = self.state_of(&dir, &meta);
             if state == JobState::Running {
                 let size = std::fs::metadata(dir.join("o")).map(|m| m.len()).unwrap_or(0);
-                let over = if now_ms().saturating_sub(meta.started_ms) > JOB_LIMIT.as_millis() as u64 {
+                let over = if let Some(refused) = &closed {
+                    Some(match refused {
+                        Refused::Paused => "the person at the PC paused the agent shell".to_string(),
+                        other => other.words(),
+                    })
+                } else if now_ms().saturating_sub(meta.started_ms) > JOB_LIMIT.as_millis() as u64 {
                     Some(format!("it ran past {} h", JOB_LIMIT.as_secs() / 3600))
                 } else if size > JOB_OUTPUT_LIMIT {
                     Some(format!("its output passed {} MiB", JOB_OUTPUT_LIMIT >> 20))
@@ -442,13 +458,14 @@ pub async fn sweep_forever(lane: Arc<Lane>) {
 #[cfg(target_os = "linux")]
 pub struct ShRunner {
     pub on: std::sync::atomic::AtomicBool,
+    pub paused: std::sync::atomic::AtomicBool,
     pub boot: Mutex<String>,
 }
 
 #[cfg(target_os = "linux")]
 impl ShRunner {
     pub fn new() -> Self {
-        ShRunner { on: std::sync::atomic::AtomicBool::new(true), boot: Mutex::new("boot-1".into()) }
+        ShRunner { on: std::sync::atomic::AtomicBool::new(true), paused: std::sync::atomic::AtomicBool::new(false), boot: Mutex::new("boot-1".into()) }
     }
 
     fn sh(script: &str, dir: &Path) -> std::io::Result<std::process::Child> {
@@ -460,25 +477,28 @@ impl ShRunner {
 
 #[cfg(target_os = "linux")]
 impl Runner for ShRunner {
-    fn allowed(&self) -> Result<(), String> {
-        if self.on.load(std::sync::atomic::Ordering::SeqCst) {
-            Ok(())
+    fn allowed(&self) -> Result<(), Refused> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !self.on.load(SeqCst) {
+            Err(Refused::Off("turned off by the install line".into()))
+        } else if self.paused.load(SeqCst) {
+            Err(Refused::Paused)
         } else {
-            Err("turned off by the install line".into())
+            Ok(())
         }
     }
 
-    fn run_system(&self, command: &str, dir: &Path, limit: Duration) -> Result<Ran, String> {
+    fn run_system(&self, command: &str, dir: &Path, limit: Duration) -> Result<Ended, String> {
         let mut child = Self::sh(command, dir).map_err(|e| e.to_string())?;
         let deadline = Instant::now() + limit;
         loop {
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                return Ok(Ran { ended: Ended::Exited(status.code().unwrap_or(-1)), cpu_ms: None });
+                return Ok(Ended::Exited(status.code().unwrap_or(-1)));
             }
             if Instant::now() >= deadline {
                 self.end(child.id());
                 let _ = child.wait();
-                return Ok(Ran { ended: Ended::TimedOut(limit), cpu_ms: None });
+                return Ok(Ended::TimedOut(limit));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -487,7 +507,7 @@ impl Runner for ShRunner {
     fn run_user(&self, command: &str, limit: Duration) -> Result<(Printed, Ended), String> {
         let dir = std::env::temp_dir().join(format!("rigdesk-user-{:08x}", rand::random::<u32>()));
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let ran = self.run_system(command, &dir, limit).and_then(|ran| Ok((shell::printed_file(&dir.join("o")).map_err(|e| e.to_string())?, ran.ended)));
+        let ran = self.run_system(command, &dir, limit).and_then(|ended| Ok((shell::printed_file(&dir.join("o")).map_err(|e| e.to_string())?, ended)));
         let _ = std::fs::remove_dir_all(&dir);
         ran
     }
@@ -593,6 +613,28 @@ mod tests {
         lane.sweep();
         assert_eq!(Journal::open(dir.join("actions.jsonl"), 1 << 20).tail(64).iter().filter(|e| e.outcome == "ended").count(), MAX_JOBS);
         assert_eq!(lane.serve(&owner, Request::Read { job: "j-00000000".into() }).unwrap_err().code(), "no_job");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pausing_cuts_running_jobs_and_refuses_new_commands_until_resumed() {
+        let (lane, runner, _shared, dir) = lane();
+        let owner = Owner { agent_id: "a1".into(), title: "Ops".into(), graph: "fleet".into() };
+        lane.sweep();
+        let started: Value = serde_json::from_str(&lane.serve(&owner, Request::Start { command: "sleep 30".into(), run_as: RunAs::System }).unwrap().text).unwrap();
+        let job = started["job"].as_str().unwrap().to_string();
+        runner.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+        lane.sweep();
+        assert_eq!(lane.serve(&owner, Request::Read { job: job.clone() }).unwrap_err().code(), "shell_paused");
+        let (_, run) = asked(json!({"agent": {"id": "a1"}, "command": "echo hi"}));
+        assert_eq!(lane.serve(&owner, run.clone()).unwrap_err().code(), "shell_paused");
+        runner.paused.store(false, std::sync::atomic::Ordering::SeqCst);
+        lane.sweep();
+        let read: Value = serde_json::from_str(&lane.serve(&owner, Request::Read { job }).unwrap().text).unwrap();
+        assert_eq!(read["why"], json!("ended because the person at the PC paused the agent shell"));
+        assert!(lane.serve(&owner, run).unwrap().ok);
+        let switch: Vec<String> = Journal::open(dir.join("actions.jsonl"), 1 << 20).tail(64).into_iter().filter(|e| e.what == "agent shell").map(|e| e.outcome).collect();
+        assert_eq!(switch, vec!["shell_paused", "open"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
