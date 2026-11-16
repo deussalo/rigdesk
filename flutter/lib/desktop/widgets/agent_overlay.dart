@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart' hide Dialog;
+import 'package:flutter_hbb/common/rig_theme.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/agent_bridge.dart';
 import 'package:flutter_hbb/models/agent_model.dart';
@@ -13,8 +14,8 @@ import 'package:flutter_hbb/models/agent_note.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
-const _agentGreen = Color(0xFF22C55E);
-const _blockRed = Color(0xFFDC2626);
+const _live = RigTheme.toneLive;
+const _fault = RigTheme.toneFault;
 
 /// One `agent_state` event from the session: mirror it, copy a fresh share link, and show the PC's words.
 void onAgentStateEvent(SessionID sessionId, String stateJson) {
@@ -177,25 +178,29 @@ class _AgentOverlayState extends State<AgentOverlay> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 14,
-              height: 14,
-              decoration: BoxDecoration(
-                color: _agentGreen,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
+            SizedBox.square(
+              dimension: 14,
+              child: Center(
+                child: Transform.rotate(
+                  angle: math.pi / 4,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: _live,
+                      border: Border.all(color: RigTheme.bg, width: 2),
+                    ),
+                  ),
+                ),
               ),
             ),
             const SizedBox(width: 4),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: _agentGreen,
-                borderRadius: BorderRadius.circular(4),
-              ),
+              color: _live,
               child: Text(
                 '${point.agentTitle}: ${point.summary}',
-                style: const TextStyle(color: Colors.white, fontSize: 12),
+                style: const TextStyle(color: RigTheme.bg, fontSize: RigTheme.fontSm),
               ),
             ),
           ],
@@ -209,8 +214,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
       constraints: const BoxConstraints(maxWidth: 380),
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.6),
-        borderRadius: BorderRadius.circular(6),
+        color: RigTheme.bg.withOpacity(0.85),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -221,8 +225,8 @@ class _AgentOverlayState extends State<AgentOverlay> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      color: a.ok ? Colors.white : Colors.orangeAccent,
-                      fontSize: 12),
+                      color: a.ok ? RigTheme.text : RigTheme.toneFaultInk,
+                      fontSize: RigTheme.fontSm),
                 ))
             .toList(),
       ),
@@ -251,8 +255,8 @@ class _AgentOverlayState extends State<AgentOverlay> {
   Widget _bar(BuildContext context, AgentModel agent) {
     if (!_hasHost) {
       return Material(
-        elevation: 4,
-        borderRadius: BorderRadius.circular(8),
+        color: RigTheme.surface,
+        shape: RigTheme.square.copyWith(side: BorderSide(color: RigTheme.border)),
         child: TextButton.icon(
           onPressed: () => _setUp(context),
           icon: const AgentDiamond(size: 18),
@@ -281,7 +285,7 @@ class _AgentOverlayState extends State<AgentOverlay> {
       items.add(Tooltip(
         message: '${agent.ownerTitle} in ${agent.ownerGraph}',
         child: Chip(
-          avatar: const AgentDiamond(size: 18, color: _agentGreen),
+          avatar: const AgentDiamond(size: 18, color: _live),
           label: Text('${agent.ownerTitle} · $holds'),
         ),
       ));
@@ -323,11 +327,11 @@ class _AgentOverlayState extends State<AgentOverlay> {
             : 'stop (ctrl+alt+esc)',
         child: ElevatedButton.icon(
           style: ElevatedButton.styleFrom(
-            backgroundColor: agent.isBlocked ? _agentGreen : _blockRed,
-            foregroundColor: Colors.white,
+            backgroundColor: agent.isBlocked ? _live : _fault,
+            foregroundColor: RigTheme.bg,
             padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
-            textStyle:
-                const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            textStyle: const TextStyle(
+                fontSize: RigTheme.fontMd, fontWeight: RigTheme.strong),
           ),
           onPressed: () => _ask(ffi, agent.isBlocked ? 'unblock' : 'stop'),
           icon: Icon(agent.isBlocked ? Icons.play_circle : Icons.stop_circle),
@@ -344,8 +348,8 @@ class _AgentOverlayState extends State<AgentOverlay> {
       ),
     ));
     return Material(
-      elevation: 4,
-      borderRadius: BorderRadius.circular(8),
+      color: RigTheme.surface,
+      shape: RigTheme.square.copyWith(side: BorderSide(color: RigTheme.border)),
       child: Padding(
         padding: const EdgeInsets.all(6),
         child: Row(mainAxisSize: MainAxisSize.min, children: items),
@@ -734,11 +738,11 @@ class _NotePainter extends CustomPainter {
         ..fillType = PathFillType.evenOdd
         ..addRect(full)
         ..addRect(region);
-      canvas.drawPath(shade, Paint()..color = Colors.black45);
+      canvas.drawPath(shade, Paint()..color = RigTheme.bg.withOpacity(0.55));
       canvas.drawRect(
           region,
           Paint()
-            ..color = Colors.white
+            ..color = RigTheme.accent
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2 / scale);
     }

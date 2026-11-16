@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/rig_theme.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/agent_overlay.dart';
 import 'package:flutter_hbb/models/agent_bridge.dart';
@@ -13,8 +14,8 @@ import 'package:flutter_hbb/models/agent_note.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
-const _agentGreen = Color(0xFF22C55E);
-const _stopRed = Color(0xFFDC2626);
+const _live = RigTheme.toneLive;
+const _fault = RigTheme.toneFault;
 
 /// The remote page keeps the soft keyboard off for its own input; a text field of the panel turns it back on.
 void _allowSoftKeyboard() {
@@ -160,17 +161,15 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
       label = 'agent';
     }
     return Material(
-      elevation: 4,
-      color: agent.isBlocked ? Colors.orange.shade100 : null,
-      borderRadius: BorderRadius.circular(20),
+      color: agent.isBlocked ? RigTheme.toneHoldBg : RigTheme.surface,
+      shape: RigTheme.square.copyWith(side: BorderSide(color: RigTheme.border)),
       child: InkWell(
-        borderRadius: BorderRadius.circular(20),
         onTap: _ready ? _openSheet : _setUp,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             AgentDiamond(
-                size: 18, color: agent.isShared ? _agentGreen : null),
+                size: 18, color: agent.isShared ? _live : null),
             const SizedBox(width: 6),
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 200),
@@ -192,11 +191,12 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
     final blocked = AgentModel.of(ffi.sessionId).isBlocked;
     return ElevatedButton.icon(
       style: ElevatedButton.styleFrom(
-        backgroundColor: blocked ? _agentGreen : _stopRed,
-        foregroundColor: Colors.white,
+        backgroundColor: blocked ? _live : _fault,
+        foregroundColor: RigTheme.bg,
         minimumSize: wide ? const Size.fromHeight(56) : null,
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-        textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        textStyle: const TextStyle(
+            fontSize: RigTheme.fontMd, fontWeight: RigTheme.strong),
       ),
       onPressed: () => _ask(blocked ? 'unblock' : 'stop'),
       icon: Icon(blocked ? Icons.play_circle : Icons.stop_circle),
@@ -227,7 +227,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                   if (agent.isShared)
                     ListTile(
                       leading:
-                          const AgentDiamond(color: _agentGreen),
+                          const AgentDiamond(color: _live),
                       title: Text(agent.ownerTitle),
                       subtitle: Text(
                           '${agent.ownerGraph} · ${_holds(agent)}'),
@@ -318,28 +318,32 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 14,
-              height: 14,
-              decoration: BoxDecoration(
-                color: _agentGreen,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
+            SizedBox.square(
+              dimension: 14,
+              child: Center(
+                child: Transform.rotate(
+                  angle: math.pi / 4,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: _live,
+                      border: Border.all(color: RigTheme.bg, width: 2),
+                    ),
+                  ),
+                ),
               ),
             ),
             const SizedBox(width: 4),
             Container(
               constraints: const BoxConstraints(maxWidth: 220),
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: _agentGreen,
-                borderRadius: BorderRadius.circular(4),
-              ),
+              color: _live,
               child: Text(
                 '${point.agentTitle}: ${point.summary}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white, fontSize: 12),
+                style: const TextStyle(color: RigTheme.bg, fontSize: RigTheme.fontSm),
               ),
             ),
           ],
@@ -356,8 +360,7 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
       constraints: const BoxConstraints(maxWidth: 320),
       padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.6),
-        borderRadius: BorderRadius.circular(6),
+        color: RigTheme.bg.withOpacity(0.85),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -368,8 +371,8 @@ class _MobileAgentPanelState extends State<MobileAgentPanel> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      color: a.ok ? Colors.white : Colors.orangeAccent,
-                      fontSize: 11),
+                      color: a.ok ? RigTheme.text : RigTheme.toneFaultInk,
+                      fontSize: RigTheme.fontXs),
                 ))
             .toList(),
       ),
@@ -686,11 +689,11 @@ class _MobileNotePainter extends CustomPainter {
         ..fillType = PathFillType.evenOdd
         ..addRect(full)
         ..addRect(region);
-      canvas.drawPath(shade, Paint()..color = Colors.black45);
+      canvas.drawPath(shade, Paint()..color = RigTheme.bg.withOpacity(0.55));
       canvas.drawRect(
           region,
           Paint()
-            ..color = Colors.white
+            ..color = RigTheme.accent
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2 / scale);
     }
