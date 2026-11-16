@@ -920,7 +920,7 @@ class Desks:
                 async with self._client().get(f"{link.spec.url}/samples?after={after}", headers=self._headers(link),
                                               timeout=aiohttp.ClientTimeout(total=SAMPLES_LIMIT_S)) as answer:
                     if answer.status == 404:
-                        link.samples_why = "this PC's RigDesk takes no health samples"
+                        link.samples_why = "this PC's RigDesk takes no health samples (RigDesk takes them on Windows only)"
                         return
                     if answer.status != 200:
                         raise DeskRefused(f"/samples answered HTTP {answer.status}")

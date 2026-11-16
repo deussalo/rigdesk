@@ -247,7 +247,7 @@ function Shell({ pc, shell, now, forFleet }: { readonly pc: PcRow; readonly shel
   return (
     <>
       <BoardBar>
-        <Text text={switched === null ? 'this PC\'s RigDesk has no agent shell: update it' : switched.open ? 'on at the PC'
+        <Text text={switched === null ? 'this PC\'s RigDesk has no agent shell: RigDesk has one on Windows only, from an up-to-date build' : switched.open ? 'on at the PC'
           : `${SWITCH_WORDS[switched.code ?? ''] ?? switched.code ?? 'closed'}${switched.words === null ? '' : `: ${switched.words}`}`} ink={switched === null || switched.open ? 'idle' : 'hold'} size="xs" />
       </BoardBar>
       {shell.granted.map(each => (
