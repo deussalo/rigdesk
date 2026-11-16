@@ -185,4 +185,32 @@ Write-Host "health sample: $($sample | ConvertTo-Json -Compress -Depth 8)"
 if ($sample.taken -ne "ok") { Fail "the health sample failed: $($sample.why)" }
 if (-not ($sample.figures.volumes | Where-Object { $_.name -eq "C:" -and $_.free_mb -gt 0 })) { Fail "the health sample has no C: with free space" }
 if (-not $sample.figures.cpu_ms -or -not $sample.took_ms) { Fail "the health sample lacks its CPU time or duration" }
+# Sessions the operator starts from Rig (p-dc19): Rig's bearer joins a free desktop with no link while the PC's switch
+# is on, never takes a held one, and each join is journaled.
+if (-not $log.Contains("enroll: sessions started from Rig on")) { Fail "the service log lacks 'enroll: sessions started from Rig on' (the install line's default)" }
+function Join-Rig($agent) {
+  try { Post "/join" @{ agent = $agent; ask = "smoke" } } catch {
+    if ($_.ErrorDetails.Message) { $_.ErrorDetails.Message | ConvertFrom-Json } else { Fail "POST /join failed: $_" }
+  }
+}
+Post "/leave" @{} ($auth + @{ "X-Desk-Session" = $own.session }) | Out-Null
+$joinSwitch = Join-Path $svcHome "config\agent\agent-join"
+Set-Content -Path $joinSwitch -Value "off" -NoNewline
+$closed = Join-Rig @{ id = "join-smoke"; title = "Join smoke"; graph = "ci" }
+Set-Content -Path $joinSwitch -Value "on" -NoNewline
+if ($closed.code -ne "join_off") { Fail "a join went through with the switch off: $($closed | ConvertTo-Json -Compress)" }
+$joined = Join-Rig @{ id = "join-smoke"; title = "Join smoke"; graph = "ci" }
+if (-not $joined.session) { Fail "Rig's bearer did not join a free desktop: $($joined | ConvertTo-Json -Compress)" }
+$session = $auth + @{ "X-Desk-Session" = $joined.session }
+$shot = Tool 3 "screenshot"
+if ($shot.isError) { Fail "the operator-started session could not take a screenshot" }
+$held = Join-Rig @{ id = "join-other"; title = "Other"; graph = "ci" }
+if ($held.code -ne "held") { Fail "a join took a held desktop: $($held | ConvertTo-Json -Compress)" }
+Post "/leave" @{} $session | Out-Null
+$joins = @((Invoke-RestMethod -Uri "http://127.0.0.1:21119/log?n=200" -Headers $auth).entries | Where-Object { $_.what -eq "join" } | ForEach-Object { $_.outcome })
+Write-Host "joins: $($joins -join ', ')"
+foreach ($want in @("refused: join_off", "ok", "refused: held")) {
+  if ($joins -notcontains $want) { Fail "the journal lacks a join entry '$want'" }
+}
+
 Write-Host "install smoke passed"

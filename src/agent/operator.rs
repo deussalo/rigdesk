@@ -1,0 +1,95 @@
+//! Sessions the operator starts from Rig, with no share link: the PC's switch for them, and what the person at the PC
+//! is told. The switch is `agent-join` beside api.token, written from the enrollment (`-AgentJoin on|off`), and the
+//! pause in the PIN-locked security settings. The tray asks this process over IPC who holds such a session, and ends it.
+
+use std::path::PathBuf;
+
+use base::config::keys;
+use hbb_common::{config::Config, log};
+use rigdesk_agent::operator::{Closed, Switch};
+
+pub const SWITCH_FILE: &str = "agent-join";
+/// IPC config names: read, the agent holding an operator-started session as "<agent id>\n<title>" (empty when none);
+/// written with that agent id, its session ends.
+pub const IPC_SESSION: &str = "agent-operator-session";
+pub const IPC_END: &str = "agent-operator-end";
+
+pub struct PcSwitch {
+    pub file: Option<PathBuf>,
+}
+
+impl Switch for PcSwitch {
+    fn open(&self) -> Result<(), Closed> {
+        match self.file.as_ref().map(std::fs::read_to_string) {
+            Some(Ok(on)) if on.trim() == "on" => {}
+            Some(Ok(_)) => return Err(Closed::Off("its enrollment turned them off (-AgentJoin off); an administrator turns them on by enrolling it again with -AgentJoin on".into())),
+            _ => return Err(Closed::Off("it was enrolled before they existed; an administrator turns them on by enrolling it again with -AgentJoin on".into())),
+        }
+        if Config::get_option(keys::OPTION_AGENT_JOIN_PAUSED) == "Y" {
+            return Err(Closed::Paused);
+        }
+        Ok(())
+    }
+}
+
+/// For the tray: who holds a session the operator started, as "<agent id>\n<title>"; empty when nobody does.
+pub fn session_text() -> String {
+    super::shared().operator_owner().map_or(String::new(), |owner| format!("{}\n{}", owner.agent_id, owner.title))
+}
+
+/// The person at the PC ended that agent's operator-started session from the tray.
+pub fn end(agent_id: &str) {
+    if super::shared().end_operator(agent_id) {
+        log::info!("agent: the person at the PC ended {agent_id}'s session started from Rig");
+    }
+}
+
+/// On Linux this process runs as the signed-in user, on their session bus, so it says itself when such a session starts;
+/// on Windows it is SYSTEM, and the tray says it.
+#[cfg(target_os = "linux")]
+pub fn notify_starts() {
+    use hbb_common::tokio;
+    use rigdesk_agent::{EventKind, Holder};
+    let mut rx = super::shared().events.subscribe();
+    tokio::spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if let EventKind::Holder { holder: Holder::Agent, by } = &event.kind {
+                        if by == "operator" {
+                            if let Some(owner) = super::shared().operator_owner() {
+                                tokio::task::spawn_blocking(move || notify(&owner.title));
+                            }
+                        }
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn notify(title: &str) {
+    use dbus::arg::PropMap;
+    let (summary, body) = words(title);
+    let sent = dbus::blocking::Connection::new_session().and_then(|conn| {
+        let proxy = conn.with_proxy("org.freedesktop.Notifications", "/org/freedesktop/Notifications", std::time::Duration::from_secs(3));
+        let notified: Result<(u32,), dbus::Error> =
+            proxy.method_call("org.freedesktop.Notifications", "Notify", (crate::get_app_name(), 0u32, "", summary, body, Vec::<String>::new(), PropMap::new(), 0i32));
+        notified
+    });
+    if let Err(e) = sent {
+        log::warn!("agent: the desktop notification of a session started from Rig failed: {e}");
+    }
+}
+
+/// The notification's title and text.
+pub fn words(title: &str) -> (String, String) {
+    (
+        format!("Rig agent {title} is using this computer"),
+        "The operator approved it in Rig. Your own mouse and keyboard still go first, and every action is logged. End it from the RigDesk tray icon.".to_string(),
+    )
+}

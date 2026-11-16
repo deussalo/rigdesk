@@ -18,6 +18,8 @@ mod desk;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod enroll;
 mod input;
+pub mod notice;
+pub mod operator;
 mod shell;
 pub mod viewer;
 
@@ -88,6 +90,9 @@ pub fn start() {
     let api = rigdesk_agent::Api::new(host.shared.clone(), desk, host.journal.clone(), &bearer, Some(found));
     #[cfg(windows)]
     crate::platform::windows::agent_lane::manage(&api, &host.shared, &host.journal, data_dir());
+    api.operator_joins(Arc::new(operator::PcSwitch { file: data_dir().map(|dir| dir.join(operator::SWITCH_FILE)) }));
+    #[cfg(target_os = "linux")]
+    operator::notify_starts();
     tokio::spawn(async move {
         match api.serve(API_PORT).await {
             Ok(port) => log::info!("agent API listening on 127.0.0.1:{port}"),
