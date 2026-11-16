@@ -71,6 +71,11 @@
             <meta-data android:name="android.speech" android:resource="@xml/recognition" />
         </service>
 
+        <receiver
+            android:name="dev.rig.assistant.Configure"
+            android:exported="true"
+            android:permission="android.permission.WRITE_SECURE_SETTINGS" />
+
         <service
             android:name="dev.rig.assistant.RigNotifications"
             android:exported="true"
