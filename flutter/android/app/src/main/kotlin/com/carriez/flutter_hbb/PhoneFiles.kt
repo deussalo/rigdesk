@@ -28,7 +28,8 @@ class PhoneFiles(private val ctx: Context) {
             "offset" to toolProp("integer", "Where to start, in bytes (default 0)."),
             "max_bytes" to toolProp("integer", "How much to read.")),
         toolSpec("file_write", "Write file", false, "Write a file in shared storage, making its folders: text as UTF-8, or base64 " +
-            "for bytes; replaces the file unless append is true.", listOf("path"),
+            "for bytes; replaces the file unless append is true. A call carries at most about 700 KiB of bytes (base64 grows them " +
+            "by a third): write more with append.", listOf("path"),
             "path" to toolProp("string", "The file."),
             "text" to toolProp("string", "What to write, as text."),
             "base64" to toolProp("string", "What to write, as base64 bytes (instead of text)."),
@@ -78,19 +79,24 @@ class PhoneFiles(private val ctx: Context) {
             f.seek(offset)
             f.readFully(bytes)
         }
-        val head = "${file.path}: bytes $offset to ${offset + want} of $size"
         val text = utf8(bytes)
-        return if (text != null) "$head, as text\n$text" else "$head, as base64\n" + Base64.encodeToString(bytes, Base64.NO_WRAP)
+        val used = text?.second ?: want
+        val head = "${file.path}: bytes $offset to ${offset + used} of $size" +
+            if (offset + used < size) " (read on from offset ${offset + used})" else " (the end)"
+        return if (text != null) "$head, as text\n${text.first}" else "$head, as base64\n" + Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
-    /** The bytes as text when they are UTF-8, allowing a character cut at the end of the window. */
-    private fun utf8(bytes: ByteArray): String? {
+    /**
+     * The bytes as text when they are UTF-8, with how many of them it took: a character cut at the end of the window is
+     * left for the next read.
+     */
+    private fun utf8(bytes: ByteArray): Pair<String, Int>? {
         val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
         for (cut in 0..3) {
-            if (cut > bytes.size) break
+            if (cut > 0 && cut >= bytes.size) break // a window of one cut character goes as base64, so a read always moves on
             try {
                 val text = decoder.reset().decode(ByteBuffer.wrap(bytes, 0, bytes.size - cut)).toString()
-                return if (text.any { it < ' ' && it != '\n' && it != '\r' && it != '\t' }) null else text
+                return if (text.any { it < ' ' && it != '\n' && it != '\r' && it != '\t' }) null else text to (bytes.size - cut)
             } catch (e: CharacterCodingException) {
                 continue
             }

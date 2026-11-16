@@ -98,6 +98,7 @@ class PhoneMcp(private val ctx: Context) {
     }
 
     private class Request(val method: String, val path: String, val headers: Map<String, String>, val body: ByteArray)
+    private class TooLarge(why: String) : Exception(why)
 
     private fun answer(s: Socket) {
         s.use {
@@ -105,8 +106,11 @@ class PhoneMcp(private val ctx: Context) {
                 s.soTimeout = 15_000
                 val input = BufferedInputStream(s.getInputStream())
                 val out = s.getOutputStream()
-                val req = read(input) ?: return
-                val (status, body) = respond(req)
+                val (status, body) = try {
+                    respond(read(input) ?: return)
+                } catch (e: TooLarge) {
+                    "413 Payload Too Large" to json(JSONObject().put("error", e.message))
+                }
                 val head = StringBuilder("HTTP/1.1 $status\r\n")
                 if (status.startsWith("401")) head.append("WWW-Authenticate: Bearer\r\n")
                 if (body != null) head.append("Content-Type: application/json\r\nContent-Length: ${body.size}\r\n")
@@ -140,7 +144,7 @@ class PhoneMcp(private val ctx: Context) {
             if (colon > 0) headers[line.substring(0, colon).trim().lowercase(Locale.ROOT)] = line.substring(colon + 1).trim()
         }
         val length = headers["content-length"]?.toIntOrNull() ?: 0
-        if (length < 0 || length > MAX_BODY) throw IllegalStateException("a body of $length bytes is refused")
+        if (length < 0 || length > MAX_BODY) throw TooLarge("a body of $length bytes is over the phone's $MAX_BODY: send less per call")
         val body = ByteArray(length)
         var got = 0
         while (got < length) {
