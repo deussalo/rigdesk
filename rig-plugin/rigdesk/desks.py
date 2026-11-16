@@ -1294,7 +1294,7 @@ class Desks:
         await self._ended(held, f"RigDesk {held.pc}: the operator took away your standing access to {held.pc}, so your session there ended. "
                                 "desk/request(pc, why) asks them again.")
 
-    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "") -> Held:
+    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "", via: Literal["link", "assigned"] = "link") -> Held:
         """The operator accepted this agent's request to join a PC: on a stock PC a share link is minted and claimed for it, as the human would;
         a RigDesk PC is asked for the session itself."""
         mine = self.held_by(agent, graph)
@@ -1304,7 +1304,7 @@ class Desks:
         if other is not None and other.agent != agent:
             raise DeskRefused(f"{other.title} holds {pc} now")
         if self._link(pc).spec.stock is None:
-            return await self._join_operator(pc, agent, graph, node, title, ask)
+            return await self._join_operator(pc, agent, graph, node, title, ask, via)
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title)
 

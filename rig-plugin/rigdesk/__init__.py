@@ -348,7 +348,7 @@ async def _always_allowed(desks: Desks, given: Requested, node: str, title: str)
     grantee = f"agent:{given['agent']}"
     changed = await desks.assign(given["pc"], grantee)
     try:
-        held = await desks.join_assigned(given["pc"], given["agent"], given["graph"], node, title, given.get("ask", ""))
+        held = await desks.join_approved(given["pc"], given["agent"], given["graph"], node, title, given.get("ask", ""), via="assigned")
     except Exception:
         if changed:
             await desks.unassign(given["pc"], grantee)
