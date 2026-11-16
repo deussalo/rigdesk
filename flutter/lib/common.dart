@@ -3717,11 +3717,7 @@ class ComboBox extends StatelessWidget {
     current = keys[index];
     return Container(
       decoration: BoxDecoration(
-        border: Border.all(
-          color: enabled
-              ? MyTheme.color(context).border2 ?? MyTheme.border
-              : MyTheme.border,
-        ),
+        color: RigTheme.overlaySoftStrong,
         borderRadius:
             BorderRadius.zero, //border raiuds of dropdown button
       ),
@@ -3731,7 +3727,7 @@ class ComboBox extends StatelessWidget {
             value: ref.value,
             elevation: 16,
             underline: Container(),
-            style: TextStyle(
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
                 color: enabled
                     ? Theme.of(context).textTheme.titleMedium?.color
                     : disabledTextColor(context, enabled)),
@@ -3753,7 +3749,6 @@ class ComboBox extends StatelessWidget {
                 value: value,
                 child: Text(
                   value,
-                  style: const TextStyle(fontSize: 15),
                   overflow: TextOverflow.ellipsis,
                 ).marginOnly(left: 15),
               );
