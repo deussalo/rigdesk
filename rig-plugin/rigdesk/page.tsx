@@ -160,7 +160,7 @@ function Screenshot({ pc, now }: { readonly pc: PcRow; readonly now: number }): 
       {shot === null ? null : <img className={css.shot} src={`data:${shot.mime};base64,${shot.data}`} alt={`${pc.name}'s screen ${agoOf(shot.taken_ms, now)}`} />}
       <BoardBar>
         <Action label={shot === null ? 'screenshot' : 'retake'} tone="outlined" pending="taking…" disabled={pc.state !== 'up'} onInvoke={take} />
-        {shot === null ? null : <span className={css.dim}>{`taken ${agoOf(shot.taken_ms, now)}`}</span>}
+        {shot === null ? null : <Text text={`taken ${agoOf(shot.taken_ms, now)}`} ink="idle" size="xs" />}
       </BoardBar>
     </>
   )
@@ -175,8 +175,8 @@ function McpServers({ pc, mcp, now }: { readonly pc: PcRow; readonly mcp: Mcp; r
   return (
     <>
       <BoardBar>
-        <label className={css.switch}><Toggle label={`${pc.name}'s MCP servers`} on={mcp.allowed} onTurn={allowing(pc.name)} />{mcp.allowed ? 'on' : 'off'}</label>
-        <span className={css.dim}>{mcp.servers.length > 0 && mcp.why === null ? 'turning it off closes them for the agent holding the PC' : none}</span>
+        <label className={css.switch}>on<Toggle label={`${pc.name}'s MCP servers`} on={mcp.allowed} onTurn={allowing(pc.name)} /></label>
+        {mcp.servers.length > 0 && mcp.why === null ? null : <Text text={none} ink="idle" size="xs" />}
       </BoardBar>
       {mcp.servers.length === 0 ? null : (
         <BoardFacts label="MCP servers" facts={mcp.servers.map((each): Fact => [each.name,
@@ -211,9 +211,9 @@ function StockButtons({ pc, minted }: { readonly pc: PcRow; readonly minted: (li
         <Action label="end share" tone="danger" onInvoke={acting(pc, 'revoke')} />
       </>
     ) : undefined}>
-      <Action label="share with agent" tone="outlined" pending="minting…" disabled={pc.state !== 'up'} onInvoke={acting(pc, 'mint', minted)} />
-      {sharer !== null && !pc.assigned.some(each => each.grantee === sharer) ? <Action label="assign this agent" tone="outlined" pending="assigning…" onInvoke={assigning(pc.name, sharer, true)} /> : null}
-      {owned && pc.holder === 'human' ? <Action label="hand to agent" tone="outlined" onInvoke={acting(pc, 'hand')} /> : null}
+      <Action label="share" tone="outlined" pending="minting…" disabled={pc.state !== 'up'} onInvoke={acting(pc, 'mint', minted)} />
+      {sharer !== null && !pc.assigned.some(each => each.grantee === sharer) ? <Action label="assign holder" tone="outlined" pending="assigning…" onInvoke={assigning(pc.name, sharer, true)} /> : null}
+      {owned && pc.holder === 'human' ? <Action label="hand over" tone="outlined" onInvoke={acting(pc, 'hand')} /> : null}
     </BoardBar>
   )
 }
@@ -246,14 +246,14 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
       {link === null || pc.owner !== null ? null : (
         <BoardPart name="share link">
           <Text text={link} format="code" size="sm" />
-          <BoardBar><Action label="copy" lead="copy" tone="outlined" onInvoke={() => { copied('share link', link); return Promise.resolve(null) }} /><span className={css.dim}>works once</span></BoardBar>
+          <BoardBar><Action label="copy" lead="copy" tone="outlined" onInvoke={() => { copied('share link', link); return Promise.resolve(null) }} /><Text text="works once" ink="idle" size="xs" /></BoardBar>
         </BoardPart>
       )}
       {pc.stock ? <BoardPart name="assign"><Assign pc={pc} forFleet={forFleet} /></BoardPart> : null}
       {pc.assigned.length === 0 ? null : <BoardPart name="assigned"><Grants pc={pc} /></BoardPart>}
       {pc.stock || pc.mcp === undefined ? null : <BoardPart name="MCP"><McpServers pc={pc} mcp={pc.mcp} now={now} /></BoardPart>}
       <BoardPart name="screen"><Screenshot pc={pc} now={now} /></BoardPart>
-      {pc.stock ? <StockButtons pc={pc} minted={setLink} /> : <Quiet>its human shares it from the RigDesk viewer</Quiet>}
+      {pc.stock ? <StockButtons pc={pc} minted={setLink} /> : <Quiet>shared from the RigDesk viewer</Quiet>}
     </BoardRow>
   )
 }
@@ -301,7 +301,7 @@ function Adding({ server, taken, close }: { readonly server: IdServer; readonly 
           <Text text={install} format="code" size="sm" />
           <BoardBar>
             <Action label="copy" lead="copy" tone="outlined" onInvoke={() => { copied('install line', install); return Promise.resolve(null) }} />
-            <span className={css.dim}>run it on the Windows PC, in PowerShell as administrator; it prints the ID and password</span>
+            <Text text="as administrator, on the PC" ink="idle" size="xs" />
           </BoardBar>
         </BoardPart>
       )}
