@@ -165,8 +165,8 @@ Known limits against a RigDesk PC:
 * `<pc>.<server>/<tool>` — the MCP servers already running on a RigDesk PC (Blender's, an IDE's), for the agent
   holding it alone. While an agent holds the PC, its RigDesk finds each MCP server listening on loopback; the plugin
   opens each under the holder's session (initialize, then tools/list) and tells the holder each one's tools by exact
-  name, and when one goes. They are `hidden`: in no seat's session notice, loadable by name, refused to any agent but
-  the holder. A call goes through the PC under its holder and Block rules, as a desk call does, and is journaled there;
+  name, and when one goes. They load on request, for the holder alone: `tool_load` `<pc>.<server>/` lists their tools to
+  it, any other agent is shown none, and a call by any but the holder is refused. A call goes through the PC under its holder and Block rules, as a desk call does, and is journaled there;
   a server that forgot its MCP session is opened again once. A PC's `mcp: false` in settings opens none, and turned off
   closes those open and tells the holder; the person at the PC has a switch of their own. A stock PC's bridge finds
   none by itself: it offers the servers its `stock.mcp_servers` name, each `{"url": "http://<host>[:port][/path]",

@@ -102,7 +102,7 @@ impl Desk for RemoteDesk {
             ToolSpec { name: "type", read_only: false, description: "Type a run of text at the focused control.",
                 input_schema: obj(json!({"text": {"type": "string"}}), &["text"]) },
             ToolSpec { name: "key", read_only: false,
-                description: "Press one named key: enter, tab, escape, backspace, delete, up/down/left/right, home, end, f1-f12, and so on. On an Android PC, back, home (the home screen) and recents are its navigation keys.",
+                description: "Press one named key: enter, tab, escape, backspace, delete, up/down/left/right, home, end, f1-f12, and so on.",
                 input_schema: obj(json!({"key": {"type": "string"}}), &["key"]) },
             ToolSpec { name: "shortcut", read_only: false, description: "Press a chord such as ctrl+c, ctrl+shift+n, alt+f4 or win+r.",
                 input_schema: obj(json!({"keys": {"type": "string"}}), &["keys"]) },
