@@ -91,10 +91,24 @@ impl FrameRaw {
         std::mem::swap(dst, &mut self.data);
         Some(())
     }
+
+    // A frame that arrived and expired untaken, whatever its age: Android sends none while the screen is still.
+    fn last(&mut self, dst: &mut Vec<u8>) -> Option<()> {
+        if self.enable.not() || !self.ready {
+            return None;
+        }
+        self.ready = false;
+        std::mem::swap(dst, &mut self.data);
+        Some(())
+    }
 }
 
 pub fn get_video_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
     VIDEO_RAW.lock().ok()?.take(dst, last)
+}
+
+pub fn get_last_video_raw(dst: &mut Vec<u8>) -> Option<()> {
+    VIDEO_RAW.lock().ok()?.last(dst)
 }
 
 pub fn get_audio_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {

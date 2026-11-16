@@ -900,6 +900,8 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         match res {
             Err(ref e) if e.kind() == WouldBlock => {
+                #[cfg(target_os = "android")]
+                answer_screenshot_from_last_frame(&mut c, (vs.source, display_idx));
                 #[cfg(windows)]
                 if dxgi_recovery_started
                     .map(|started| started.elapsed() >= DXGI_RECOVERY_FRAME_GRACE)
@@ -1499,6 +1501,25 @@ fn check_qos(
     Ok(())
 }
 
+// A still Android screen sends no frame, so a screenshot waiting on it takes the last one.
+#[cfg(target_os = "android")]
+fn answer_screenshot_from_last_frame(c: &mut CapturerInfo, key: (VideoSource, usize)) {
+    if !SCREENSHOTS.lock().unwrap().contains_key(&key) {
+        return;
+    }
+    let Some(scrap::Frame::PixelBuffer(f)) = c.last_frame() else {
+        return;
+    };
+    let Some(screenshot) = SCREENSHOTS.lock().unwrap().remove(&key) else {
+        return;
+    };
+    let (msg, w, h, data) = match get_rgba_from_pixelbuf(&f) {
+        Ok(rgba) => ("".to_owned(), f.width(), f.height(), rgba),
+        Err(e) => (format!("Convert pixfmt: {}", e), 0, 0, vec![]),
+    };
+    std::thread::spawn(move || handle_screenshot(screenshot, msg, w, h, data));
+}
+
 pub fn set_take_screenshot(source: VideoSource, display_idx: usize, sid: String, tx: Sender) {
     SCREENSHOTS.lock().unwrap().insert(
         (source, display_idx),
@@ -1524,15 +1545,21 @@ fn get_rgba_from_pixelbuf<'a>(pixbuf: &scrap::PixelBuffer<'a>) -> ResultType<Vec
         scrap::convert(pixbuf, scrap::Pixfmt::RGBA, &mut rgba)?;
         Ok(rgba)
     } else {
-        let bgra = pixbuf.data();
-        let mut bit_flipped = Vec::with_capacity(w * h * 4);
+        // A padded row (Android's ImageReader pads RGBA rows) is copied pixel by pixel, in the buffer's own order.
+        let (r, b) = match pixbuf.pixfmt() {
+            scrap::Pixfmt::RGBA => (0, 2),
+            scrap::Pixfmt::BGRA => (2, 0),
+            other => bail!("Unsupported screenshot pixfmt {:?}", other),
+        };
+        let src = pixbuf.data();
+        let mut rgba = Vec::with_capacity(w * h * 4);
         for y in 0..h {
             for x in 0..w {
                 let i = s * y + 4 * x;
-                bit_flipped.extend_from_slice(&[bgra[i + 2], bgra[i + 1], bgra[i], bgra[i + 3]]);
+                rgba.extend_from_slice(&[src[i + r], src[i + 1], src[i + b], src[i + 3]]);
             }
         }
-        Ok(bit_flipped)
+        Ok(rgba)
     }
 }
 

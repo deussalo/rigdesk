@@ -46,6 +46,16 @@ impl crate::TraitCapturer for Capturer {
             return Err(io::ErrorKind::WouldBlock.into());
         }
     }
+
+    fn last_frame<'a>(&'a mut self) -> Option<Frame<'a>> {
+        // A newer untaken frame lands in rgba; otherwise rgba still holds the last frame taken.
+        let _ = get_last_video_raw(&mut self.rgba);
+        let (w, h) = (self.width(), self.height());
+        if h == 0 || self.rgba.len() < w * h * 4 {
+            return None;
+        }
+        Some(Frame::PixelBuffer(PixelBuffer::new(&self.rgba, w, h)))
+    }
 }
 
 pub struct PixelBuffer<'a> {

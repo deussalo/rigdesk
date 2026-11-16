@@ -77,6 +77,27 @@ pub fn type_text(text: &str) -> Vec<Message> {
     vec![key(evt)]
 }
 
+// RustDesk's Android InputService (flutter/.../InputService.kt) turns these mouse masks into global actions: the back
+// button's up is Back; the wheel button's down then up is Home, and its down alone held past LONG_TAP_DELAY is Recents.
+const ANDROID_BACK_UP: i32 = 0x08 << 3 | MOUSE_TYPE_UP;
+const ANDROID_WHEEL_DOWN: i32 = 0x04 << 3 | MOUSE_TYPE_DOWN;
+const ANDROID_WHEEL_UP: i32 = 0x04 << 3 | MOUSE_TYPE_UP;
+
+/// Android's InputService swipes once per wheel event whatever its delta, so each notch is its own event.
+pub fn android_scroll(dy: i32) -> Vec<Message> {
+    (0..dy.unsigned_abs()).map(|_| mouse(MOUSE_TYPE_WHEEL, 0, dy.signum())).collect()
+}
+
+/// A phone's navigation key on an Android PC: back, home (the home screen) or recents.
+pub fn android_nav(name: &str) -> Option<Vec<Message>> {
+    match name.to_ascii_lowercase().as_str() {
+        "back" => Some(vec![mouse(ANDROID_BACK_UP, 0, 0)]),
+        "home" => Some(vec![mouse(ANDROID_WHEEL_DOWN, 0, 0), mouse(ANDROID_WHEEL_UP, 0, 0)]),
+        "recents" => Some(vec![mouse(ANDROID_WHEEL_DOWN, 0, 0)]),
+        _ => None,
+    }
+}
+
 /// A named key once (down then up).
 pub fn press_key(name: &str) -> Result<Vec<Message>, String> {
     let ck = control_key(name).ok_or_else(|| format!("unknown key: {name}"))?;
@@ -192,5 +213,26 @@ mod tests {
         assert_eq!(events[1].modifiers, vec![EnumOrUnknown::new(ControlKey::Control)]);
         assert!(!events[2].down && events[2].chr() == 'c' as u32);
         assert!(!events[3].down && events[3].control_key() == ControlKey::Control);
+    }
+
+    fn masks(msgs: &[Message]) -> Vec<i32> {
+        msgs.iter().map(|m| m.mouse_event().mask).collect()
+    }
+
+    // The masks RustDesk's InputService.kt turns into global actions: BACK_UP 66, WHEEL_BUTTON_DOWN 33, WHEEL_BUTTON_UP 34.
+    #[test]
+    fn android_navigation_keys_are_the_input_service_masks() {
+        assert_eq!(masks(&android_nav("back").unwrap()), vec![66]);
+        assert_eq!(masks(&android_nav("Home").unwrap()), vec![33, 34]);
+        assert_eq!(masks(&android_nav("recents").unwrap()), vec![33]);
+        assert!(android_nav("enter").is_none());
+    }
+
+    #[test]
+    fn android_scroll_sends_one_wheel_event_per_notch() {
+        let msgs = android_scroll(-3);
+        assert_eq!(masks(&msgs), vec![MOUSE_TYPE_WHEEL; 3]);
+        assert!(msgs.iter().all(|m| m.mouse_event().y == -1));
+        assert!(android_scroll(0).is_empty());
     }
 }
