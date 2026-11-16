@@ -39,7 +39,7 @@ def test_a_rigdesk_pc_says_whether_the_operator_can_start_a_session_there() -> N
     def entry(join: object) -> object:
         return {"stock": False, "join": join}
 
-    assert "desk/request (join" in _reached_by(entry({"open": True, "code": None, "words": None}))  # type: ignore[arg-type]
+    assert "desk/request (the operator picks Join once or Always allow" in _reached_by(entry({"open": True, "code": None, "words": None}))  # type: ignore[arg-type]
     paused = _reached_by(entry({"open": False, "code": "join_paused", "words": "the person at this PC paused sessions started from Rig"}))  # type: ignore[arg-type]
     assert paused.startswith("a share link") and "paused" in paused
     assert "takes no sessions started from Rig" in _reached_by(entry(None))  # type: ignore[arg-type]
@@ -109,21 +109,15 @@ def _granting(state: str, docs: _Docs) -> Desks:
     return desks
 
 
-def test_an_assigned_agent_or_graph_holds_a_standing_grant_to_its_stock_pc_only_and_keeps_it_across_a_restart() -> None:
-    from rigdesk.desks import DeskRefused
-
+def test_an_assigned_agent_or_graph_holds_a_standing_grant_to_its_pc_and_keeps_it_across_a_restart() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
             docs = _Docs()
             desks = _granting(state, docs)
             assert await desks.assign("deus", "agent:a1") and await desks.assign("deus", "graph:clients")
             assert not await desks.assign("deus", "agent:a1"), "a grant held already changes nothing"
-            try:
-                await desks.assign("front", "agent:a2")
-            except DeskRefused:
-                pass
-            else:
-                raise AssertionError("a RigDesk PC took a standing grant")
+            assert await desks.assign("front", "agent:a2"), "a RigDesk PC takes a standing grant: Always allow"
+            assert desks.assigned_pcs("a2", "g") == ("front",)
             assert desks.assigned_pcs("a1", "g") == ("deus",)
             assert desks.assigned_pcs("anyone", "clients") == ("deus",)
             assert desks.assigned_pcs("a3", "g") == ()
@@ -203,6 +197,53 @@ def test_taking_the_grant_away_ends_the_assigned_session_at_once() -> None:
 
     asyncio.run(run())
     assert ended == ["deus"]
+
+
+def test_always_allow_on_a_rigdesk_pc_grants_and_joins_through_join_and_unassign_ends_that_session_and_tells_the_agent() -> None:
+    from rigdesk import _always_allowed
+    from rigdesk.desks import DeskRefused
+    joined: list[tuple[str, str, str]] = []
+    told: list[str] = []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = _granting(state, _Docs())
+
+            async def join_operator(pc: str, agent: str, graph: str, node: str, title: str, ask: str, via: str = "link") -> Held:
+                if pc == "busy":
+                    raise DeskRefused("busy refused the session: held")
+                joined.append((pc, ask, via))
+                held = desks._sessions[pc] = Held(pc, agent, graph, node, title, "s", now_ms(), via)  # type: ignore[arg-type]
+                return held
+
+            async def leave(held: Held) -> bool:
+                desks._sessions.pop(held.pc)
+                return True
+
+            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
+                told.append(words)
+                return True
+            desks._join_operator = join_operator  # type: ignore[method-assign]
+            desks.leave = leave  # type: ignore[method-assign]
+            desks._tell = tell  # type: ignore[method-assign]
+            said = await _always_allowed(desks, {"pc": "front", "agent": "a1", "graph": "g", "kind": "join", "ask": "desk_1"}, "n", "A")
+            assert "You joined front" in said and desks.granted("front") == ("agent:a1",)
+            await desks.leave(desks._sessions["front"])
+            await desks.join_assigned("front", "a1", "g", "n", "A")
+            assert joined == [("front", "desk_1", "assigned"), ("front", "standing grant", "assigned")]
+            assert await desks.unassign("front", "agent:a1")
+            assert "front" not in desks._sessions and desks.assigned_pcs("a1", "g") == ()
+            desks._pcs["busy"] = PcLink("busy", DeskPc(url="https://busy.tail1234.ts.net", token_file="/dev/null"))
+            try:
+                await _always_allowed(desks, {"pc": "busy", "agent": "a1", "graph": "g", "kind": "join", "ask": "desk_2"}, "n", "A")
+            except DeskRefused:
+                pass
+            else:
+                raise AssertionError("a refused join was taken as joined")
+            assert desks.granted("busy") == (), "a grant whose join failed is taken back"
+
+    asyncio.run(run())
+    assert len(told) == 1 and "took away your standing access to front" in told[0], told
 
 
 def test_a_pc_gone_from_settings_or_no_longer_stock_loses_its_grants() -> None:

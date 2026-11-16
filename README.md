@@ -96,7 +96,7 @@ client sign this text too before you run the line with it on.
 >
 > While this is on, **<operator>** may let an automated agent take this computer's desktop through Rig, without anyone
 > connecting to it: the agent sees the screen, moves the pointer, types and runs commands as the signed-in user. The
-> operator approves each session in Rig, for one agent at a time.
+> operator approves each session in Rig, for one agent at a time, or allows one agent always until they take it back.
 >
 > **You are told and you can end it.** When such a session starts, a notification names the agent, and while it runs
 > the RigDesk tray icon names it with *End the agent's session*. Your own mouse and keyboard always go first: while you

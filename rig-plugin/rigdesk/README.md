@@ -127,15 +127,15 @@ Known limits against a RigDesk PC:
 * `desk/join(link)` — the human clicks **Share with agent** in the viewer and gives the agent the
   `rigdesk://<pc>/<grant>#<secret>` link. Joining claims the PC's session for that agent alone; a
   link works once.
-* **Standing grant (stock PCs).** rigdesk keeps who holds one, `"agent:<id>"` or `"graph:<name>"` per PC, in its own
+* **Standing grant.** rigdesk keeps who holds one, `"agent:<id>"` or `"graph:<name>"` per PC, in its own
   `grants` doc in Rig's store, and alone writes it: on the RigDesk page, which assigns any agent or every agent in a
   graph, or on the operator's Accept of a `desk/request`. It is not in Rig's settings. Such an agent needs no
-  link: `desk/join(pc)` joins the PC (the plugin mints and claims on the bridge itself). A desk call never joins a PC by
+  link: `desk/join(pc)` joins the PC (on a stock PC the plugin mints and claims on the bridge itself; a RigDesk PC is asked with `POST /join`). A desk call never joins a PC by
   itself, so a call cannot land on a PC the agent did not name; after its session ends, the agent joins again the same
   way. Stop and Block hold across a rejoin: they are on the agent, not its session, and only the human's unblock lifts
   them. An agent sharing through a link at the time is not
   displaced. A change applies at once and does not restart the bridge; taking a grant away ends a session held through
-  it. A PC removed from settings, or no longer stock, loses its grants. A session held through the grant ends after
+  it. A PC removed from settings loses its grants. A session held through the grant ends after
   5 minutes without a desk call, so other assigned agents can take the PC.
 * **A session that ends** without the agent's own `desk/leave` (RigDesk restarts, the human ends the share or shares with
   another agent, an idle leave, the PC leaves Rig's settings) is told to the agent, queued for its next turn rather
@@ -145,11 +145,16 @@ Known limits against a RigDesk PC:
 * `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins
   the caller to it now for one session, as a share link would; `assign` gives it a standing grant. Refused at once for
   an unknown PC, or one already assigned to the caller.
-  On a RigDesk PC it takes `join` only. Accept has Rig's bearer ask the PC for the session (`POST /join`), with no share link.
+  On a RigDesk PC, Accept has Rig's bearer ask the PC for the session (`POST /join`), with no share link.
   The PC admits it only while its own switch is on (`-AgentJoin`, and the PIN-locked pause), no other agent holds its
   session and the caller is not blocked there. The person at the PC is notified and can end the session from the tray.
   The PC's switch is read when the agent asks, and a closed one refuses at once with the PC's words, before the operator is asked.
-* `desk/join(pc)` — joins a stock PC assigned to the caller, by name. A desk call with no session joins the caller's
+  On a RigDesk PC the operator picks **Join once**, **Always allow** or **Deny**, whichever kind was asked. Join once is
+  the Accept above. Always allow also gives the caller a standing grant to that PC, so its later `desk/request` or
+  `desk/join(pc)` joins with no ask, through `POST /join` with the ask `standing grant` in the PC's journal. The PC's
+  switch and another holder still refuse it. The RigDesk page lists the grant under the PC, and unassigning it there
+  ends a session held through it; the agent is told, and its next `desk/request` asks again.
+* `desk/join(pc)` — joins a PC assigned to the caller, by name. A desk call with no session joins the caller's
   assigned PC by itself only when it has exactly one; with more it is refused and lists them.
 * `desk/<tool>` — the PC's own tools (screenshot, click, type, scroll, move, drag, key, shortcut, wait, clipboard
   and shell), the same on every PC, sent to the PC the calling agent joined. Images come back as PNG files under the
