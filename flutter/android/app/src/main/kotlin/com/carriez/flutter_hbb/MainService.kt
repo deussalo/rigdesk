@@ -257,13 +257,17 @@ class MainService : Service() {
 
         createForegroundNotification()
         agentStop = AgentStop(this).also { it.start() }
+        phoneMcp = PhoneMcp(this).also { it.start() }
     }
 
     private var agentStop: AgentStop? = null
+    private var phoneMcp: PhoneMcp? = null
 
     override fun onDestroy() {
         agentStop?.close()
         agentStop = null
+        phoneMcp?.close()
+        phoneMcp = null
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
