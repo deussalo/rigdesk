@@ -82,6 +82,20 @@ fn mcp_reads(method: &str, message: &Value) -> bool {
     answer || matches!(method, "initialize" | "ping") || method.starts_with("notifications/") || method.ends_with("/list")
 }
 
+/// Reads and drops a body the route has no use for, up to 64 KiB. Left unread, hyper closes the connection after the
+/// answer, and a client that sent `Expect: 100-continue` (Windows PowerShell's Invoke-RestMethod) sends its body, or its
+/// next request, into a connection it was told to keep.
+async fn drain(request: &mut Request<Incoming>) {
+    let mut left = 64usize << 10;
+    while let Some(Ok(frame)) = request.body_mut().frame().await {
+        match frame.data_ref().map(|data| data.len()) {
+            Some(n) if n >= left => break,
+            Some(n) => left -= n,
+            None => {}
+        }
+    }
+}
+
 fn text(status: StatusCode, body: &str) -> Response<Body> {
     Response::builder().status(status).body(full(body.to_string())).unwrap_or_else(|_| Response::new(full("")))
 }
@@ -150,7 +164,7 @@ impl Api {
         Ok(bound)
     }
 
-    async fn route(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+    async fn route(self: Arc<Self>, mut request: Request<Incoming>) -> Response<Body> {
         let path = request.uri().path().to_string();
         if !self.bearer_ok(&request) {
             return text(StatusCode::UNAUTHORIZED, "bad bearer token");
@@ -161,7 +175,10 @@ impl Api {
                                                                   "shell": self.lane.get().map(|lane| lane.switch())})),
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
-            ("POST", "/leave") => self.leave(&request),
+            ("POST", "/leave") => {
+                drain(&mut request).await;
+                self.leave(&request)
+            }
             ("GET", "/log") => {
                 let n = query_number(request.uri().query(), "n").unwrap_or(200).min(5000);
                 json_response(StatusCode::OK, &json!({"entries": self.journal.tail(n)}))
@@ -185,10 +202,12 @@ impl Api {
                 self.forward(request, &name).await
             }
             ("POST", "/debug/mint") if std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
+                drain(&mut request).await;
                 let minted = self.shared.mint();
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
             }
             ("POST", p) if p.starts_with("/debug/viewer/") && std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
+                drain(&mut request).await;
                 // The viewer's buttons, for the CI smoke test only: the same calls the viewer makes over the peer protocol.
                 let done = match p.trim_start_matches("/debug/viewer/") {
                     "hand" => self.shared.hand_to_agent(),
@@ -200,11 +219,13 @@ impl Api {
                 json_response(StatusCode::OK, &json!({"changed": done, "standing": self.shared.standing()}))
             }
             ("POST", "/viewer/mint") if self.viewer_routes => {
+                drain(&mut request).await;
                 let minted = self.shared.mint();
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
             }
             ("POST", "/viewer/note") if self.viewer_routes => self.note(request).await,
             ("POST", p) if p.starts_with("/viewer/") && self.viewer_routes => {
+                drain(&mut request).await;
                 let done = match p.trim_start_matches("/viewer/") {
                     "hand" => self.shared.hand_to_agent(),
                     "human" => self.shared.human_input("the operator"),
@@ -217,7 +238,10 @@ impl Api {
                 json_response(StatusCode::OK, &json!({"changed": done, "standing": self.shared.standing()}))
             }
             ("GET", p) if p.starts_with("/attachments/") => self.attachment(&request, p),
-            ("POST", p) if p.starts_with("/attachments/") && p.ends_with("/ack") => self.ack(&request, p),
+            ("POST", p) if p.starts_with("/attachments/") && p.ends_with("/ack") => {
+                drain(&mut request).await;
+                self.ack(&request, p)
+            }
             _ => text(StatusCode::NOT_FOUND, "no such route"),
         }
     }
@@ -628,6 +652,25 @@ mod tests {
         let refused = post(port, "/mcp", &token, &call).await;
         assert_eq!(refused["result"]["isError"], json!(true));
         assert!(shared.standing().owner.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_route_with_no_use_for_the_body_keeps_the_connection_for_a_client_that_waits_to_send_it() {
+        // Windows PowerShell's Invoke-RestMethod: Expect: 100-continue, the body only after 100 Continue or ~350 ms.
+        let api = Api::new(Arc::new(Shared::new(Events::new(64))), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
+        let port = api.serve(0).await.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(b"POST /leave HTTP/1.1\r\nhost: x\r\nauthorization: Bearer b\r\ncontent-type: application/json\r\ncontent-length: 2\r\nexpect: 100-continue\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        stream.write_all(b"{}").await.unwrap();
+        stream.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nauthorization: Bearer b\r\nconnection: close\r\n\r\n").await.unwrap();
+        let mut answer = String::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_to_string(&mut answer)).await;
+        assert!(answer.contains("403 Forbidden"), "{answer}");
+        assert!(answer.contains("\"boot\""), "the connection closed after /leave: {answer}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
