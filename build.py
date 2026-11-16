@@ -997,6 +997,15 @@ def build_flutter_windows(version, features, skip_portable_pack):
         f'output location: {os.path.abspath(os.curdir)}/rustdesk-{version}-install.exe')
 
 
+def run_under_heavy_lock():
+    """On the Rig host a build runs again under Rig's machine-wide heavy lock, through res/heavy.sh, which runs it as is anywhere else."""
+    if windows or os.environ.get('RIGDESK_UNDER_HEAVY_LOCK'):
+        return
+    os.environ['RIGDESK_UNDER_HEAVY_LOCK'] = '1'
+    heavy = os.path.join(REPO_ROOT, 'res', 'heavy.sh')
+    os.execv(heavy, [heavy, sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]])
+
+
 def main():
     global skip_cargo
     parser = make_parser()
@@ -1015,6 +1024,7 @@ def main():
         print(feats)
         return
 
+    run_under_heavy_lock()
     if os.path.exists(exe_path):
         os.unlink(exe_path)
     if os.path.isfile('/usr/bin/pacman'):

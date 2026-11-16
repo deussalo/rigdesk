@@ -111,9 +111,8 @@ class DeskAnswer(ToolAnswer):
     model_config = ConfigDict(extra="allow", frozen=True, defer_build=True)
 
 
-def _who(call: Call) -> tuple[str, str, str, str]:
-    place = call.contract.place
-    return str(place.agent), str(call.graph), str(call.node), place.label or str(call.node)
+def _who(call: Call) -> tuple[str, str, str]:
+    return str(call.contract.place.agent), str(call.graph), str(call.node)
 
 
 def _refused(call: Call, refused: Exception) -> Answer:
@@ -125,9 +124,10 @@ def _refused(call: Call, refused: Exception) -> Answer:
 
 
 async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
-    agent, graph, node, title = _who(call)
+    agent, graph, node = _who(call)
     if (given.link is None) == (given.pc is None):
         return call.refused("invalid_params", "desk/join takes a share link or the name of a PC assigned to you, not both")
+    title = await call.kernel.caller_title()
     try:
         held = (await desks.join(given.link, agent, graph, node, title) if given.link is not None
                 else await desks.join_assigned(str(given.pc), agent, graph, node, title))
@@ -139,7 +139,7 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
 
 
 async def _leave(desks: Desks, call: Call, _given: LeaveInput) -> Answer:
-    agent, graph, _, _ = _who(call)
+    agent, graph, _ = _who(call)
     held = desks.held_by(agent, graph)
     if held is None:
         return call.refused(UNSHARED, NO_SESSION)
@@ -192,7 +192,7 @@ def _pc_entry(desks: Desks, entry: PcEntry, agent: str, graph: str, mine: set[st
 
 
 async def _pcs(desks: Desks, call: Call, given: PcsInput) -> Answer:
-    agent, graph, _, _ = _who(call)
+    agent, graph, _ = _who(call)
     mine = set(desks.assigned_pcs(agent, graph))
     entries = desks.entries()
     if given.pc is not None:
@@ -231,7 +231,8 @@ def _shell_said(text: str) -> JsonObject:
 
 
 async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
-    agent, graph, _, title = _who(call)
+    agent, graph, _ = _who(call)
+    title = await call.kernel.caller_title()
     if (given.job is None) == (given.command is None):
         return call.refused("invalid_params", "desk/shell takes a command to run, or a job to read, not both")
     held = desks.held_by(agent, graph)
@@ -272,7 +273,8 @@ async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
 
 
 async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
-    agent, graph, _, title = _who(call)
+    agent, graph, _ = _who(call)
+    title = await call.kernel.caller_title()
     known = {entry["name"]: entry for entry in desks.entries()}
     entry = known.get(given.pc)
     if entry is None:
@@ -333,7 +335,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
 
 
 async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answer:
-    agent, graph, _, _ = _who(call)
+    agent, graph, _ = _who(call)
     held = desks.held_by(agent, graph)
     if held is None:
         return call.refused(UNSHARED, NO_SESSION)
@@ -353,7 +355,7 @@ def _upstream(tool: str, listed: dict[str, Any]) -> tuple[str, JsonObject, bool]
 
 def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
     async def run(call: Call, given: ToolInput) -> Answer:
-        agent, graph, _, _ = _who(call)
+        agent, graph, _ = _who(call)
         held = desks.held_by(agent, graph)
         if held is None:
             return call.refused(UNSHARED, NO_SESSION)
@@ -372,7 +374,7 @@ def _served(desks: Desks, server: PcServer, listed: dict[str, Any]) -> ToolDef:
     tool, key = str(listed["name"]), server.key
 
     async def run(call: Call, given: ToolInput) -> Answer:
-        agent, graph, _, _ = _who(call)
+        agent, graph, _ = _who(call)
         held = desks.held_by(agent, graph)
         if held is None or held.pc != server.pc:
             return call.refused(UNSHARED, f"{key}/{tool} runs on RigDesk PC {server.pc}, which you do not hold: only the agent holding it may call its MCP servers")
