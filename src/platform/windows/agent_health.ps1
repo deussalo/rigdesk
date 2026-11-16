@@ -43,7 +43,8 @@ $updates = Probe 'updates' {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     if (Test-Path $kept) {
         $last = Get-Content $kept -Raw | ConvertFrom-Json
-        if ($last.checked_ms -and ($now - [int64] $last.checked_ms) -lt 3600000) { return $last }
+        $readable = $null -eq $last.error -or $last.error -is [string]
+        if ($readable -and $last.checked_ms -and ($now - [int64] $last.checked_ms) -lt 3600000) { return $last }
     }
     $job = Start-Job {
         $searcher = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
@@ -56,7 +57,8 @@ $updates = Probe 'updates' {
         @{ pending = $pending; installed = $installed }
     }
     $found = if (Wait-Job $job -Timeout 300) { Receive-Job $job -ErrorAction SilentlyContinue }
-    $failed = if ($job.State -eq 'Failed') { $job.ChildJobs[0].JobStateInfo.Reason.Message } elseif ($job.State -ne 'Completed') { 'the search ran past 300 s' }
+    # Windows PowerShell writes an if that took no branch as {} in JSON, not null: every if read into the JSON has its else.
+    $failed = if ($job.State -eq 'Failed') { $job.ChildJobs[0].JobStateInfo.Reason.Message } elseif ($job.State -ne 'Completed') { 'the search ran past 300 s' } else { $null }
     Remove-Job $job -Force
     $result = [ordered] @{
         checked_ms = $now
@@ -109,7 +111,7 @@ $battery = Probe 'battery' {
     if ($b) {
         $status = @{ 1 = 'discharging'; 2 = 'on AC'; 3 = 'full'; 4 = 'low'; 5 = 'critical'; 6 = 'charging' }[[int] $b.BatteryStatus]
         [ordered] @{ charge_pct = [int] $b.EstimatedChargeRemaining; status = if ($status) { $status } else { "status $($b.BatteryStatus)" } }
-    }
+    } else { $null }
 }
 
 # A probe that failed gives one null; the lists carry none.
