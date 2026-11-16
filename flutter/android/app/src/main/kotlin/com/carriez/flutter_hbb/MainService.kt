@@ -256,9 +256,14 @@ class MainService : Service() {
         FFI.startServer(configPath, homePath, "")
 
         createForegroundNotification()
+        agentStop = AgentStop(this).also { it.start() }
     }
 
+    private var agentStop: AgentStop? = null
+
     override fun onDestroy() {
+        agentStop?.close()
+        agentStop = null
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
