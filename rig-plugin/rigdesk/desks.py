@@ -29,6 +29,8 @@ from core.node_data import Shape
 from core.plugin_host import LiveEnding, PluginHost, PluginWords
 from core.tasks import TASKS
 
+from .health import STATES, History, Health, State, Thresholds, health, samples_of
+
 ID = "rigdesk"
 _LOG = event_log(__name__)
 RETRY_S = (1.0, 2.0, 5.0, 10.0, 30.0)
@@ -61,7 +63,11 @@ LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
 type Grantee = Annotated[str, StringConstraints(pattern=r"^(agent|graph):[A-Za-z0-9_.:-]{1,128}$")]
+type ShellLevel = Literal["user", "system"]
 GRANTS_DOC = "grants"
+SAMPLES_LIMIT_S = 30.0
+SHELL_LOG_READ = 2000
+SHELL_LOG_SHOWN = 25
 
 
 def _object(value: object) -> dict[str, Any]:
@@ -144,6 +150,7 @@ class RigdeskSettings(Shape):
     for_fleet: Annotated[bool, Field(description="desk/* is open to every agent, so any agent given a link can join; off, only graphs and agents whose mcp_servers name desk.")] = True
     bridge_bin: Annotated[str, Field(description="The rigdesk-bridge program run for each stock PC: a path, or a name on PATH.")] = "rigdesk-bridge"
     id_server: Annotated[IdServer | None, Field(description="Our RustDesk ID server (hbbs, with hbbr beside it), through which stock PCs named by id are reached.")] = None
+    health: Annotated[Thresholds, Field(description="Where a RigDesk PC's health figures warn or fault; the PC reports figures and Rig judges them.")] = Thresholds()
 
     @model_validator(mode="after")
     def _ids_have_a_server(self) -> RigdeskSettings:
@@ -176,9 +183,11 @@ class McpSessionGone(Exception):
 
 
 class Grants(BaseModel):
-    """Who holds a standing grant to each stock PC: rigdesk's own doc, written only by Desks.assign and Desks.unassign, on an operator's act."""
+    """rigdesk's own doc, written only on an operator's act: who holds a standing grant to each stock PC (Desks.assign, Desks.unassign),
+    and who may run commands on each RigDesk PC's agent shell, as the user or as SYSTEM (Desks.allow_shell)."""
     model_config = ConfigDict(frozen=True, extra="forbid")
     pcs: dict[PcName, tuple[Grantee, ...]] = {}
+    shell: dict[PcName, dict[Grantee, ShellLevel]] = {}
 
 
 @dataclass(frozen=True)
@@ -216,6 +225,10 @@ class PcLink:
     syncing: asyncio.Lock = field(default_factory=asyncio.Lock)
     # What the health watch is asking the PC now, and how long it waits, so a timeout can say what went unanswered.
     asking: tuple[str, float] = ("GET /health", 15.0)
+    # The PC's agent shell as it last said: {open, code, words}; None for a RigDesk without one, or a stock PC.
+    shell: dict[str, Any] | None = None
+    sampling: asyncio.Lock = field(default_factory=asyncio.Lock)
+    samples_why: str | None = None
 
 
 @dataclass
@@ -251,6 +264,8 @@ class PcEntry(TypedDict):
     why: str | None
     assigned: tuple[str, ...]
     held_by: PcHolder | None
+    shell: dict[str, Any] | None
+    health: Health | None
 
 
 def failure(failed: BaseException) -> str:
@@ -355,6 +370,10 @@ class Desks:
         self._grants = Grants()
         self._grants_revision = 0
         self._granting = asyncio.Lock()
+        self._thresholds = Thresholds()
+        self._history = History(self._dir / "health")
+        # The health each PC was last published at, so rigdesk.pc_health is emitted once per change, across restarts.
+        self._judged: dict[str, State] = {}
         self._read_state()
 
     # --- state kept across restarts ---
@@ -372,10 +391,11 @@ class Desks:
         self._boots = dict(kept.get("boots", {}))
         self._last = {pc: int(last) for pc, last in kept.get("last", {}).items()}
         self._catalog = {tool["name"]: tool for tool in kept.get("catalog", []) if isinstance(tool, dict) and "name" in tool}
+        self._judged = {pc: state for pc, state in cast(dict[str, State], kept.get("judged", {})).items() if state in STATES}
 
     def _write_state(self) -> None:
         kept = {"sessions": {pc: asdict(held) for pc, held in self._sessions.items()}, "boots": self._boots, "last": self._last,
-                "catalog": list(self._catalog.values())}
+                "catalog": list(self._catalog.values()), "judged": self._judged}
         replace_file(self._state_file, json.dumps(kept).encode(), new_mode=0o600, make_parents=True)
 
     # --- lifecycle ---
@@ -402,12 +422,14 @@ class Desks:
                 await self._prune_grants()
                 await self._idle_leaves()
                 await self._resend()
+                await self._judge()
             except Exception as failed:  # noqa: BLE001
                 _LOG.warning("rigdesk_settings_unread", f"RigDesk settings could not be read, PCs stay as they are: {failure(failed)}")
             await asyncio.sleep(SETTINGS_EVERY_S)
 
     def _reconcile(self, settings: RigdeskSettings) -> None:
         self._for_fleet = settings.for_fleet
+        self._thresholds = settings.health
         moved = (settings.bridge_bin, settings.id_server) != (self._bridge_bin, self._id_server)
         self._bridge_bin = settings.bridge_bin
         if settings.id_server != self._id_server:
@@ -470,7 +492,7 @@ class Desks:
             held = self.granted(pc)
             if grantee in held:
                 return False
-            await self._save_grants(Grants(pcs=self._grants.pcs | {pc: (*held, grantee)}))
+            await self._save_grants(Grants(pcs=self._grants.pcs | {pc: (*held, grantee)}, shell=self._grants.shell))
             return True
 
     async def unassign(self, pc: str, grantee: str) -> bool:
@@ -480,20 +502,49 @@ class Desks:
             if grantee not in held:
                 return False
             left = tuple(each for each in held if each != grantee)
-            await self._save_grants(Grants(pcs={name: grantees for name, grantees in (self._grants.pcs | {pc: left}).items() if grantees}))
+            await self._save_grants(Grants(pcs={name: grantees for name, grantees in (self._grants.pcs | {pc: left}).items() if grantees}, shell=self._grants.shell))
         session = self._sessions.get(pc)
         if session is not None and session.via == "assigned" and not _grants(left, session.agent, session.graph):
             await self._unassigned(pc)
         return True
 
     async def _prune_grants(self) -> None:
-        """A grant exists only on a stock PC set up in Rig: one removed from settings, or no longer stock, loses its grants."""
+        """A standing grant exists only on a stock PC set up in Rig, and a shell grant only on a RigDesk PC: a PC removed from settings,
+        or of the other kind now, loses its grants."""
         async with self._granting:
             kept = {pc: grantees for pc, grantees in self._grants.pcs.items() if (link := self._pcs.get(pc)) is not None and link.spec.stock is not None}
-            if kept != self._grants.pcs:
-                gone = sorted(set(self._grants.pcs) - set(kept))
-                await self._save_grants(Grants(pcs=kept))
-                _LOG.warning("rigdesk_grants_pruned", f"RigDesk: {', '.join(gone)} left Rig's settings or stopped being stock, so their grants were removed", pcs=", ".join(gone))
+            shell = {pc: levels for pc, levels in self._grants.shell.items() if (link := self._pcs.get(pc)) is not None and link.spec.stock is None}
+            if kept != self._grants.pcs or shell != self._grants.shell:
+                gone = sorted((set(self._grants.pcs) - set(kept)) | (set(self._grants.shell) - set(shell)))
+                await self._save_grants(Grants(pcs=kept, shell=shell))
+                _LOG.warning("rigdesk_grants_pruned", f"RigDesk: {', '.join(gone)} left Rig's settings or changed kind, so their grants were removed", pcs=", ".join(gone))
+
+    def shell_granted(self, pc: str) -> dict[str, ShellLevel]:
+        return self._grants.shell.get(pc, {})
+
+    def shell_level(self, pc: str, agent: str, graph: str) -> ShellLevel | None:
+        """The most this agent may run as on a PC's agent shell, by its own grant or its graph's; None with neither."""
+        granted = self.shell_granted(pc)
+        levels = {granted.get(f"agent:{agent}"), granted.get(f"graph:{graph}")}
+        return "system" if "system" in levels else "user" if "user" in levels else None
+
+    async def allow_shell(self, pc: str, grantee: str, level: ShellLevel | None) -> bool:
+        """Lets one agent or graph run commands on a RigDesk PC's agent shell as the user, or as SYSTEM, or takes that away (None);
+        False when it stood so already."""
+        async with self._granting:
+            link = self._pcs.get(pc)
+            if link is None:
+                raise DeskRefused(f"no RigDesk PC named {pc} is set up in Rig")
+            if link.spec.stock is not None:
+                raise DeskRefused(f"{pc} runs stock RustDesk, which has no agent shell: every connection to it opens a session its person sees")
+            granted = self.shell_granted(pc)
+            if granted.get(grantee) == level:
+                return False
+            changed = {each: held for each, held in granted.items() if each != grantee}
+            if level is not None:
+                changed[grantee] = level
+            await self._save_grants(Grants(pcs=self._grants.pcs, shell={name: levels for name, levels in (self._grants.shell | {pc: changed}).items() if levels}))
+            return True
 
     # --- the ID server's health ---
 
@@ -699,6 +750,7 @@ class Desks:
                 raise DeskRefused(f"/health answered HTTP {answer.status}" + (": the token is refused" if answer.status == 401 else ""))
             health = await answer.json()
         link.standing = health.get("standing")
+        link.shell = _object(health["shell"]) if isinstance(health.get("shell"), dict) else None
         down = health.get("down")
         boot = str(health.get("boot", ""))
         if boot != self._boots.get(link.name):
@@ -714,6 +766,8 @@ class Desks:
             link.state, link.why, link.down_since_ms = "up", None, None
             self._reached(link, down if isinstance(down, str) else None)
             self._resync(link)
+            if link.spec.stock is None:
+                TASKS.spawn(f"rigdesk-samples-{link.name}", self._catch_up(link, None))
             data: list[str] = []
             async for raw in stream.content:
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
@@ -787,6 +841,10 @@ class Desks:
             self._resync(link, None if event.get("found") else (str(event.get("name") or ""), str(event.get("why") or "it stopped")))
         if kind == "mcp":
             self._resync(link)
+        if kind == "shell_switch":
+            link.shell = {"open": event.get("open") is True, "code": event.get("code"), "words": event.get("words")}
+        if kind == "health":
+            TASKS.spawn(f"rigdesk-samples-{link.name}", self._catch_up(link, int(event.get("sample") or 0)))
         if held is not None and (kind != "revoked" or held.agent == event.get("agent_id")):
             key = f"{self._boots.get(pc, '')}:{event_id}" if event_id else f"{self._boots.get(pc, '')}:gap:{now_ms()}"
             if kind == "message":
@@ -807,6 +865,86 @@ class Desks:
         """The event id a reconnect resumes after: the newest handled, but never past a message its agent was not told."""
         unsent = self._unsent.get(pc)
         self._last[pc] = min([max(self._last.get(pc, 0), self._seen.get(pc, 0))] if not unsent else [self._seen.get(pc, 0), min(unsent) - 1])
+
+    # --- health samples, read after the last held, judged here ---
+
+    async def _catch_up(self, link: PcLink, told: int | None) -> None:
+        """Reads the PC's samples after the newest held: on each reconnect, and on each health event. A sample id at or under the newest
+        held means the PC's ids began again (a reinstall), so its whole day is read and kept by its clock."""
+        async with link.sampling:
+            newest = self._history.newest(link.name)
+            after = 0 if newest is None or (told is not None and told <= newest.id) else newest.id
+            try:
+                async with self._client().get(f"{link.spec.url}/samples?after={after}", headers=self._headers(link),
+                                              timeout=aiohttp.ClientTimeout(total=SAMPLES_LIMIT_S)) as answer:
+                    if answer.status == 404:
+                        link.samples_why = "this PC's RigDesk takes no health samples"
+                        return
+                    if answer.status != 200:
+                        raise DeskRefused(f"/samples answered HTTP {answer.status}")
+                    said = await answer.json(content_type=None)
+            except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError, ValueError) as failed:
+                link.samples_why = f"its health samples could not be read: {failure(failed)}"
+                _LOG.warning("rigdesk_samples_unread", f"RigDesk {link.name}: {link.samples_why}", pc=link.name)
+                return
+            samples, skipped = samples_of(said)
+            link.samples_why = f"{len(skipped)} samples did not read: {skipped[0]}" if skipped else None
+            await asyncio.to_thread(self._history.add, link.name, samples, now_ms())
+        await self._judge()
+
+    def judged(self, pc: str) -> Health | None:
+        """The PC's health now, from its newest sample; None while Rig holds none for it."""
+        link, newest = self._pcs.get(pc), self._history.newest(pc)
+        if link is None or newest is None:
+            return None
+        return health(newest, self._thresholds, now_ms(), link.state == "up")
+
+    async def _judge(self) -> None:
+        """Publishes rigdesk.pc_health for each PC whose health moved since it was last published; a PC first judged ok says nothing."""
+        moved = False
+        for pc in sorted(self._pcs):
+            judged = self.judged(pc)
+            was = self._judged.get(pc)
+            if judged is None or judged.state == was or (was is None and judged.state == "ok"):
+                continue
+            self._judged[pc], moved = judged.state, True
+            link = self._pcs[pc]
+            self.host.emit(f"{ID}.pc_health", pc, {"state": judged.state, "was": was or "ok", "failing": judged.said, "client": link.spec.client})
+            _LOG.info("rigdesk_pc_health", f"RigDesk {pc}: health {judged.state}" + (f" ({judged.said})" if judged.failing else ""), pc=pc)
+        if moved:
+            await asyncio.to_thread(self._write_state)
+
+    def history(self, pc: str) -> list[Any]:
+        return list(self._history.of(pc))
+
+    # --- the agent shell, which needs no session ---
+
+    async def shell(self, pc: str, agent: str, graph: str, title: str, asked: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """One request to a RigDesk PC's agent shell, as the calling agent: the PC's HTTP status and its answer, {ok, text} or {error, code}."""
+        link = self._link(pc)
+        if link.state != "up":
+            raise DeskRefused(f"RigDesk PC {pc} is down: {link.why or 'not reached yet'}")
+        timeout_s = asked.get("timeout_s")
+        limit_s = CALL_LIMIT_S + (timeout_s if isinstance(timeout_s, int) and 0 < timeout_s <= SHELL_LIMIT_S else 60)
+        body = {"agent": {"id": agent, "title": title, "graph": graph}} | asked
+        async with self._client().post(f"{link.spec.url}/shell", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=limit_s)) as answer:
+            said = await answer.json(content_type=None)
+            return answer.status, _object(said)
+
+    async def shell_ran(self, pc: str) -> list[dict[str, Any]]:
+        """The PC's newest agent-shell commands from its own journal, newest first: who ran what, as whom, and how it ended."""
+        link = self._link(pc)
+        if link.state != "up":
+            raise DeskRefused(f"RigDesk PC {pc} is down: {link.why or 'not reached yet'}")
+        async with self._client().get(f"{link.spec.url}/log?n={SHELL_LOG_READ}", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
+            if answer.status != 200:
+                raise DeskRefused(f"{pc}'s journal answered HTTP {answer.status}")
+            entries = _objects(_object(await answer.json(content_type=None)).get("entries"))
+        ran = [entry for entry in entries if entry.get("what") == "shell"][-SHELL_LOG_SHOWN:]
+        return [{"at_ms": int(entry.get("at_ms") or 0), "who": str(entry.get("who") or ""), "graph": _object(entry.get("detail")).get("graph"),
+                 "as": _object(entry.get("detail")).get("as"), "command": str(_object(entry.get("detail")).get("command") or ""),
+                 "outcome": str(entry.get("outcome") or ""), "took_ms": _object(entry.get("detail")).get("took_ms"), "job": _object(entry.get("detail")).get("job")}
+                for entry in reversed(ran)]
 
     async def _resend(self) -> None:
         """The human's messages that could not be told (the agent's graph stopped, its seat closed) are told again while its session lasts."""
@@ -1228,17 +1366,33 @@ class Desks:
                          "down_since_ms": link.down_since_ms, "holder": standing.get("holder") if owner else None,
                          "owner": None if owner is None else {"id": owner.get("agent_id"), "title": owner.get("title"), "graph": owner.get("graph")},
                          "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id"), "assigned": self.granted(name),
+                         "shell": None if link.spec.stock is not None else {"switch": link.shell, "granted": self.shell_granted(name)},
+                         "health": self._health_row(name, link),
                          "mcp": {"allowed": link.spec.mcp, "on": link.mcp_on, "why": link.mcp_why,
                                  "servers": [{"name": server.name, "key": server.key, "says": server.says, "tools": [tool["name"] for tool in server.tools],
                                               "since_ms": server.since_ms} for server in link.servers.values()]}})
         return rows
+
+    def _health_row(self, name: str, link: PcLink) -> dict[str, Any] | None:
+        """A PC's health as its row shows it: the verdict, the newest sample's headline figures and age; None for a stock PC."""
+        if link.spec.stock is not None:
+            return None
+        newest, judged = self._history.newest(name), self.judged(name)
+        figures = None if newest is None else newest.figures
+        return {"state": None if judged is None else judged.state, "failing": [] if judged is None else [asdict(check) for check in judged.failing],
+                "why": link.samples_why, "sample_ms": None if newest is None else newest.at_ms, "rigdesk": None if newest is None else newest.rigdesk,
+                "figures": None if figures is None else {
+                    "volumes": [{"name": volume.name, "free_pct": round(volume.free_pct, 1), "free_mb": volume.free_mb, "total_mb": volume.total_mb} for volume in figures.volumes],
+                    "ram_used_pct": round(100 * (1 - figures.ram.free_mb / figures.ram.total_mb), 1) if figures.ram.total_mb else None,
+                    "cpu_pct": figures.cpu.load_pct, "build": figures.os.build, "uptime_s": figures.uptime_s, "pending_reboot": figures.pending_reboot}}
 
     def entries(self) -> tuple[PcEntry, ...]:
         rows: list[PcEntry] = []
         for name, link in sorted(self._pcs.items()):
             held = self._sessions.get(name)
             rows.append(PcEntry(name=name, client=link.spec.client, stock=link.spec.stock is not None, state=link.state, why=link.remote_why or link.why,
-                                assigned=self.granted(name), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph)))
+                                assigned=self.granted(name), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph),
+                                shell=link.shell, health=self.judged(name)))
         return tuple(rows)
 
     def session_of(self, graph: str, agent: str) -> dict[str, Any] | None:
@@ -1251,4 +1405,4 @@ class Desks:
                 "since_ms": standing.get("since_ms"), "joined_ms": held.since_ms}
 
 
-NATIVE = frozenset({"join", "leave", "attachment", "request", "pcs"})
+NATIVE = frozenset({"join", "leave", "attachment", "request", "pcs", "shell"})

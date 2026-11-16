@@ -1,3 +1,7 @@
 .shot { display: block; max-inline-size: min(100%, var(--measure)); border: 1px solid var(--border); }
 .dim { font-size: var(--font-xs); color: var(--text-dim); }
 .switch { display: inline-flex; align-items: center; gap: var(--space-sm); color: var(--text-mid); }
+.inked[data-ink] { color: var(--ink); }
+.dim[data-ink] { color: var(--ink); }
+.volume { display: inline-flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; }
+.line { inline-size: 12rem; block-size: 1.5rem; fill: none; stroke: var(--text-mid); stroke-width: 1.5px; vector-effect: non-scaling-stroke; }
