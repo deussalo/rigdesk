@@ -103,7 +103,7 @@ const copied = (what: string, text: string): void => {
 }
 
 export function RigdeskTab(): ReactNode {
-  return <MenuRow plugin="rigdesk" path="all" label="RigDesk" icon="bento" />
+  return <MenuRow plugin="rigdesk" path="all" label="RigDesk" icon="desktop" />
 }
 
 /** One of the plugin's GET routes, read now and every everyMs while the part showing it is open. */
