@@ -15,7 +15,7 @@
 //!   POST /viewer/note {text, pngs: [base64]} - from `Api::hosted`: the human's message to the owning agent
 //!   GET  /frame?display=N  - a PNG of the PC's screen now, for the bearer's holder: the human to clip and draw on, or the operator's
 //!        screenshot on demand; journaled
-//!   GET  /health           - liveness, this process's boot id and the current standing
+//!   GET  /health           - liveness, this process's boot id, the current standing, and whether the agent shell is open
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 //!   GET  /servers          - the MCP servers found on the PC while an agent is connected, and whether MCP is on
 //!   POST /servers/<name>/mcp - MCP to that server, forwarded to its loopback port; X-Desk-Session as for /mcp
@@ -157,7 +157,8 @@ impl Api {
         }
         let method = request.method().clone();
         match (method.as_str(), path.as_str()) {
-            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "standing": self.shared.standing(), "down": self.shared.down()})),
+            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "standing": self.shared.standing(), "down": self.shared.down(),
+                                                                  "shell": self.lane.get().map(|lane| lane.switch())})),
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
             ("POST", "/leave") => self.leave(&request),

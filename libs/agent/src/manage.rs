@@ -190,8 +190,8 @@ pub struct Lane {
     journal: Arc<Journal>,
     /// Held while a job starts, so two starts cannot both pass the cap.
     starting: Mutex<()>,
-    /// Whether the PC let commands run at the last sweep, so each change is journaled once.
-    was_open: Mutex<Option<bool>>,
+    /// Why the PC refused commands at the last sweep (None while it let them run), so each change is journaled once.
+    was_open: Mutex<Option<Option<&'static str>>>,
 }
 
 impl Lane {
@@ -365,13 +365,22 @@ impl Lane {
         Ok(Answer { ok, text: answer.to_string() })
     }
 
+    /// Whether the PC lets agents run commands now, as /health says it: {open} or {open: false, code, words}.
+    pub fn switch(&self) -> Value {
+        match self.runner.allowed() {
+            Ok(()) => json!({"open": true, "code": null, "words": null}),
+            Err(refused) => json!({"open": false, "code": refused.code(), "words": refused.words()}),
+        }
+    }
+
     /// Ends jobs past their limits, or all of them while the PC lets nothing run, marks those a reboot ended, journals each
     /// end and each change of the PC's switch once, and removes jobs a day after they ended. Run every few seconds; blocks
     /// on the disk and the host's process calls.
     pub fn sweep(&self) {
         let closed = self.runner.allowed().err();
-        let was_open = self.was_open.lock().unwrap().replace(closed.is_none());
-        if was_open.is_some() && was_open != Some(closed.is_none()) {
+        let now = closed.as_ref().map(Refused::code);
+        let was_open = self.was_open.lock().unwrap().replace(now);
+        if was_open.is_some() && was_open != Some(now) {
             let outcome = match &closed {
                 None => "open".to_string(),
                 Some(refused) => refused.code().to_string(),
@@ -633,8 +642,16 @@ mod tests {
         let read: Value = serde_json::from_str(&lane.serve(&owner, Request::Read { job }).unwrap().text).unwrap();
         assert_eq!(read["why"], json!("ended because the person at the PC paused the agent shell"));
         assert!(lane.serve(&owner, run).unwrap().ok);
+        // Switched off, then paused while off, then switched on while still paused: closed throughout, but why changes.
+        runner.on.store(false, std::sync::atomic::Ordering::SeqCst);
+        lane.sweep();
+        runner.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+        lane.sweep();
+        runner.on.store(true, std::sync::atomic::Ordering::SeqCst);
+        lane.sweep();
+        assert_eq!(lane.switch()["code"], json!("shell_paused"));
         let switch: Vec<String> = Journal::open(dir.join("actions.jsonl"), 1 << 20).tail(64).into_iter().filter(|e| e.what == "agent shell").map(|e| e.outcome).collect();
-        assert_eq!(switch, vec!["shell_paused", "open"]);
+        assert_eq!(switch, vec!["shell_paused", "open", "shell_off", "shell_paused"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
