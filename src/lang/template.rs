@@ -826,5 +826,9 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("install-directory-not-empty-tip", ""),
         ("Request approval", ""),
         ("Forever", ""),
+        ("Pause the agent shell", ""),
+        ("Managed by Rig: commands run here", ""),
+        ("Pause the agent shell...", ""),
+        ("Pause sessions started from Rig", ""),
     ].iter().cloned().collect();
 }

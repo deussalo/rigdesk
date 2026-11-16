@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { ALL_SPACE, get_agent_settings, get_graph_cards, get_graphs, patch_agent_settings } from '@rig/contract'
-import { Action, agoOf, Board, BoardBar, BoardFacts, BoardForm, BoardNew, BoardPart, BoardProblems, BoardRow, BoardRows, contribution, editSettings, Field, Headed, href, lastOf, Link, Mark, MenuRow,
+import { Action, agoOf, Board, BoardBar, BoardFacts, BoardForm, BoardNew, BoardPart, BoardProblems, BoardRow, BoardRows, bytesOf, contribution, durationOf, editSettings, Field, Headed, href, lastOf, Link, Mark, MenuRow,
   objectOf, Quiet, REREAD_MS, Refusal, store as core, tell, Text, told, useAsked, useGraphLabel, useNow, useRememberedFold, withPath, type BoardColumns, type Fact, type Ink, type Refused } from '@rig/host'
 import css from './rigdesk.module.css'
 
@@ -13,6 +13,31 @@ type Shot = { readonly mime: string; readonly data: string; readonly taken_ms: n
 type McpServer = { readonly name: string; readonly key: string; readonly says: string; readonly tools: readonly string[]; readonly since_ms: number }
 /** The PC's own MCP servers: Rig's switch, the PC's as it last said (null while no agent holds it), why none is offered, and those open for the holder. */
 type Mcp = { readonly allowed: boolean; readonly on: boolean | null; readonly why: string | null; readonly servers: readonly McpServer[] }
+type Level = 'user' | 'system'
+type ShellSwitch = { readonly open: boolean; readonly code: string | null; readonly words: string | null }
+type ShellGrant = Grant & { readonly level: Level }
+/** A RigDesk PC's agent shell: the PC's own switch as it last said (null: its RigDesk has none), and who may run commands there with no session. */
+type PcShell = { readonly switch: ShellSwitch | null; readonly granted: readonly ShellGrant[] }
+type Verdict = 'ok' | 'warn' | 'fault' | 'stale'
+type Check = { readonly name: string; readonly state: Exclude<Verdict, 'ok'>; readonly words: string }
+type Volume = { readonly name: string; readonly free_pct: number; readonly free_mb: number; readonly total_mb: number }
+type Headline = {
+  readonly volumes: readonly Volume[]
+  readonly ram_used_pct: number | null
+  readonly cpu_pct: number | null
+  readonly build: string
+  readonly uptime_s: number
+  readonly pending_reboot: boolean | null
+}
+/** Rig's verdict on the PC's newest sample (null while it holds none), the checks that fail, and the headline figures. */
+type PcHealth = {
+  readonly state: Verdict | null
+  readonly failing: readonly Check[]
+  readonly why: string | null
+  readonly sample_ms: number | null
+  readonly rigdesk: string | null
+  readonly figures: Headline | null
+}
 type PcRow = {
   readonly name: string
   readonly client: string
@@ -26,6 +51,8 @@ type PcRow = {
   readonly owned_here: boolean
   readonly assigned: readonly Grant[]
   readonly mcp?: Mcp | undefined
+  readonly shell?: PcShell | null | undefined
+  readonly health?: PcHealth | null | undefined
 }
 type Listener = {
   readonly role: 'hbbs' | 'hbbr'
@@ -40,6 +67,7 @@ type PcsView = { readonly pcs: readonly PcRow[]; readonly id_server: IdServer | 
 type PcAdded = { readonly name: string; readonly entry: Readonly<Record<string, unknown>> }
 
 const INK: Readonly<Record<PcRow['state'], Ink>> = { up: 'live', connecting: 'hold', down: 'fault' }
+const VERDICT_INK: Readonly<Record<Verdict, Ink>> = { ok: 'idle', warn: 'hold', fault: 'fault', stale: 'hold' }
 const LISTENER_INK: Readonly<Record<Listener['state'], Ink>> = { up: 'live', unchecked: 'hold', down: 'fault' }
 const ROLE: Readonly<Record<Listener['role'], string>> = { hbbs: 'ID server', hbbr: 'relay' }
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/
@@ -52,12 +80,19 @@ const DESK_SERVER = 'desk'
 const textOf = (value: unknown): string => (typeof value === 'string' ? value : '')
 const HOLDER: Readonly<Record<NonNullable<PcRow['holder']>, string>> = { human: 'human holds input', agent: 'agent holds input', blocked: 'agent blocked' }
 
-/** A PC's row: its client and kind under its name, who holds input under its state, who is on it or why it is down, who is assigned. */
-const COLUMNS: BoardColumns = { who: '30ch', how: '20ch', figures: '26ch', end: '8ch' }
+/** A PC's row: its client and kind under its name, who holds input or what fails under its state, who is on it or why it is down, its health figures. */
+const COLUMNS: BoardColumns = { who: '30ch', how: '20ch', figures: '30ch', end: '8ch' }
 /** What needs the operator sorts first, what is broken last. */
-const ORDER: Readonly<Record<string, number>> = { blocked: 0, held: 1, up: 2, connecting: 3, down: 4 }
-const standingOf = (pc: PcRow): string => (pc.holder === 'blocked' ? 'blocked' : pc.state === 'up' && pc.owner !== null ? 'held' : pc.state)
-const rankOf = (pc: PcRow): number => ORDER[standingOf(pc)] ?? 2
+const ORDER: Readonly<Record<string, number>> = { blocked: 0, held: 1, fault: 2, warn: 3, stale: 4, up: 5, connecting: 6, down: 7 }
+/** An up PC nobody holds reads as its health when that is not ok. */
+const standingOf = (pc: PcRow): string => {
+  if (pc.holder === 'blocked') return 'blocked'
+  if (pc.state === 'up' && pc.owner !== null) return 'held'
+  const verdict = pc.health?.state ?? null
+  return pc.state === 'up' && verdict !== null && verdict !== 'ok' ? verdict : pc.state
+}
+const inkOf = (standing: string, pc: PcRow): Ink => (standing === 'blocked' ? 'hold' : standing in VERDICT_INK ? VERDICT_INK[standing as Verdict] : INK[pc.state])
+const rankOf = (pc: PcRow): number => ORDER[standingOf(pc)] ?? 5
 const byStanding = (one: PcRow, other: PcRow): number => {
   const apart = rankOf(one) - rankOf(other)
   return apart === 0 ? one.name.localeCompare(other.name) : apart
@@ -71,20 +106,24 @@ export function RigdeskTab(): ReactNode {
   return <MenuRow plugin="rigdesk" path="all" label="RigDesk" icon="bento" />
 }
 
-function usePcs(): PcsView | Refused | null {
-  const [read, setRead] = useState<PcsView | Refused | null>(null)
+/** One of the plugin's GET routes, read now and every everyMs while the part showing it is open. */
+function useRead<T>(path: string, everyMs: number = EVERY_MS): T | Refused | null {
+  const [read, setRead] = useState<T | Refused | null>(null)
   useEffect(() => {
     let live = true
     const once = async (): Promise<void> => {
-      const result = await routes('GET', 'pcs')
-      if (live) setRead(result.ok ? result.value as PcsView : result.refused)
+      const result = await routes('GET', path)
+      if (live) setRead(result.ok ? result.value as T : result.refused)
     }
     void once()
-    const timer = setInterval(() => { void once() }, EVERY_MS)
+    const timer = setInterval(() => { void once() }, everyMs)
     return () => { live = false; clearInterval(timer) }
-  }, [])
+  }, [path, everyMs])
   return read
 }
+
+const refusedOf = <T,>(read: T | Refused | null): Refused | null => (read !== null && typeof read === 'object' && 'rendered' in read ? read as Refused : null)
+const valueOf = <T,>(read: T | Refused | null): T | null => (read === null || refusedOf(read) !== null ? null : read as T)
 
 function OwnerOf({ owner }: { readonly owner: Owner }): ReactNode {
   const title = owner.title ?? owner.id ?? 'an agent'
@@ -121,8 +160,10 @@ const openDesk = async (graph: string, agent: string): Promise<Refused | null> =
   return saved.ok ? null : told('assigned, but desk not opened for it', saved.refused)
 }
 
-/** A standing grant to any agent, or to every agent in a graph, picked by title. */
-function Assign({ pc, forFleet }: { readonly pc: PcRow; readonly forFleet: boolean }): ReactNode {
+/** Who a grant goes to: one agent, or every agent in a graph, picked by graph and then by title. */
+type Grantee = { readonly graph: string | null; readonly agent: string | null; readonly grant: string; readonly fields: (about: string) => ReactNode; readonly none: boolean }
+
+function useGrantee(): Grantee {
   const graphs = (lastOf(useAsked(GRAPHS)) ?? []).flatMap(row => (row.type === 'graph' && !row.flow ? [row.name] : []))
   const labelOf = useGraphLabel()
   const [graph, setGraph] = useState<string | null>(null)
@@ -131,23 +172,101 @@ function Assign({ pc, forFleet }: { readonly pc: PcRow; readonly forFleet: boole
     .map(card => ({ id: card.agent_id, label: card.title }))
   const [agent, setAgent] = useState(WHOLE_GRAPH)
   const picked = agents.some(each => each.id === agent) ? agent : WHOLE_GRAPH
-  const grant = picked === WHOLE_GRAPH ? `graph:${chosen ?? ''}` : `agent:${picked}`
-  const assign = async (): Promise<Refused | null> => {
-    if (chosen === null) return null
-    const failed = await assigning(pc.name, grant, true)()
-    if (failed !== null || picked === WHOLE_GRAPH || forFleet) return failed
-    return openDesk(chosen, picked)
-  }
-  if (graphs.length === 0) return <Quiet>no graph to assign it in</Quiet>
-  return (
-    <BoardForm label={`assign ${pc.name}`} onLeave={() => undefined}>
+  const fields = (about: string): ReactNode => (
+    <>
       <Field kind="select" label="graph" value={chosen} options={graphs} labels={Object.fromEntries(graphs.map(name => [name, labelOf(name)]))} onChange={value => { setGraph(textOf(value) || null); setAgent(WHOLE_GRAPH) }} />
       <Field kind="select" label="agent" value={picked} options={[WHOLE_GRAPH, ...agents.map(each => each.id)]}
         labels={Object.fromEntries<string>([[WHOLE_GRAPH, 'every agent in the graph'], ...agents.map((each): [string, string] => [each.id, each.label || each.id])])}
-        onChange={value => { setAgent(textOf(value)) }}
-        about={`It acts on this PC with no share link, with desk/join(pc), across restarts, until unassigned.${forFleet ? '' : ' An agent is also given the desk server; every agent in a graph needs desk opened for the graph.'}`} />
-      <BoardBar><Action label="assign" tone="primary" pending="assigning…" disabled={chosen === null || pc.assigned.some(each => each.grantee === grant)} onInvoke={assign} /></BoardBar>
+        onChange={value => { setAgent(textOf(value)) }} about={about} />
+    </>
+  )
+  return { graph: chosen, agent: picked === WHOLE_GRAPH ? null : picked, grant: picked === WHOLE_GRAPH ? `graph:${chosen ?? ''}` : `agent:${picked}`, fields, none: graphs.length === 0 }
+}
+
+/** A standing grant to any agent, or to every agent in a graph, picked by title. */
+function Assign({ pc, forFleet }: { readonly pc: PcRow; readonly forFleet: boolean }): ReactNode {
+  const who = useGrantee()
+  const assign = async (): Promise<Refused | null> => {
+    if (who.graph === null) return null
+    const failed = await assigning(pc.name, who.grant, true)()
+    if (failed !== null || who.agent === null || forFleet) return failed
+    return openDesk(who.graph, who.agent)
+  }
+  if (who.none) return <Quiet>no graph to assign it in</Quiet>
+  return (
+    <BoardForm label={`assign ${pc.name}`} onLeave={() => undefined}>
+      {who.fields(`It acts on this PC with no share link, with desk/join(pc), across restarts, until unassigned.${forFleet ? '' : ' An agent is also given the desk server; every agent in a graph needs desk opened for the graph.'}`)}
+      <BoardBar><Action label="assign" tone="primary" pending="assigning…" disabled={who.graph === null || pc.assigned.some(each => each.grantee === who.grant)} onInvoke={assign} /></BoardBar>
     </BoardForm>
+  )
+}
+
+/** Lets an agent or a graph run commands on a RigDesk PC's agent shell, as the user or as SYSTEM, or takes that away (level null). */
+const allowingShell = (pc: string, grantee: string, level: Level | null) => async (): Promise<Refused | null> => {
+  const done = await routes('POST', 'shell_grant', { pc, grantee, level })
+  return done.ok ? null : told(level === null ? 'shell grant not removed' : 'shell not allowed', done.refused)
+}
+
+const LEVELS: readonly Level[] = ['user', 'system']
+const LEVEL_WORDS: Readonly<Record<Level, string>> = { user: 'as the user', system: 'as SYSTEM' }
+const SWITCH_WORDS: Readonly<Record<string, string>> = { shell_off: 'off on the PC', shell_paused: 'paused by the person at the PC' }
+
+type ShellRan = { readonly at_ms: number; readonly who: string; readonly graph: string | null; readonly as: Level | null; readonly command: string; readonly outcome: string; readonly took_ms: number | null; readonly job: string | null }
+
+/** What agents ran there, from the PC's own journal, newest first; read while the row is open. */
+function Ran({ pc, now }: { readonly pc: PcRow; readonly now: number }): ReactNode {
+  const read = useRead<{ readonly ran: readonly ShellRan[] }>(`shell_ran?pc=${encodeURIComponent(pc.name)}`)
+  const refused = refusedOf(read)
+  const ran = valueOf(read)?.ran ?? null
+  if (refused !== null) return <Refusal refused={refused} />
+  if (ran === null) return <Quiet waiting>reading the PC's journal…</Quiet>
+  if (ran.length === 0) return <Quiet>no agent has run a command here</Quiet>
+  return (
+    <BoardFacts label="commands run" terms="long" facts={ran.map((each): Fact => [`${agoOf(each.at_ms, now)} · ${each.who}`,
+      <span key={`${String(each.at_ms)}-${each.command}`}>
+        <code>{each.command}</code>{' '}
+        <i className={css.inked} data-ink={each.outcome.startsWith('exit 0') || each.outcome === 'started' ? undefined : 'hold'}>
+          {[each.as === null ? null : LEVEL_WORDS[each.as], each.outcome, each.took_ms === null ? null : durationOf(each.took_ms, 100), each.job].filter(Boolean).join(' · ')}
+        </i>
+      </span>])} />
+  )
+}
+
+/** A RigDesk PC's agent shell: the PC's switch, who may run commands there with no session, a form to allow another, and what ran. */
+function Shell({ pc, shell, now, forFleet }: { readonly pc: PcRow; readonly shell: PcShell; readonly now: number; readonly forFleet: boolean }): ReactNode {
+  const who = useGrantee()
+  const labelOf = useGraphLabel()
+  const [level, setLevel] = useState<Level>('user')
+  const allow = async (): Promise<Refused | null> => {
+    if (who.graph === null) return null
+    const failed = await allowingShell(pc.name, who.grant, level)()
+    if (failed !== null || who.agent === null || forFleet) return failed
+    return openDesk(who.graph, who.agent)
+  }
+  const switched = shell.switch
+  return (
+    <>
+      <BoardBar>
+        <Text text={switched === null ? 'this PC\'s RigDesk has no agent shell: update it' : switched.open ? 'on at the PC'
+          : `${SWITCH_WORDS[switched.code ?? ''] ?? switched.code ?? 'closed'}${switched.words === null ? '' : `: ${switched.words}`}`} ink={switched === null || switched.open ? 'idle' : 'hold'} size="xs" />
+      </BoardBar>
+      {shell.granted.map(each => (
+        <BoardBar key={each.grantee} apart={<Action label="remove" tone="outlined" pending="removing…" onInvoke={allowingShell(pc.name, each.grantee, null)} />}>
+          {each.agent_id !== null && each.graph !== null ? <Link href={href('agent', { graph: each.graph, agent: each.agent_id })}>{each.label}</Link> : <span>{grantLabel(each, labelOf)}</span>}
+          <Text text={LEVEL_WORDS[each.level]} ink="idle" size="xs" />
+        </BoardBar>
+      ))}
+      {shell.granted.length === 0 ? <Quiet>no agent may run commands here without its session; the agent holding the session may, as the user</Quiet> : null}
+      {who.none ? null : (
+        <BoardForm label={`allow shell on ${pc.name}`} onLeave={() => undefined}>
+          {who.fields(`It runs commands on this PC with desk/shell(pc), with no session and nothing on its screen.${forFleet ? '' : ' An agent is also given the desk server.'}`)}
+          <Field kind="select" label="as" value={level} options={LEVELS} labels={LEVEL_WORDS} onChange={value => { setLevel(textOf(value) === 'system' ? 'system' : 'user') }}
+            about="SYSTEM runs anything on the PC, off every desktop, and starts background jobs; the user runs as whoever is signed in." />
+          <BoardBar><Action label="allow" tone="primary" pending="allowing…" disabled={who.graph === null || shell.granted.some(each => each.grantee === who.grant && each.level === level)} onInvoke={allow} /></BoardBar>
+        </BoardForm>
+      )}
+      <Ran pc={pc} now={now} />
+    </>
   )
 }
 
@@ -199,6 +318,94 @@ function McpServers({ mcp, now }: { readonly mcp: Mcp; readonly now: number }): 
   )
 }
 
+type Sample = {
+  readonly id: number
+  readonly at_ms: number
+  readonly rigdesk: string
+  readonly took_ms: number
+  readonly taken: 'ok' | 'failed'
+  readonly why: string | null
+  readonly figures: {
+    readonly os: { readonly caption: string; readonly build: string }
+    readonly uptime_s: number
+    readonly cpu: { readonly name: string; readonly load_pct: number | null }
+    readonly ram: { readonly total_mb: number; readonly free_mb: number }
+    readonly volumes: readonly { readonly name: string; readonly label: string; readonly total_mb: number; readonly free_mb: number }[]
+    readonly pending_reboot: boolean | null
+    readonly pending_reboot_why: readonly string[]
+    readonly updates: { readonly last_install_ms: number | null; readonly pending: number | null; readonly error: string | null } | null
+    readonly defender: { readonly realtime_on: boolean | null; readonly signature_age_days: number | null } | null
+    readonly bitlocker: readonly { readonly volume: string; readonly protection: string }[]
+    readonly disks: readonly { readonly name: string; readonly health: string; readonly wear_pct: number | null; readonly temperature_c: number | null }[]
+    readonly stopped_services: readonly { readonly name: string; readonly display: string; readonly exit_code: number | null }[]
+    readonly system_errors_24h: number | null
+    readonly battery: { readonly charge_pct: number | null; readonly status: string } | null
+    readonly cpu_ms: number | null
+    readonly errors: readonly string[]
+  } | null
+}
+type Point = { readonly at_ms: number; readonly free_pct: Readonly<Record<string, number>> }
+type HealthRead = { readonly sample: Sample | null; readonly series: readonly Point[] }
+
+const HEALTH_EVERY_MS = 60_000
+const MB = 1024 * 1024
+const pct = (value: number): string => `${value.toFixed(0)}%`
+const known = <T,>(value: T | null, words: (value: T) => string): string => (value === null ? 'unknown' : words(value))
+
+/** A volume's free space over the week, as a line: the page draws what the PC reported, oldest at the left. */
+function FreeLine({ name, series }: { readonly name: string; readonly series: readonly Point[] }): ReactNode {
+  const points = series.flatMap(point => (point.free_pct[name] === undefined ? [] : [[point.at_ms, point.free_pct[name]] as const]))
+  const first = points[0]?.[0] ?? 0
+  const span = Math.max(1, (points.at(-1)?.[0] ?? 0) - first)
+  if (points.length < 2) return null
+  return (
+    <svg className={css.line} viewBox="0 0 200 24" preserveAspectRatio="none" role="img" aria-label={`${name} free space over ${durationOf(span, 3_600_000)}`}>
+      <polyline points={points.map(([at, free]) => `${((at - first) / span * 200).toFixed(1)},${(24 - free / 100 * 24).toFixed(1)}`).join(' ')} />
+    </svg>
+  )
+}
+
+/** The newest sample in full, each figure in text-mid unless a check on it fails; the week's free space beside each volume. */
+function Health({ pc, now }: { readonly pc: PcRow; readonly now: number }): ReactNode {
+  const read = useRead<HealthRead>(`health?pc=${encodeURIComponent(pc.name)}`, HEALTH_EVERY_MS)
+  const refused = refusedOf(read)
+  const view = valueOf(read)
+  if (refused !== null) return <Refusal refused={refused} />
+  if (view === null) return <Quiet waiting>reading…</Quiet>
+  const sample = view.sample
+  if (sample === null) return <Quiet>{pc.health?.why ?? 'no health sample yet: the PC takes one within a minute of starting, then every 10 minutes'}</Quiet>
+  const failing = new Map((pc.health?.failing ?? []).map(check => [check.name, VERDICT_INK[check.state]]))
+  const inked = (check: string, text: ReactNode): ReactNode => <span className={css.inked} data-ink={failing.get(check)}>{text}</span>
+  const taken = `taken ${agoOf(sample.at_ms, now)} in ${durationOf(sample.took_ms, 100)}${sample.figures?.cpu_ms == null ? '' : `, ${durationOf(sample.figures.cpu_ms, 10)} of CPU`} · RigDesk ${sample.rigdesk}`
+  const figures = sample.figures
+  if (figures === null) return <BoardFacts label="health" facts={[['sample', taken], ['failed', inked('sample', sample.why ?? 'no reason given')]]} />
+  const facts: readonly Fact[] = [
+    ['sample', taken],
+    ['Windows', `${figures.os.caption} ${figures.os.build} · up ${durationOf(figures.uptime_s * 1000, 60_000)}${figures.pending_reboot === true ? ` · reboot pending${figures.pending_reboot_why.length === 0 ? '' : ` (${figures.pending_reboot_why.join(', ')})`}` : ''}`],
+    ['CPU', `${known(figures.cpu.load_pct, pct)} load · ${figures.cpu.name}`],
+    ['RAM', `${bytesOf((figures.ram.total_mb - figures.ram.free_mb) * MB)} of ${bytesOf(figures.ram.total_mb * MB)} used`],
+    ...figures.volumes.map((volume): Fact => [volume.name, (
+      <span key={volume.name} className={css.volume}>
+        {inked(`disk ${volume.name}`, `${bytesOf(volume.free_mb * MB)} free of ${bytesOf(volume.total_mb * MB)}${volume.total_mb === 0 ? '' : ` (${pct(100 * volume.free_mb / volume.total_mb)})`}${volume.label ? ` · ${volume.label}` : ''}`)}
+        <FreeLine name={volume.name} series={view.series} />
+      </span>
+    )]),
+    ['updates', figures.updates === null ? 'unknown' : figures.updates.error !== null ? `unknown: ${figures.updates.error}`
+      : `${figures.updates.last_install_ms === null ? 'none installed' : `last installed ${agoOf(figures.updates.last_install_ms, now)}`} · ${known(figures.updates.pending, count => `${String(count)} pending`)}`],
+    ['Defender', figures.defender === null ? 'unknown' : (
+      <span key="defender">{inked('defender', `real-time ${known(figures.defender.realtime_on, on => (on ? 'on' : 'off'))}`)} · {inked('signatures', `signatures ${known(figures.defender.signature_age_days, days => `${String(days)} days old`)}`)}</span>
+    )],
+    ['BitLocker', figures.bitlocker.length === 0 ? 'none reported' : figures.bitlocker.map(each => `${each.volume} ${each.protection}`).join(', ')],
+    ...figures.disks.map((disk): Fact => [disk.name, inked(`drive ${disk.name}`, [disk.health, disk.wear_pct === null ? null : `${String(disk.wear_pct)}% worn`,
+      disk.temperature_c === null ? null : `${String(disk.temperature_c)} °C`].filter(Boolean).join(' · '))]),
+    ['stopped services', figures.stopped_services.length === 0 ? 'none' : inked('services', figures.stopped_services.map(each => `${each.display || each.name}${each.exit_code === null || each.exit_code === 0 ? '' : ` (${String(each.exit_code)})`}`).join(', '))],
+    ['System log', inked('system log', known(figures.system_errors_24h, count => `${String(count)} errors in 24 h`))],
+    ...(figures.battery === null ? [] : [['battery', `${known(figures.battery.charge_pct, pct)} · ${figures.battery.status}`] as const]),
+    ...(figures.errors.length === 0 ? [] : [['not read', figures.errors.join('; ')] as const]),
+  ]
+  return <BoardFacts label="health" facts={facts} />
+}
+
 type Verb = 'mint' | 'hand' | 'human' | 'stop' | 'block' | 'unblock' | 'revoke'
 
 /** What a stock PC's human does to it, from here since it has no RigDesk viewer; a refusal is told with the verb that failed. */
@@ -236,7 +443,11 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
   const [open, setOpen] = useRememberedFold('rigdesk-pc', pc.name, 'closed')
   const [link, setLink] = useState<string | null>(null)
   const standing = standingOf(pc)
-  const ink: Ink = standing === 'blocked' ? 'hold' : INK[pc.state]
+  const ink = inkOf(standing, pc)
+  const health = pc.health ?? null
+  const headline = health?.figures ?? null
+  const verdictWhy = standing in VERDICT_INK ? health?.failing[0]?.words : undefined
+  const failingInk = new Map((health?.failing ?? []).map(check => [check.name, VERDICT_INK[check.state]]))
   const held = pc.owner === null ? null : <span>held by <OwnerOf owner={pc.owner} />{pc.owned_here ? '' : ' (joined elsewhere)'}</span>
   const labelOf = useGraphLabel()
   const assigned = pc.assigned.map(each => grantLabel(each, labelOf))
@@ -246,16 +457,22 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
     ['client', pc.client || 'none'], ['kind', pc.stock ? 'stock RustDesk' : 'RigDesk'], ['address', pc.url], ['input', pc.holder === null ? 'no agent' : HOLDER[pc.holder]],
     ...(held === null ? [] : [['agent', held] as const]),
   ]
+  const problems = [...(pc.state === 'down' && pc.why !== null ? [pc.why] : []), ...(health?.why == null ? [] : [health.why]),
+    ...(health?.failing ?? []).filter(check => check.state === 'fault').map(check => check.words)]
   return (
     <BoardRow label={pc.name} open={open} onOpen={setOpen} mark={<Mark kind="status" shape="square" label={standing} ink={ink} fill={pc.state === 'up' && standing !== 'blocked' ? 'solid' : 'open'} />}
-      name={pc.name} under={[pc.client, pc.stock ? 'stock RustDesk' : 'RigDesk'].filter(Boolean).join(' · ')}
+      name={pc.name} under={[pc.client, pc.stock ? 'stock RustDesk' : `RigDesk${health?.rigdesk == null ? '' : ` ${health.rigdesk}`}`].filter(Boolean).join(' · ')}
       state={{ word: standing, ink: standing === 'up' ? 'idle' : ink }}
-      why={pc.down_since_ms !== null ? agoOf(pc.down_since_ms, now) : pc.holder !== null ? HOLDER[pc.holder] : pc.state === 'connecting' ? pc.url : undefined}
+      why={pc.down_since_ms !== null ? agoOf(pc.down_since_ms, now) : verdictWhy ?? (pc.holder !== null ? HOLDER[pc.holder] : pc.state === 'connecting' ? pc.url : undefined)}
       telling={pc.state === 'down' ? 'no answer' : held ?? 'no agent on it'} tellingDim={held === null}
-      figures={!pc.stock ? (mcpKnown ? { main: `${String(servers)} MCP ${servers === 1 ? 'server' : 'servers'}`, dim: servers === 0 } : { main: 'MCP unknown', dim: true }) : assigned.length === 0 ? { main: 'assigned to no one', dim: true }
+      figures={headline !== null ? {
+        main: <>{headline.volumes.map((volume, at) => <span key={volume.name} className={css.inked} data-ink={failingInk.get(`disk ${volume.name}`)}>{`${at === 0 ? '' : ' · '}${volume.name} ${pct(volume.free_pct)}`}</span>)}{' free'}</>,
+        under: [`RAM ${known(headline.ram_used_pct, pct)}`, `CPU ${known(headline.cpu_pct, pct)}`, headline.build, `up ${durationOf(headline.uptime_s * 1000, 3_600_000)}`,
+          headline.pending_reboot === true ? 'reboot pending' : null].filter(Boolean).join(' · '),
+      } : !pc.stock ? (mcpKnown ? { main: `${String(servers)} MCP ${servers === 1 ? 'server' : 'servers'}`, dim: servers === 0 } : { main: 'MCP unknown', dim: true }) : assigned.length === 0 ? { main: 'assigned to no one', dim: true }
         : { main: assigned.length === 1 ? `assigned to ${assigned[0] ?? ''}` : `${String(assigned.length)} assigned`, under: assigned.length === 1 ? undefined : assigned.join(', ') }}
       verbs={pc.stock && pc.owner !== null ? <Action label="stop" tone="danger" onInvoke={acting(pc, 'stop')} /> : undefined}>
-      <BoardProblems problems={pc.state === 'down' && pc.why !== null ? [pc.why] : []} />
+      <BoardProblems problems={problems} />
       <BoardFacts facts={facts} />
       {link === null || pc.owner !== null ? null : (
         <BoardPart name="share link">
@@ -265,6 +482,8 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
       )}
       {pc.assigned.length === 0 ? null : <BoardPart name="assigned"><Grants pc={pc} /></BoardPart>}
       {pc.stock || pc.mcp === undefined || pc.mcp.servers.length === 0 ? null : <McpServers mcp={pc.mcp} now={now} />}
+      {health === null ? null : <BoardPart name="health"><Health pc={pc} now={now} /></BoardPart>}
+      {pc.shell == null ? null : <BoardPart name="agent shell"><Shell pc={pc} shell={pc.shell} now={now} forFleet={forFleet} /></BoardPart>}
       <BoardPart name="screen"><Screenshot pc={pc} now={now} /></BoardPart>
       {pc.stock ? <Assign pc={pc} forFleet={forFleet} /> : null}
       {pc.stock || pc.mcp === undefined ? null : <McpSwitch pc={pc} mcp={pc.mcp} />}
@@ -337,11 +556,11 @@ function Adding({ server, taken, close }: { readonly server: IdServer; readonly 
 }
 
 export function RigdeskPage(): ReactNode {
-  const read = usePcs()
+  const read = useRead<PcsView>('pcs')
   const now = useNow()
   const [adding, setAdding] = useState(false)
-  const refused = read !== null && 'rendered' in read ? read : null
-  const view = read !== null && !('rendered' in read) ? read : null
+  const refused = refusedOf(read)
+  const view = valueOf(read)
   const pcs = (view?.pcs ?? []).toSorted(byStanding)
   const server = view?.id_server ?? null
   const up = pcs.filter(pc => pc.state === 'up').length

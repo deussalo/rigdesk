@@ -1,5 +1,6 @@
 """Run from a Rig checkout: PYTHONPATH=.:<rigdesk>/rig-plugin .venv/bin/python <rigdesk>/rig-plugin/tests/test_rigdesk.py (or with pytest)."""
 import asyncio
+import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from core.base import now_ms
 from core.model import GraphName, NodeId, SeatId
 from rigdesk.desks import DeskPc, Desks, Held, PcLink, pc_of_link, words_of
+from rigdesk.health import Sample
 
 PCS = {"deus": DeskPc(url="https://deus.tail1234.ts.net", token_file="/dev/null", client="acme")}
 GRANT, SECRET = "a" * 32, "b" * 32
@@ -25,9 +27,22 @@ def test_the_agent_hears_of_stop_and_block_but_not_of_the_humans_passing_input_o
     assert "resumed you" in str(words_of("deus", {"type": "holder", "holder": "agent", "by": "unblock", "at_ms": 0}))
     assert "blocked you" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "block", "at_ms": 0}))
     assert words_of("deus", {"type": "holder", "holder": "agent", "by": "share", "at_ms": 0}) is None
+    assert words_of("deus", {"type": "holder", "holder": "agent", "by": "operator", "at_ms": 0}) is None
     assert "pressed Stop" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "stop", "at_ms": 0}))
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
     assert "session there ended" in str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the human ended the share", "at_ms": 0}))
+
+
+def test_a_rigdesk_pc_says_whether_the_operator_can_start_a_session_there() -> None:
+    from rigdesk import _reached_by
+
+    def entry(join: object) -> object:
+        return {"stock": False, "join": join}
+
+    assert "desk/request (join" in _reached_by(entry({"open": True, "code": None, "words": None}))  # type: ignore[arg-type]
+    paused = _reached_by(entry({"open": False, "code": "join_paused", "words": "the person at this PC paused sessions started from Rig"}))  # type: ignore[arg-type]
+    assert paused.startswith("a share link") and "paused" in paused
+    assert "takes no sessions started from Rig" in _reached_by(entry(None))  # type: ignore[arg-type]
 
 
 def test_a_stock_pc_is_served_on_loopback() -> None:
@@ -231,6 +246,104 @@ def test_an_assigned_session_idle_five_minutes_leaves_the_pc_but_a_link_session_
     asyncio.run(run())
     assert left == ["deus"]
     assert len(told) == 1 and told[0].startswith("queue: RigDesk deus: you left deus after 5 minutes"), told
+
+
+FIGURES = Path(__file__).resolve().parents[2] / "libs/agent/tests/fixtures/figures-windows.json"
+
+
+def _sample(id: int, at_ms: int, **changed: object) -> Sample:
+    figures = json.loads(FIGURES.read_text()) | changed
+    return Sample.model_validate({"id": id, "at_ms": at_ms, "boot": "b", "rigdesk": "1.4.2", "took_ms": 900, "taken": "ok", "figures": figures})
+
+
+def test_rig_judges_a_pcs_figures_and_a_pc_up_with_no_new_sample_reads_stale() -> None:
+    from rigdesk.health import Sample, Thresholds, health
+    now = now_ms()
+    sample = _sample(1, now - 60_000)
+    judged = health(sample, Thresholds(), now, up=True)
+    assert judged.state == "fault" and [check.name for check in judged.failing] == ["disk D:", "services"], judged
+    assert "Print Spooler" in judged.said and "Edge" not in judged.said, "a delayed service stopped cleanly is no failure"
+    low = health(sample, Thresholds(disk_free_fault_pct=50), now, up=True)
+    assert low.state == "fault" and any(check.name == "disk C:" and check.state == "fault" for check in low.failing), low
+    assert health(_sample(1, now - 30 * 60_000), Thresholds(), now, up=True).state == "stale"
+    assert health(_sample(1, now - 30 * 60_000), Thresholds(), now, up=False).state == "fault", "a PC that is down is down, not stale"
+    failed = Sample.model_validate({"id": 2, "at_ms": now, "taken": "failed", "why": "powershell exited 1"})
+    assert health(failed, Thresholds(), now, up=True).state == "warn"
+    blind = _sample(3, now, defender={"realtime_on": None, "signature_age_days": None}, stopped_services=[], volumes=[{"name": "A:", "total_mb": 0, "free_mb": 0}])
+    assert health(blind, Thresholds(), now, up=True).state == "ok", "a figure the PC could not read is unknown, never a fault"
+
+
+def test_samples_are_kept_a_week_by_the_pcs_clock_and_outlive_the_plugin() -> None:
+    from rigdesk.health import KEPT_MS, REWRITE_SLACK_MS, History
+    now = now_ms()
+    with tempfile.TemporaryDirectory() as state:
+        history = History(Path(state))
+        assert len(history.add("deus", [_sample(1, now - 20 * 60_000), _sample(2, now - 10 * 60_000)], now)) == 2
+        assert history.add("deus", [_sample(2, now - 10 * 60_000)], now) == [], "a sample read twice is kept once"
+        assert [each.id for each in history.add("deus", [_sample(1, now)], now)] == [1], "a PC whose ids began again is still read, by its clock"
+        assert [each.id for each in History(Path(state)).of("deus")] == [1, 2, 1]
+        old = History(Path(state) / "old")
+        old.add("deus", [_sample(1, now - KEPT_MS - REWRITE_SLACK_MS - 1)], now - KEPT_MS)
+        old.add("deus", [_sample(2, now)], now)
+        assert [each.id for each in History(Path(state) / "old").of("deus")] == [2], "a week is kept, no more"
+
+
+def test_the_shell_allow_list_grants_user_or_system_per_agent_or_graph_on_rigdesk_pcs_only() -> None:
+    from rigdesk.desks import DeskRefused
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            docs = _Docs()
+            desks = _granting(state, docs)
+            await desks.assign("deus", "agent:a1")
+            assert await desks.allow_shell("front", "agent:a1", "user") and await desks.allow_shell("front", "graph:ops", "system")
+            assert not await desks.allow_shell("front", "agent:a1", "user")
+            assert desks.shell_level("front", "a1", "g") == "user"
+            assert desks.shell_level("front", "a1", "ops") == "system", "the most of its own grant and its graph's"
+            assert desks.shell_level("front", "a2", "g") is None and desks.shell_level("deus", "a1", "g") is None
+            try:
+                await desks.allow_shell("deus", "agent:a1", "user")
+            except DeskRefused:
+                pass
+            else:
+                raise AssertionError("a stock PC took a shell grant")
+            again = _granting(state, docs)
+            await again._read_grants()
+            assert again.granted("deus") == ("agent:a1",) and again.shell_granted("front") == {"agent:a1": "user", "graph:ops": "system"}
+            assert await again.allow_shell("front", "graph:ops", None) and again.shell_level("front", "a1", "ops") == "user"
+
+    asyncio.run(run())
+
+
+def test_pc_health_is_published_once_per_change_and_not_again_after_a_restart() -> None:
+    from rigdesk.health import Thresholds
+    emitted: list[tuple[str, str, str]] = []
+    now = now_ms()
+
+    def emit(name: str, subject: str, fields: dict) -> None:
+        emitted.append((subject, fields["was"], fields["state"]))
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            def started() -> Desks:
+                desks = Desks(SimpleNamespace(state_dir=Path(state), emit=emit))  # type: ignore[arg-type]
+                desks._pcs["deus"] = PcLink("deus", PCS["deus"], state="up")
+                return desks
+            desks = started()
+            desks._history.add("deus", [_sample(1, now, stopped_services=[], volumes=[{"name": "C:", "total_mb": 100, "free_mb": 40}])], now)
+            await desks._judge()
+            assert emitted == [], "a PC first judged ok says nothing"
+            desks._thresholds = Thresholds(disk_free_fault_pct=50)
+            await desks._judge()
+            await desks._judge()
+            again = started()
+            again._thresholds = Thresholds(disk_free_fault_pct=50)
+            await again._judge()
+            again._thresholds = Thresholds()
+            await again._judge()
+
+    asyncio.run(run())
+    assert emitted == [("deus", "ok", "fault"), ("deus", "fault", "ok")], emitted
 
 
 if __name__ == "__main__":

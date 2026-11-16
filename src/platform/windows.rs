@@ -97,6 +97,7 @@ use windows_service::{
 use winreg::{enums::*, RegKey};
 
 mod acl;
+pub mod agent_lane;
 mod agent_shell;
 pub use agent_shell::run_shell_as_user;
 pub(crate) mod installer_files;

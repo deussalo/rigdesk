@@ -1011,6 +1011,8 @@ async fn handle(data: Data, stream: &mut Connection) {
                     value = crate::audio_service::get_voice_call_input_device();
                 } else if name == "unlock-pin" {
                     value = Some(Config::get_unlock_pin());
+                } else if name == "agent-operator-session" {
+                    value = agent_operator_session();
                 } else {
                     value = None;
                 }
@@ -1073,6 +1075,8 @@ async fn handle(data: Data, stream: &mut Connection) {
                     crate::audio_service::set_voice_call_input_device(Some(value), true);
                 } else if name == "unlock-pin" {
                     Config::set_unlock_pin(&value);
+                } else if name == "agent-operator-end" {
+                    agent_operator_end(&value);
                 } else {
                     return;
                 }
@@ -1744,6 +1748,20 @@ where
             }
         }
     }
+}
+
+/// For the tray: the agent holding a session the operator started from Rig (see `agent::operator`).
+fn agent_operator_session() -> Option<String> {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return Some(crate::agent::operator::session_text());
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    None
+}
+
+/// From the tray: the person at the PC ends that agent's operator-started session.
+fn agent_operator_end(_agent_id: &str) {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    crate::agent::operator::end(_agent_id);
 }
 
 #[tokio::main(flavor = "current_thread")]

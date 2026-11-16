@@ -144,7 +144,11 @@ Known limits against a RigDesk PC:
   it now.
 * `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins
   the caller to it now for one session, as a share link would; `assign` gives it a standing grant. Refused at once for
-  an unknown PC, a RigDesk PC (its human shares it in the viewer), or one already assigned to the caller.
+  an unknown PC, or one already assigned to the caller.
+  On a RigDesk PC it takes `join` only. Accept has Rig's bearer ask the PC for the session (`POST /join`), with no share link.
+  The PC admits it only while its own switch is on (`-AgentJoin`, and the PIN-locked pause), no other agent holds its
+  session and the caller is not blocked there. The person at the PC is notified and can end the session from the tray.
+  The PC's switch is read when the agent asks, and a closed one refuses at once with the PC's words, before the operator is asked.
 * `desk/join(pc)` — joins a stock PC assigned to the caller, by name. A desk call with no session joins the caller's
   assigned PC by itself only when it has exactly one; with more it is refused and lists them.
 * `desk/<tool>` — the PC's own tools (screenshot, click, type, scroll, move, drag, key, shortcut, wait, clipboard
@@ -161,6 +165,47 @@ Known limits against a RigDesk PC:
   a server that forgot its MCP session is opened again once. A PC's `mcp: false` in settings opens none, and turned off
   closes those open and tells the holder; the person at the PC has a switch of their own. A stock PC, through its bridge, offers none.
 * `desk/leave` — ends the session.
+
+## Agent shell and health (RigDesk PCs)
+
+A RigDesk PC installed with `-AgentShell on` runs commands from Rig with no desktop session: as SYSTEM in session 0,
+where nothing it starts can draw on the user's screen, or as the signed-in user. The client signs the consent text in
+the [RigDesk README](../../README.md#consent-text) first. **The PC's bearer token is then a SYSTEM credential:** keep
+its `token_file` 0600 under `~/.rig/rigdesk`, let only Rig's host reach `tag:pc`, and rotate it by rerunning the
+install line.
+
+* `desk/shell(pc, command, as, timeout_s)` runs one command on the named PC without joining it and without waiting on
+  the person at it; `background: true` starts a job and answers its id at once, and `desk/shell(pc, job)` reads its
+  state and output so far. A job outlives the call and Rig's restarts, a reboot ends it, and a PC runs at most 8.
+  Without `pc` it runs on the PC the agent joined, as before.
+* **Who may.** The operator allows an agent or every agent in a graph per PC on the RigDesk page, as the user or as
+  SYSTEM (`POST /x/rigdesk/shell_grant {pc, grantee, level}`, `level: null` removes it); the grants live in the plugin's
+  `grants` doc beside the stock-PC assignments. The agent holding the PC's desktop session may run commands as the
+  user without a grant. Background jobs and job reads need SYSTEM. A tool policy denying `mcp:desk/shell` still refuses
+  it, and the PC refuses on its own when its switch is off (`rigdesk.shell_off`), the person at it paused it
+  (`rigdesk.shell_paused`), the human blocked that agent (`rigdesk.blocked`), it already runs 8 jobs
+  (`rigdesk.jobs_full`) or the job is unknown (`rigdesk.no_job`); Rig refuses an agent with no grant
+  (`rigdesk.shell_not_allowed`) or with a user grant asking for more (`rigdesk.system_not_granted`). `desk/pcs` tells
+  each agent, per PC, what it may run there and whether the switch is on.
+* **What ran.** The PC journals every command, run or refused, with agent, graph, as whom, exit code and duration; the
+  PC's opened row on the RigDesk page lists the latest 25 (`GET /x/rigdesk/shell_ran?pc=`), and the PC's tray lists them
+  for the person there.
+
+The PC takes a health sample within a minute of boot and every 10 minutes after (raw figures only, never a verdict)
+and keeps 24 h of them. Rig reads each new one when the PC says it on `/events`, and on every reconnect reads all it
+missed, so a Rig restart or a network gap leaves no hole. It keeps 7 days per PC under `health/` in the plugin's state
+directory and judges the newest against `plugins.rigdesk.health`:
+
+    {"disk_free_warn_pct": 15, "disk_free_fault_pct": 5, "disk_wear_warn_pct": 80,
+     "signature_warn_days": 3, "signature_fault_days": 7, "system_errors_warn": 25, "stale_after_min": 25}
+
+Defender real-time protection off or an unhealthy drive is a fault; a drive's warning, a stopped automatic service that
+failed, or a failed health script warns; an up PC with no sample for `stale_after_min` reads stale. The verdict is
+`ok`, `warn`, `fault` or `stale` with the failing checks in words.
+
+* Each change of a PC's verdict is published once as the event **`rigdesk.pc_health`** (subject: the PC; `state`,
+  `was`, `failing`, `client`), so a routine can wake an agent on it. `rig status` prints a line for each PC in fault.
+* `desk/pcs` gives each PC's `health: {state, failing}`; `desk/pcs(pc)` adds its newest sample in full.
 
 What the human does reaches the owning agent as Rig messages (steered into its turn): taking input
 back, Stop (which also interrupts its turn), handing it over, block and unblock, the session ending, and messages typed in the viewer with
@@ -179,10 +224,15 @@ work), and while blocked it refuses every call.
   nowhere, journaled on the PC; it works while the human has blocked the agent, since Block binds agents, not the operator) and, for a stock PC, assigns it to any agent or every agent in a graph, picked by title;
   each standing grant is listed by the agent's title with its unassign.
 * A row among each owning agent's holds, beside its shell and sub-agents: its PC, the PC's state or who holds input, and how long it has been joined; the row opens RigDesk.
-* `rig status` prints a line for each PC that is down.
+* An up PC's row shows its health verdict, free space per volume, RAM, CPU, Windows build and uptime; opened, the newest
+  sample in full with each volume's week of free space as a line (`GET /x/rigdesk/health?pc=`), and its agent shell:
+  the PC's switch, the allow list with a form to add to it, and what ran.
+* `rig status` prints a line for each PC that is down, and for each in health fault.
 
 ## Testing off Windows
 
 `cargo run -p rigdesk-agent --example fake_desk -- 39119 <token>` serves the same API over a stand-in
-desktop and reads viewer commands (`mint`, `hand`, `human`, `block`, `unblock`, `msg <text>`) from stdin.
+desktop and reads viewer commands (`mint`, `hand`, `human`, `block`, `unblock`, `msg <text>`, and for the agent shell
+`shell on|off`, `pause on|off`, `sample`, `reboot`) from stdin. Its lane runs commands through `sh`; `FAKE_DESK_DIR` keeps its
+journal, jobs and samples, `FAKE_DESK_HEALTH_S` sets the sampling interval and `FAKE_DESK_FIGURES` names a JSON file of figures.
 Point a PC's `url` at `http://127.0.0.1:39119` on a scratch Rig.

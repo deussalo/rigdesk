@@ -1442,7 +1442,18 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
         _OptionCheckBox(context, 'allow-only-conn-window-open-tip',
             'allow-only-conn-window-open',
             reverse: false, enabled: enabled),
-      if (bind.mainIsInstalled() && !isUnlockPinDisabled()) unlockPin()
+      if (bind.mainIsInstalled() && !isUnlockPinDisabled()) unlockPin(),
+      if (isWindows && bind.mainIsInstalled())
+        _OptionCheckBox(context, 'Pause the agent shell', 'agent-shell-paused',
+            optGetter: () =>
+                bind.mainGetOptionSync(key: 'agent-shell-paused') == 'Y',
+            enabled: enabled),
+      if ((isWindows || isLinux) && bind.mainIsInstalled())
+        _OptionCheckBox(context, 'Pause sessions started from Rig',
+            'agent-join-paused',
+            optGetter: () =>
+                bind.mainGetOptionSync(key: 'agent-join-paused') == 'Y',
+            enabled: enabled),
     ]);
   }
 

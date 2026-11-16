@@ -54,6 +54,58 @@ The script ([install/install.ps1](install/install.ps1)):
 Run it again with new values to rotate the secrets. CI runs the same script (minus Tailscale) against every build:
 see `.github/smoke/install.ps1`.
 
+`-AgentShell on|off` (on when left out) sets the PC's agent shell: whether Rig's agents may run commands on it with no
+desktop session, as SYSTEM. Only rerunning the install line changes it; the person at the PC can pause it from
+RigDesk's PIN-locked security settings. Have the client sign the text below before you run the line with it on.
+
+### Consent text
+
+> **Remote management of this computer by Rig**
+>
+> RigDesk is installed on this computer as a Windows service that starts with it. While its *agent shell* is on,
+> automated agents run by **<operator>** through Rig may run commands on this computer at any time, **with the
+> highest local rights (SYSTEM)** or as the signed-in user, without a window and without interrupting whoever is at
+> the computer. Such a command can read, change or delete anything on this computer. Commands reach it only over a
+> private network (Tailscale) from Rig's host, carrying a secret token that Rig keeps readable only by its own user.
+>
+> **What is run is recorded.** Every command, run or refused, is logged on this computer with the agent that sent it,
+> whom it ran as, its exit code and how long it took. The tray icon's *Managed by Rig: commands run here* opens a
+> list of the latest 200. *Pause the agent shell*, in RigDesk's security settings behind the admin PIN, stops new
+> commands and ends running ones until it is unticked. You see what ran after it ran, not as it runs.
+>
+> **What is collected.** Within a minute of start-up and every 10 minutes after, RigDesk reads, as SYSTEM: Windows
+> edition, build and uptime; processor name and load; memory in use; size and free space of each local drive;
+> whether a restart is pending; Windows Update's last install and pending count (checked hourly); Defender's
+> real-time protection and signature age; BitLocker status per drive; each physical disk's health, wear and
+> temperature; automatic services that are stopped; the count of System-log errors in the last 24 hours; the
+> battery where there is one; and RigDesk's own version. It reads no files, documents, browsing or keystrokes. The
+> computer keeps the last 24 hours of these readings; Rig fetches them over the same private network and keeps 7 days
+> of them on its host, where they are shown to **<operator>** and their agents and checked for faults.
+>
+> Turning the agent shell off (rerunning the install line with `-AgentShell off`) stops remote commands; uninstalling
+> RigDesk stops the readings too.
+
+`-AgentJoin on|off` (on when left out; `agent_join` in a Linux PC's enroll.json) sets whether the operator may start an
+agent's desktop session from Rig, with no share link: an agent asks with `desk/request`, the operator accepts in Rig,
+and Rig's bearer token asks the PC for the session (`POST /join`). The person at the PC is told and can end it; *Pause
+sessions started from Rig*, in the PIN-locked security settings, refuses new ones until it is unticked. With this on,
+Rig's agent API token starts desktop sessions on the PC, so it is as strong as a share link from a viewer. Have the
+client sign this text too before you run the line with it on.
+
+> **Agent sessions started by the operator**
+>
+> While this is on, **<operator>** may let an automated agent take this computer's desktop through Rig, without anyone
+> connecting to it: the agent sees the screen, moves the pointer, types and runs commands as the signed-in user. The
+> operator approves each session in Rig, for one agent at a time.
+>
+> **You are told and you can end it.** When such a session starts, a notification names the agent, and while it runs
+> the RigDesk tray icon names it with *End the agent's session*. Your own mouse and keyboard always go first: while you
+> use the computer, the agent's actions are refused until you pause for 3 seconds. Every action the agent takes is
+> logged on this computer.
+>
+> *Pause sessions started from Rig*, in RigDesk's security settings behind the admin PIN, refuses new sessions until it
+> is unticked. Rerunning the install line with `-AgentJoin off` turns them off.
+
 ### Tailnet policy
 
 ```jsonc
@@ -107,7 +159,10 @@ under `plugins.rigdesk.pcs` as `{name: {url, token_file, client}}`. See [rig-plu
 | `POST /leave` | the owning agent ends its session |
 | `GET /log?n=N` | the action log |
 | `GET /frame?display=N` | a PNG of the screen now, for the bearer's holder (the viewer's note, Rig's screenshot on demand); journaled |
-| `GET /health` | boot id and current standing |
+| `GET /health` | boot id, current standing and the agent shell's switch (`{open, code, words}`, null without one) |
+| `POST /join` | `{agent: {id, title, graph}, ask}`: a session the operator accepted in Rig, with no share link; answers `{session, standing}` as `/claim` does; refused with `join_off`, `join_paused`, `held` (another agent holds the session, named) or `blocked`; journaled either way; 404 `no_join` where the host offers none |
+| `POST /shell` | `{agent: {id, title, graph}, command, as, timeout_s, background}` or `{agent, job}`: the management lane, no session; refused with `shell_off`, `shell_paused`, `blocked`, `jobs_full`, `no_job` or `bad_request`; journaled either way |
+| `GET /samples?after=ID` | the health samples taken after ID (the PC keeps 24 h); a `health` event on `/events` says each new one |
 
 Tools: `screenshot`, `click`, `type`, `scroll`, `move`, `drag`, `key`, `shortcut`, `wait`, `clipboard` and `shell`
 (one PowerShell command as the signed-in user, never SYSTEM, with no input and a time limit; it answers the exit code and

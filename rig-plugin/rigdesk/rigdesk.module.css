@@ -1,1 +1,4 @@
 .shot { display: block; max-inline-size: min(100%, var(--measure)); border: 1px solid var(--border); }
+.inked[data-ink] { color: var(--ink); }
+.volume { display: flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; }
+.line { inline-size: 12rem; max-inline-size: 100%; block-size: 1.5rem; fill: none; stroke: var(--text-mid); stroke-width: 1.5px; vector-effect: non-scaling-stroke; }

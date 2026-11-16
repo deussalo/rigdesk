@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict, cast
+from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
@@ -20,14 +21,16 @@ from core.boundary import BranchTool, NoParams, Params, StatusLine
 from core.kernel_api import RigReach, mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.endpoint import Request, endpoint
+from core.event_kinds import EventField, EventSpec
 from core.model import AgentId, GraphName, NodeId, Refused, RefusedOutcome, SeatId
-from core.mcp_call import Answer, Call, ToolDef, ToolInput, gloss_of
+from core.mcp_call import TOOL_LIMIT_S, Answer, Call, ToolDef, ToolInput, gloss_of
 from core.plugin_host import Live, PluginHost
 from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, PcEntry, PcServer, RigdeskSettings, failure
+from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
+from .health import STATES, figures_json, series
 from .desks import PcName as DeskName
 
 BRANCH = "desk"
@@ -35,6 +38,12 @@ CAPABILITY = mcp_capability(BRANCH)
 REFUSED = PluginCode(f"{ID}.refused")
 DOWN = PluginCode(f"{ID}.pc_down")
 UNSHARED = PluginCode(f"{ID}.no_session")
+SHELL_NOT_ALLOWED = PluginCode(f"{ID}.shell_not_allowed")
+SYSTEM_NOT_GRANTED = PluginCode(f"{ID}.system_not_granted")
+# The PC's own refusals on its agent shell, each passed on under its own code.
+PC_SHELL_CODES: dict[str, HTTPStatus] = {"shell_off": HTTPStatus.FORBIDDEN, "shell_paused": HTTPStatus.FORBIDDEN, "blocked": HTTPStatus.FORBIDDEN,
+                                         "jobs_full": HTTPStatus.TOO_MANY_REQUESTS, "no_job": HTTPStatus.NOT_FOUND}
+PC_HEALTH = f"{ID}.pc_health"
 
 
 NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); for another, "
@@ -52,6 +61,7 @@ class Requested(TypedDict):
     agent: str
     graph: str
     kind: RequestKind
+    ask: NotRequired[str]
 
 
 REQUESTED: TypeAdapter[Requested] = TypeAdapter(Requested)
@@ -67,14 +77,26 @@ class LeaveInput(ToolInput):
 
 
 class RequestInput(ToolInput):
-    pc: str = Field(description="The stock RustDesk PC you need, by its name in Rig; desk/pcs lists them.")
+    pc: str = Field(description="The PC you need, by its name in Rig; desk/pcs lists them. A RigDesk PC takes kind join only, and only while its own switch allows sessions started from Rig.")
     why: str = Field(min_length=1, max_length=1000, description="What you need it for, in a sentence or two; the operator reads it before deciding.")
     kind: RequestKind = Field(default="join", description="join: one session, now, until you leave or the human ends it. "
                                                            "assign: a standing grant, so you join it by name with desk/join(pc), across restarts, until unassigned.")
 
 
 class PcsInput(ToolInput):
-    pass
+    pc: str | None = Field(default=None, description="One PC by name: its entry with its newest health sample in full.")
+
+
+class ShellInput(ToolInput):
+    command: str | None = Field(default=None, min_length=1, max_length=32 * 1024, description="What to run, in PowerShell on Windows. Omit it to read a job.")
+    timeout_s: int | None = Field(default=None, ge=1, le=SHELL_LIMIT_S, description="How long it may run before the PC ends it; 60 by default. A job runs up to a day.")
+    pc: str | None = Field(default=None, description="A RigDesk PC by name: runs there with no session and without touching its desktop, if the operator "
+                                                     "allowed you its shell (desk/pcs says where). Omitted: the PC you joined.")
+    run_as: Literal["system", "user"] | None = Field(default=None, alias="as", description="system runs it as SYSTEM, off every desktop; user as the signed-in "
+                                                                                           "user, refused with nobody signed in. Default: the most you are allowed.")
+    background: bool = Field(default=False, description="Start it as a job and answer its id at once; it outlives the call and Rig's restarts, a reboot ends it. "
+                                                        "As SYSTEM only; a PC runs at most 8.")
+    job: str | None = Field(default=None, pattern=r"^j-[0-9a-f]{8}$", description="A job's id: answers its state and its output so far, instead of running anything.")
 
 
 class AttachmentInput(ToolInput):
@@ -133,13 +155,120 @@ def _held_words(entry: PcEntry, agent: str) -> str | None:
     return None if held is None else "you" if held["agent_id"] == agent else held["title"]
 
 
-async def _pcs(desks: Desks, call: Call, _given: PcsInput) -> Answer:
+def _shell_level(desks: Desks, pc: str, agent: str, graph: str) -> ShellLevel | None:
+    """The most an agent may run as on a PC's agent shell: its grant or its graph's, and the user at least on the PC whose session it holds."""
+    held = desks.held_by(agent, graph)
+    return desks.shell_level(pc, agent, graph) or ("user" if held is not None and held.pc == pc else None)
+
+
+def _shell_words(desks: Desks, entry: PcEntry, agent: str, graph: str) -> str:
+    if entry["stock"]:
+        return "none: stock RustDesk runs commands only in a joined session, as its user"
+    level = _shell_level(desks, entry["name"], agent, graph)
+    switch = entry["shell"]
+    pc_says = ("its RigDesk has no agent shell yet" if switch is None else "its agent shell is on" if switch.get("open")
+              else f"{switch.get('words')} ({switch.get('code')})")
+    may = {"system": "you may run commands as SYSTEM or as the user", "user": "you may run commands as its signed-in user", None: "you may not run commands there"}[level]
+    return f"{may}; {pc_says}"
+
+
+def _reached_by(entry: PcEntry) -> str:
+    if entry["stock"]:
+        return "desk/request (join or assign), or a share link"
+    switch = entry["join"]
+    if switch is None:
+        return "a share link from the human in the RigDesk viewer only: its RigDesk takes no sessions started from Rig"
+    if switch.get("open"):
+        return "desk/request (join; the operator accepts in Rig), or a share link from the human in the RigDesk viewer"
+    return f"a share link from the human in the RigDesk viewer only: {switch.get('words')}"
+
+
+def _pc_entry(desks: Desks, entry: PcEntry, agent: str, graph: str, mine: set[str]) -> JsonObject:
+    judged = entry["health"]
+    return {"name": entry["name"], "client": entry["client"], "state": entry["state"],
+            "reached_by": _reached_by(entry),
+            "assigned_to_you": entry["name"] in mine, "held_by": _held_words(entry, agent), "shell": _shell_words(desks, entry, agent, graph),
+            "health": None if judged is None else {"state": judged.state, "failing": [check.words for check in judged.failing]}}
+
+
+async def _pcs(desks: Desks, call: Call, given: PcsInput) -> Answer:
     agent, graph, _ = _who(call)
     mine = set(desks.assigned_pcs(agent, graph))
-    return {"pcs": [{"name": entry["name"], "client": entry["client"], "state": entry["state"],
-                     "reached_by": "desk/request (join or assign), or a share link" if entry["stock"] else "a share link from the human in the RigDesk viewer only",
-                     "assigned_to_you": entry["name"] in mine, "held_by": _held_words(entry, agent)} for entry in desks.entries()],
-            "said": "desk/join(pc) joins a PC assigned to you; desk/request(pc, why, kind) asks the operator to let you join one now or assign it to you."}
+    entries = desks.entries()
+    if given.pc is not None:
+        entry = next((each for each in entries if each["name"] == given.pc), None)
+        if entry is None:
+            return call.refused(REFUSED, f"no RigDesk PC named {given.pc} is set up in Rig; desk/pcs lists those that are")
+        history = desks.history(given.pc)
+        return {"pc": _pc_entry(desks, entry, agent, graph, mine), "sample": figures_json(history[-1]) if history else None}
+    return {"pcs": [_pc_entry(desks, entry, agent, graph, mine) for entry in entries],
+            "said": "desk/join(pc) joins a PC assigned to you; desk/request(pc, why, kind) asks the operator to let you join one now or assign it to you. "
+                    "desk/shell(pc, command) runs a command on a PC whose shell you are allowed, with no session; desk/pcs(pc) gives its newest health sample."}
+
+
+def _shell_asked(given: ShellInput, run_as: ShellLevel) -> JsonObject:
+    if given.job is not None:
+        return {"job": given.job}
+    asked: JsonObject = {"command": given.command, "as": run_as, "background": given.background}
+    return asked | ({} if given.timeout_s is None else {"timeout_s": given.timeout_s})
+
+
+async def _shell_in_session(desks: Desks, call: Call, held: Held, given: ShellInput) -> Answer:
+    """The joined PC's own desk/shell, through its session, as the user: a stock PC's, or a RigDesk older than the agent shell."""
+    try:
+        return await desks.call(held, "shell", {"command": given.command} | ({} if given.timeout_s is None else {"timeout_s": given.timeout_s}))
+    except Exception as failed:  # noqa: BLE001
+        return _refused(call, failed)
+
+
+def _shell_said(text: str) -> JsonObject:
+    """The PC answers a command's exit code and output, or a job's state, as a JSON object in its text: the agent reads them as fields."""
+    try:
+        said = json.loads(text)
+    except ValueError:
+        return {"text": text}
+    return cast(JsonObject, said) if isinstance(said, dict) else {"text": text}
+
+
+async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
+    agent, graph, _ = _who(call)
+    if (given.job is None) == (given.command is None):
+        return call.refused("invalid_params", "desk/shell takes a command to run, or a job to read, not both")
+    held = desks.held_by(agent, graph)
+    pc = given.pc if given.pc is not None else None if held is None else held.pc
+    if pc is None:
+        return call.refused(UNSHARED, "desk/shell(pc, command) names a PC whose shell the operator allowed you (desk/pcs says where), or runs on the PC you joined; "
+                                      "you named none and hold no session")
+    entry = next((each for each in desks.entries() if each["name"] == pc), None)
+    if entry is None:
+        return call.refused(REFUSED, f"no RigDesk PC named {pc} is set up in Rig; desk/pcs lists those that are")
+    holds = held if held is not None and held.pc == pc else None
+    if entry["stock"]:
+        if holds is None:
+            return call.refused(REFUSED, f"{pc} runs stock RustDesk, which runs commands only in a joined session: desk/join it, then call desk/shell without pc")
+        if given.run_as == "system" or given.background or given.job is not None:
+            return call.refused(REFUSED, f"{pc} runs stock RustDesk: commands run in its RustDesk terminal as its user, with no jobs")
+        return await _shell_in_session(desks, call, holds, given)
+    level = _shell_level(desks, pc, agent, graph)
+    if level is None:
+        return call.refused(SHELL_NOT_ALLOWED, f"the operator has not allowed you the agent shell on {pc}; they allow an agent or a graph, as the user or as SYSTEM, "
+                                               "on the RigDesk page. desk/pcs says where you may run one.")
+    run_as = given.run_as or level
+    if level != "system" and (run_as == "system" or given.background or given.job is not None):
+        return call.refused(SYSTEM_NOT_GRANTED, f"on {pc} you may run commands as its signed-in user only (as: user): running as SYSTEM, and background jobs, "
+                                                "need the operator's SYSTEM grant on the RigDesk page")
+    try:
+        status, said = await desks.shell(pc, agent, graph, await call.kernel.caller_title(), _shell_asked(given, run_as))
+    except Exception as failed:  # noqa: BLE001
+        return _refused(call, failed)
+    if status == HTTPStatus.OK:
+        return {"pc": pc, "as": None if given.job is not None else run_as, "ok": said.get("ok") is True} | _shell_said(str(said.get("text") or ""))
+    code, words = str(said.get("code") or ""), str(said.get("error") or f"HTTP {status}")
+    if code == "no_lane" and holds is not None and run_as == "user" and not given.background:
+        return await _shell_in_session(desks, call, holds, given)
+    if code in PC_SHELL_CODES:
+        return call.refused(PluginCode(f"{ID}.{code}"), f"{pc}: {words}")
+    return call.refused(REFUSED, f"{pc} refused the command ({code or status}): {words}")
 
 
 async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
@@ -150,7 +279,19 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     if entry is None:
         return call.refused(REFUSED, f"no RigDesk PC named {given.pc} is set up in Rig; desk/pcs lists those that are")
     if not entry["stock"]:
-        return call.refused(REFUSED, f"{given.pc} runs RigDesk: only the human in its viewer shares it; ask them for a share link and call desk/join with it")
+        if given.kind == "assign":
+            return call.refused(REFUSED, f"{given.pc} runs RigDesk, which is not assigned standing access; ask with kind join for one session, or ask the human there for a share link")
+        holder = entry["held_by"]
+        if holder is not None and holder["agent_id"] != agent:
+            return call.refused(REFUSED, f"{holder['title']} holds {given.pc} now; ask again once they leave or the share ends")
+        try:
+            switch = await desks.join_switch(given.pc)
+        except Exception as failed:  # noqa: BLE001
+            return _refused(call, failed)
+        if switch is None:
+            return call.refused(REFUSED, f"{given.pc}'s RigDesk is too old for sessions started from Rig; ask the human there for a share link and call desk/join with it")
+        if not switch.get("open"):
+            return call.refused(REFUSED, f"{given.pc}: {switch.get('words')} ({switch.get('code')}); ask the human there for a share link instead")
     assigned = given.pc in desks.assigned_pcs(agent, graph)
     if given.kind == "assign" and assigned:
         return call.refused(REFUSED, f"{given.pc} is already assigned to you: desk/join(pc) joins it")
@@ -160,18 +301,20 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     if given.kind == "join" and held is not None and held.pc == given.pc:
         return call.refused(REFUSED, f"you already own the session on {given.pc}")
     seat, asked = call.contract.place.seat, new_id("desk")
-    lets = ("Accept joins it to that PC now, for one session: until it leaves, or you end the share." if given.kind == "join" else
+    lets = ("Accept starts its session on that RigDesk PC now, with no share link: until it leaves, or the person at the PC ends it from RigDesk's tray "
+            "icon, where they are told who it is." if not entry["stock"] else
+            "Accept joins it to that PC now, for one session: until it leaves, or you end the share." if given.kind == "join" else
             "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the RigDesk page.")
     wants = "to join" if given.kind == "join" else "a standing grant to"
     reason = f"{title} ({agent}, in {graph}) asks {wants} RigDesk PC {given.pc}:\n\n{given.why.strip()}\n\n{lets}"[:2000]
     state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                     Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind}))
+                                     Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind, "ask": asked}))
     return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
             "said": "Nothing is granted yet: the operator is asked to Accept, and the decision arrives as your next input."}
 
 
 async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
-    """The operator's Accept: the agent that asked joins the PC now, or is assigned it, if it still stands at its seat and the PC is still stock."""
+    """The operator's Accept: the agent that asked joins the PC now, or is assigned a stock PC, if it still stands at its seat."""
     given = REQUESTED.validate_python(asked["given"])
     seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
     identity = await host.roster.identity(seat)
@@ -180,7 +323,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
     desks = host.live(Desks)
     try:
         if given["kind"] == "join":
-            held = await desks.join_approved(given["pc"], given["agent"], given["graph"], seat.node, identity.label)
+            held = await desks.join_approved(given["pc"], given["agent"], given["graph"], seat.node, identity.label, given.get("ask", ""))
             return f"You joined {held.pc}: its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there."
         changed = await desks.assign(given["pc"], f"agent:{given['agent']}")
     except DeskRefused as refused:
@@ -222,7 +365,7 @@ def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
     words, schema, read_only = _upstream(tool, listed)
     return ToolDef(f"{BRANCH}/{tool}", f"On the RigDesk PC you joined: {words}", PassInput, DeskAnswer, run, run, read_only=read_only, plugin=plugin_capability(ID),
                    denied_alone=(CAPABILITY, mcp_capability(BRANCH, tool)), upstream_schema=schema, gloss=gloss_of(words),
-                   limit_s=CALL_LIMIT_S + SHELL_LIMIT_S + 10 if tool == "shell" else CALL_LIMIT_S + 10)
+                   limit_s=CALL_LIMIT_S + 10)
 
 
 def _served(desks: Desks, server: PcServer, listed: dict[str, Any]) -> ToolDef:
@@ -244,21 +387,25 @@ def _served(desks: Desks, server: PcServer, listed: dict[str, Any]) -> ToolDef:
                    gloss=gloss_of(words), limit_s=MCP_CALL_LIMIT_S + 10)
 
 
-def _native[I: ToolInput](desks: Desks, tool: str, words: str, shape: type[I], handler: Any, read_only: bool = False) -> ToolDef:
+def _native[I: ToolInput](desks: Desks, tool: str, words: str, shape: type[I], handler: Any, read_only: bool = False, limit_s: float = TOOL_LIMIT_S) -> ToolDef:
     async def run(call: Call, given: ToolInput) -> Answer:
         if not isinstance(given, shape):
             return call.refused("invalid_params", f"{BRANCH}/{tool} takes {shape.__name__}")
         return await handler(desks, call, given)
     return ToolDef(f"{BRANCH}/{tool}", words, shape, DeskAnswer, run, run, read_only=read_only, plugin=plugin_capability(ID),
-                   denied_alone=(CAPABILITY, mcp_capability(BRANCH, tool)), gloss=gloss_of(words))
+                   denied_alone=(CAPABILITY, mcp_capability(BRANCH, tool)), gloss=gloss_of(words), limit_s=limit_s)
 
 
 def _built(desks: Desks) -> tuple[ToolDef, ...]:
     return (_native(desks, "join", "Join a RigDesk PC with the share link its human gave you (it works once), or a stock PC assigned to you by name; you then own its session alone.",
                     JoinInput, _join),
             _native(desks, "leave", "Leave the RigDesk PC you joined; its session ends.", LeaveInput, _leave),
-            _native(desks, "pcs", "Every RigDesk PC in Rig: its client, whether it is up, whether it is assigned to you, and who holds it now.", PcsInput, _pcs, read_only=True),
-            _native(desks, "request", "Ask the operator to let you join a stock RustDesk PC now (kind join), or to assign it to you (kind assign).", RequestInput, _request),
+            _native(desks, "pcs", "Every RigDesk PC in Rig: its client, whether it is up, whether it is assigned to you, who holds it now, whether you may run "
+                                  "commands there, and its health; with pc, that PC's newest health sample in full.", PcsInput, _pcs, read_only=True),
+            _native(desks, "shell", "Run a command on a RigDesk PC: named by pc, with no session and nothing on its screen, as SYSTEM or its user, where the operator "
+                                    "allowed you; unnamed, on the PC you joined. background starts a job; job reads one.", ShellInput, _shell,
+                    limit_s=CALL_LIMIT_S + SHELL_LIMIT_S + 10),
+            _native(desks, "request", "Ask the operator to let you join a PC now (kind join), or to assign a stock RustDesk PC to you (kind assign).", RequestInput, _request),
             _native(desks, "attachment", "An image the human sent you from the RigDesk viewer, as a PNG file you can read.", AttachmentInput, _attachment, read_only=True),
             *(_passed(desks, name, listed) for name, listed in desks.catalog().items() if name not in NATIVE),
             *(_served(desks, server, listed) for server in desks.pc_servers() for listed in server.tools))
@@ -347,6 +494,52 @@ class PcMcpRow(View):
     servers: tuple[PcServerRow, ...] = Field(description="The servers open for the agent holding the PC now.")
 
 
+class ShellSwitchRow(View):
+    open: bool
+    code: str | None = Field(description="Why it is closed: shell_off (the install line or the PC's settings) or shell_paused (the person at the PC).")
+    words: str | None
+
+
+class ShellGrantRow(GrantRow):
+    level: ShellLevel = Field(description="user: as the signed-in user; system: as SYSTEM too, and background jobs.")
+
+
+class PcShellRow(View):
+    switch: ShellSwitchRow | None = Field(description="The PC's own switch, as it last said; null for a RigDesk without the agent shell.")
+    granted: tuple[ShellGrantRow, ...] = Field(description="Who may run commands there with no session; an agent holding the PC's session may as the user.")
+
+
+class CheckRow(View):
+    name: str
+    state: Literal["warn", "fault", "stale"]
+    words: str
+
+
+class VolumeRow(View):
+    name: str
+    free_pct: float
+    free_mb: int
+    total_mb: int
+
+
+class HealthFiguresRow(View):
+    volumes: tuple[VolumeRow, ...]
+    ram_used_pct: float | None
+    cpu_pct: float | None
+    build: str
+    uptime_s: int
+    pending_reboot: bool | None
+
+
+class PcHealthRow(View):
+    state: Literal["ok", "warn", "fault", "stale"] | None = Field(description="Rig's verdict on the newest sample; null while Rig holds none.")
+    failing: tuple[CheckRow, ...]
+    why: str | None = Field(description="Why samples are not being read, when they are not.")
+    sample_ms: int | None
+    rigdesk: str | None = Field(description="The RigDesk version that took the newest sample.")
+    figures: HealthFiguresRow | None
+
+
 class PcRow(View):
     name: str
     client: str
@@ -360,6 +553,8 @@ class PcRow(View):
     owned_here: bool = Field(description="The owner joined through this Rig.")
     assigned: tuple[GrantRow, ...] = Field(description="Who holds a standing grant to it; a stock PC only.")
     mcp: PcMcpRow = Field(description="The MCP servers running on the PC, as they reach the agent holding it.")
+    shell: PcShellRow | None = Field(description="A RigDesk PC's agent shell: its switch and who may use it; null for a stock PC.")
+    health: PcHealthRow | None = Field(description="A RigDesk PC's health; null for a stock PC.")
 
 
 class ListenerRow(View):
@@ -412,8 +607,13 @@ async def get_pcs(request: Request[NoParams]) -> PcsView:
     host = request.host()
     desks = host.live(Desks)
     rows = desks.pcs()
-    labels = {grantee: await _grant_row(host, grantee) for grantee in {each for row in rows for each in row["assigned"]}}
-    return PcsView(pcs=tuple(PcRow.model_validate(row | {"assigned": tuple(labels[each] for each in row["assigned"])}) for row in rows),
+    named: set[str] = {each for row in rows for each in (*row["assigned"], *desks.shell_granted(row["name"]))}
+    labels = {grantee: await _grant_row(host, grantee) for grantee in named}
+
+    def shell(row: dict[str, Any]) -> dict[str, Any] | None:
+        kept = row["shell"]
+        return None if kept is None else kept | {"granted": tuple(ShellGrantRow(**labels[grantee].model_dump(), level=level) for grantee, level in kept["granted"].items())}
+    return PcsView(pcs=tuple(PcRow.model_validate(row | {"assigned": tuple(labels[each] for each in row["assigned"]), "shell": shell(row)}) for row in rows),
                    id_server=await asyncio.to_thread(_id_server_row, desks), for_fleet=desks.for_fleet)
 
 
@@ -486,6 +686,72 @@ async def post_assign(request: Request[AssignParams]) -> AssignDone | RefusedOut
     except DeskRefused as refused:
         return request.refused(REFUSED, str(refused))
     return AssignDone(changed=changed)
+
+
+class ShellGrantBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", defer_build=True)
+    pc: str
+    grantee: Grantee
+    level: ShellLevel | None = Field(description="user or system; null takes the grant away.")
+
+
+class ShellGrantParams(Params):
+    body: ShellGrantBody
+
+
+@endpoint(ShellGrantParams, OPERATOR)
+async def post_shell_grant(request: Request[ShellGrantParams]) -> AssignDone | RefusedOutcome:
+    """Lets one agent, or every agent in a graph, run commands on a RigDesk PC's agent shell as the user or as SYSTEM, or takes that away."""
+    body = request.params.body
+    try:
+        changed = await request.host().live(Desks).allow_shell(body.pc, body.grantee, body.level)
+    except DeskRefused as refused:
+        return request.refused(REFUSED, str(refused))
+    return AssignDone(changed=changed)
+
+
+class PcParams(Params):
+    pc: DeskName
+
+
+class HealthView(View):
+    sample: dict[str, Any] | None = Field(description="The newest sample in full, as the PC took it; null while Rig holds none.")
+    series: tuple[dict[str, Any], ...] = Field(description="The week's free space per volume, in percent, oldest first: {at_ms, free_pct: {volume: pct}}.")
+
+
+@endpoint(PcParams, OPERATOR)
+async def get_health(request: Request[PcParams]) -> HealthView:
+    """One PC's newest health sample and its week of free space, for its opened row."""
+    history = request.host().live(Desks).history(request.params.pc)
+    return HealthView(sample=figures_json(history[-1]) if history else None, series=tuple(series(history)))
+
+
+class ShellRan(View):
+    at_ms: int
+    who: str = Field(description="The agent, as title (id).")
+    graph: str | None
+    run_as: Literal["system", "user"] | None = Field(alias="as")
+    command: str
+    outcome: str = Field(description="exit N, timed out, started, refused: <code>, failed.")
+    took_ms: int | None
+    job: str | None
+
+
+class ShellRanView(View):
+    ran: tuple[ShellRan, ...] = Field(description="The PC's newest agent-shell commands from its own journal, newest first.")
+
+
+@endpoint(PcParams, OPERATOR)
+async def get_shell_ran(request: Request[PcParams]) -> ShellRanView | RefusedOutcome:
+    """What agents ran on a PC's agent shell, read from the PC's journal when its row is open."""
+    pc = request.params.pc
+    try:
+        ran = await request.host().live(Desks).shell_ran(pc)
+    except DeskRefused as refused:
+        return request.refused(REFUSED, str(refused))
+    except (aiohttp.ClientError, TimeoutError, OSError) as failed:
+        return request.refused(DOWN, f"{pc} did not answer: {failure(failed)}")
+    return ShellRanView(ran=tuple(ShellRan.model_validate(each) for each in ran))
 
 
 class ScreenshotBody(BaseModel):
@@ -591,14 +857,26 @@ async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
     lines = () if server is None else (StatusLine(text=f"RigDesk ID server {server['host']}: " + ", ".join(
         f"{each['role']} {each['state']}" + (f" ({each['why']})" if each["why"] else "") for each in server["listeners"])),)
     return (*lines, *(StatusLine(text=f"RigDesk {row['name']}: {row['state']}" + (f" ({row['why']})" if row["why"] else ""))
-                      for row in desks.pcs() if row["state"] == "down"))
+                      for row in desks.pcs() if row["state"] == "down"),
+            *(StatusLine(text=f"RigDesk {entry['name']}: health fault ({entry['health'].said})")
+              for entry in desks.entries() if entry["health"] is not None and entry["health"].state == "fault"))
+
+
+EVENTS = (EventSpec(PC_HEALTH, "A RigDesk PC's health, as Rig judges its newest figures, moved: published once per change", "pc", (
+    EventField(name="state", type="state", values=STATES, description="ok, warn, fault, or stale: no sample for a while though the PC is up"),
+    EventField(name="was", type="state", values=STATES, description="Its health before"),
+    EventField(name="failing", type="text", description="Each failing check in words, joined by '; '; empty when ok"),
+    EventField(name="client", type="text", description="The client the PC belongs to"))),)
 
 
 CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, status=_status,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
-    refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN},
+    refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN, SHELL_NOT_ALLOWED: HTTPStatus.FORBIDDEN,
+                   SYSTEM_NOT_GRANTED: HTTPStatus.FORBIDDEN, **{f"{ID}.{code}": status for code, status in PC_SHELL_CODES.items()}},
+    events=EVENTS,
     provisions=(provider(REQUEST_CONFIRMED, _request_confirmed),),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
-            RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "screenshot", post_screenshot)))
+            RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "screenshot", post_screenshot),
+            RouteContribution("POST", "shell_grant", post_shell_grant), RouteContribution("GET", "health", get_health), RouteContribution("GET", "shell_ran", get_shell_ran)))

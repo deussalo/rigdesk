@@ -3,23 +3,42 @@
 //!   cargo run -p rigdesk-agent --example fake_desk -- <port> <bearer>
 //!
 //! It prints `listening <port>`, then reads the viewer's side from stdin, one command a line:
-//! `mint` (prints `link <grant> <secret>`), `hand`, `human`, `block`, `unblock`, `revoke`, `msg <text>` (sent with one image).
+//! `mint` (prints `link <grant> <secret>`), `hand`, `human`, `block`, `unblock`, `revoke`, `msg <text>` (sent with one image),
+//! `shell on|off` (the PC's agent-shell switch), `pause on|off` (the person's pause), `reboot` (a new boot id), `sample` (a health sample now),
+//! `join on|off|paused` (the PC's switch for sessions the operator starts from Rig; on at start), `end` (the person at the PC ends that session).
+//!
+//! Its management lane runs commands through `sh` as the user running it. It keeps its journal, jobs and health samples in
+//! `$FAKE_DESK_DIR` (a fresh temp directory if unset), so they outlive a restart, and samples every `$FAKE_DESK_HEALTH_S`
+//! seconds (600 if unset) from `$FAKE_DESK_FIGURES`, a file of figures (a Windows PC's if unset).
 
+#[cfg(target_os = "linux")]
 use std::io::BufRead;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use base64::Engine;
-use rigdesk_agent::{Api, Called, Content, Desk, Events, Journal, Shared, ToolSpec};
+#[cfg(target_os = "linux")]
+use rigdesk_agent::{
+    health::{self, Collector, Samples},
+    manage::{Lane, ShRunner},
+    Api, Called, Content, Desk, Events, Journal, Shared, ToolSpec,
+};
+#[cfg(target_os = "linux")]
 use serde_json::{json, Value};
 
+#[cfg(target_os = "linux")]
 const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
+#[cfg(target_os = "linux")]
 fn pixel() -> Vec<u8> {
     base64::engine::general_purpose::STANDARD.decode(PIXEL).unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
 struct FakeDesk;
 
+#[cfg(target_os = "linux")]
 impl Desk for FakeDesk {
     fn tools(&self) -> Vec<ToolSpec> {
         vec![
@@ -47,13 +66,43 @@ impl Desk for FakeDesk {
     }
 }
 
+#[cfg(target_os = "linux")]
+struct JoinSwitch(std::sync::Mutex<Result<(), rigdesk_agent::operator::Closed>>);
+
+#[cfg(target_os = "linux")]
+impl rigdesk_agent::operator::Switch for JoinSwitch {
+    fn open(&self) -> Result<(), rigdesk_agent::operator::Closed> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
     let port: u16 = args.next().and_then(|p| p.parse().ok()).unwrap_or(0);
     let bearer = args.next().unwrap_or_else(|| "fake".into());
     let shared = Arc::new(Shared::new(Events::new(256)));
-    let api = Api::new(shared.clone(), Arc::new(FakeDesk), Arc::new(Journal::memory()), &bearer, Some(rigdesk_agent::Found::new([port], true)));
+    let dir = std::env::var_os("FAKE_DESK_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join(format!("fake-desk-{:08x}", rand::random::<u32>())));
+    let journal = Arc::new(Journal::open(dir.join("actions.jsonl"), 8 << 20));
+    let api = Api::new(shared.clone(), Arc::new(FakeDesk), journal.clone(), &bearer, Some(rigdesk_agent::Found::new([port], true)));
+    let runner = Arc::new(ShRunner::new());
+    let lane = Lane::new(runner.clone(), dir.join("shell"), shared.clone(), journal);
+    let figures = match std::env::var_os("FAKE_DESK_FIGURES") {
+        Some(path) => std::fs::canonicalize(path)?.display().to_string(),
+        None => {
+            let path = dir.join("figures.json");
+            std::fs::write(&path, include_str!("../tests/fixtures/figures-windows.json"))?;
+            path.display().to_string()
+        }
+    };
+    let script: &'static str = Box::leak(format!("cat '{figures}'").into_boxed_str());
+    let interval = std::env::var("FAKE_DESK_HEALTH_S").ok().and_then(|s| s.parse().ok()).map_or(health::INTERVAL, std::time::Duration::from_secs);
+    let samples = Arc::new(Samples::open(Some(dir.join("health.jsonl"))));
+    let collector = Arc::new(Collector { lane: lane.clone(), shared: shared.clone(), samples, script, dir: dir.join("health"), rigdesk: "fake".into(), interval });
+    api.manage(lane, Some(collector.clone()));
+    let joins = Arc::new(JoinSwitch(std::sync::Mutex::new(Ok(()))));
+    api.operator_joins(joins.clone());
     let bound = api.serve(port).await?;
     println!("listening {bound}");
     let viewer = shared.clone();
@@ -72,6 +121,28 @@ async fn main() -> std::io::Result<()> {
                 "unblock" => format!("ok {}", viewer.unblock()),
                 "revoke" => format!("ok {}", viewer.revoke("the viewer revoked the share")),
                 "msg" => format!("ok {}", viewer.events.message(rest.to_string(), vec![pixel()])),
+                "shell" => {
+                    runner.on.store(rest == "on", std::sync::atomic::Ordering::SeqCst);
+                    format!("ok {}", rest == "on")
+                }
+                "pause" => {
+                    runner.paused.store(rest == "on", std::sync::atomic::Ordering::SeqCst);
+                    format!("ok {}", rest == "on")
+                }
+                "reboot" => {
+                    *runner.boot.lock().unwrap() = format!("boot-{:08x}", rand::random::<u32>());
+                    "ok true".into()
+                }
+                "sample" => format!("ok {}", collector.take().id),
+                "join" => {
+                    *joins.0.lock().unwrap() = match rest {
+                        "on" => Ok(()),
+                        "paused" => Err(rigdesk_agent::operator::Closed::Paused),
+                        _ => Err(rigdesk_agent::operator::Closed::Off("the install line turned it off (-AgentJoin off)".into())),
+                    };
+                    format!("ok {rest}")
+                }
+                "end" => format!("ok {}", viewer.operator_owner().map_or(false, |owner| viewer.end_operator(&owner.agent_id))),
                 _ => format!("unknown {verb}"),
             };
             println!("{said}");
@@ -80,4 +151,9 @@ async fn main() -> std::io::Result<()> {
     .await
     .ok();
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("fake_desk runs its management lane through sh, on Linux only");
 }

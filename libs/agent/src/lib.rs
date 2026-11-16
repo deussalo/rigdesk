@@ -5,9 +5,12 @@
 pub mod desk;
 pub mod events;
 pub mod found;
+pub mod health;
 pub mod http;
 pub mod journal;
+pub mod manage;
 pub mod mcp;
+pub mod operator;
 pub mod relay;
 pub mod session;
 pub mod shell;

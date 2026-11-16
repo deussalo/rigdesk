@@ -15,10 +15,15 @@
 //!   POST /viewer/note {text, pngs: [base64]} - from `Api::hosted`: the human's message to the owning agent
 //!   GET  /frame?display=N  - a PNG of the PC's screen now, for the bearer's holder: the human to clip and draw on, or the operator's
 //!        screenshot on demand; journaled
-//!   GET  /health           - liveness, this process's boot id and the current standing
+//!   GET  /health           - liveness, this process's boot id, the current standing, and whether the agent shell is open
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 //!   GET  /servers          - the MCP servers found on the PC while an agent is connected, and whether MCP is on
 //!   POST /servers/<name>/mcp - MCP to that server, forwarded to its loopback port; X-Desk-Session as for /mcp
+//!   POST /shell {agent, command, timeout_s, as, background} or {agent, job} - the management lane (see `manage`): no
+//!        session, admitted by the PC's agent-shell switch and the human's Block on that agent; only where the host offers it
+//!   GET  /samples?after=ID - the PC's health samples after ID (see `health`); only where the host offers them
+//!   POST /join {agent, ask} - a session the operator accepted in Rig, with no share link (see `operator`): admitted by the
+//!        PC's own switch, refused while another agent holds the session or for a blocked agent; only where the host offers it
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -39,7 +44,9 @@ use tokio::sync::mpsc;
 use crate::desk::Desk;
 use crate::events::{Event, EventKind};
 use crate::found::Found;
+use crate::health::Collector;
 use crate::journal::{Entry, Journal};
+use crate::manage::Lane;
 use crate::mcp::Mcp;
 use crate::session::{Owner, Shared};
 
@@ -54,6 +61,9 @@ pub struct Api {
     boot: String,
     viewer_routes: bool,
     found: Option<Arc<Found>>,
+    lane: std::sync::OnceLock<Arc<Lane>>,
+    collector: std::sync::OnceLock<Arc<Collector>>,
+    operator: std::sync::OnceLock<Arc<dyn crate::operator::Switch>>,
 }
 
 fn full(bytes: impl Into<Bytes>) -> Body {
@@ -75,6 +85,20 @@ fn mcp_reads(method: &str, message: &Value) -> bool {
     answer || matches!(method, "initialize" | "ping") || method.starts_with("notifications/") || method.ends_with("/list")
 }
 
+/// Reads and drops a body the route has no use for, up to 64 KiB. Left unread, hyper closes the connection after the
+/// answer, and a client that sent `Expect: 100-continue` (Windows PowerShell's Invoke-RestMethod) sends its body, or its
+/// next request, into a connection it was told to keep.
+async fn drain(request: &mut Request<Incoming>) {
+    let mut left = 64usize << 10;
+    while let Some(Ok(frame)) = request.body_mut().frame().await {
+        match frame.data_ref().map(|data| data.len()) {
+            Some(n) if n >= left => break,
+            Some(n) => left -= n,
+            None => {}
+        }
+    }
+}
+
 fn text(status: StatusCode, body: &str) -> Response<Body> {
     Response::builder().status(status).body(full(body.to_string())).unwrap_or_else(|_| Response::new(full("")))
 }
@@ -84,14 +108,27 @@ impl Api {
     pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, found })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default() })
     }
 
     /// As `new`, plus the `/viewer/*` routes: the human's share and holder buttons, for a host with no RigDesk viewer.
     pub fn hosted(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, found: None })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, found: None, lane: Default::default(), collector: Default::default(), operator: Default::default() })
+    }
+
+    /// Offers the management lane at /shell and, with a collector, health samples at /samples. Before `serve`, once.
+    pub fn manage(&self, lane: Arc<Lane>, collector: Option<Arc<Collector>>) {
+        let _ = self.lane.set(lane);
+        if let Some(collector) = collector {
+            let _ = self.collector.set(collector);
+        }
+    }
+
+    /// Offers `/join`, sessions the operator starts from Rig, admitted by `switch`. Before `serve`, once.
+    pub fn operator_joins(&self, switch: Arc<dyn crate::operator::Switch>) {
+        let _ = self.operator.set(switch);
     }
 
     fn bearer_ok(&self, request: &Request<Incoming>) -> bool {
@@ -113,6 +150,12 @@ impl Api {
         if let Some(found) = &self.found {
             tokio::spawn(found.clone().watch(self.shared.clone()));
         }
+        if let Some(lane) = self.lane.get() {
+            tokio::spawn(crate::manage::sweep_forever(lane.clone()));
+        }
+        if let Some(collector) = self.collector.get() {
+            tokio::spawn(collector.clone().run_forever());
+        }
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else { continue };
@@ -129,22 +172,36 @@ impl Api {
         Ok(bound)
     }
 
-    async fn route(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+    async fn route(self: Arc<Self>, mut request: Request<Incoming>) -> Response<Body> {
         let path = request.uri().path().to_string();
         if !self.bearer_ok(&request) {
             return text(StatusCode::UNAUTHORIZED, "bad bearer token");
         }
         let method = request.method().clone();
         match (method.as_str(), path.as_str()) {
-            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "standing": self.shared.standing(), "down": self.shared.down()})),
+            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "standing": self.shared.standing(), "down": self.shared.down(),
+                                                                  "shell": self.lane.get().map(|lane| lane.switch()),
+                                                                  "join": self.operator.get().map(|switch| crate::operator::said(switch.as_ref()))})),
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
-            ("POST", "/leave") => self.leave(&request),
+            ("POST", "/leave") => {
+                drain(&mut request).await;
+                self.leave(&request)
+            }
             ("GET", "/log") => {
                 let n = query_number(request.uri().query(), "n").unwrap_or(200).min(5000);
                 json_response(StatusCode::OK, &json!({"entries": self.journal.tail(n)}))
             }
             ("GET", "/events") => self.events(request),
+            ("POST", "/shell") => self.shell(request).await,
+            ("POST", "/join") => self.join(request).await,
+            ("GET", "/samples") => match self.collector.get() {
+                Some(collector) => {
+                    let after = query_number(request.uri().query(), "after").unwrap_or(0) as u64;
+                    json_response(StatusCode::OK, &json!({"samples": collector.samples.after(after)}))
+                }
+                None => text(StatusCode::NOT_FOUND, "this PC's RigDesk takes no health samples"),
+            },
             ("GET", "/frame") => self.frame(request).await,
             ("GET", "/servers") => match &self.found {
                 Some(found) => json_response(StatusCode::OK, &json!({"on": found.on(), "servers": found.servers()})),
@@ -155,10 +212,12 @@ impl Api {
                 self.forward(request, &name).await
             }
             ("POST", "/debug/mint") if std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
+                drain(&mut request).await;
                 let minted = self.shared.mint();
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
             }
             ("POST", p) if p.starts_with("/debug/viewer/") && std::env::var("RIGDESK_AGENT_DEBUG_MINT").is_ok() => {
+                drain(&mut request).await;
                 // The viewer's buttons, for the CI smoke test only: the same calls the viewer makes over the peer protocol.
                 let done = match p.trim_start_matches("/debug/viewer/") {
                     "hand" => self.shared.hand_to_agent(),
@@ -170,11 +229,13 @@ impl Api {
                 json_response(StatusCode::OK, &json!({"changed": done, "standing": self.shared.standing()}))
             }
             ("POST", "/viewer/mint") if self.viewer_routes => {
+                drain(&mut request).await;
                 let minted = self.shared.mint();
                 json_response(StatusCode::OK, &json!({"grant": minted.grant, "secret": minted.secret}))
             }
             ("POST", "/viewer/note") if self.viewer_routes => self.note(request).await,
             ("POST", p) if p.starts_with("/viewer/") && self.viewer_routes => {
+                drain(&mut request).await;
                 let done = match p.trim_start_matches("/viewer/") {
                     "hand" => self.shared.hand_to_agent(),
                     "human" => self.shared.human_input("the operator"),
@@ -187,7 +248,10 @@ impl Api {
                 json_response(StatusCode::OK, &json!({"changed": done, "standing": self.shared.standing()}))
             }
             ("GET", p) if p.starts_with("/attachments/") => self.attachment(&request, p),
-            ("POST", p) if p.starts_with("/attachments/") && p.ends_with("/ack") => self.ack(&request, p),
+            ("POST", p) if p.starts_with("/attachments/") && p.ends_with("/ack") => {
+                drain(&mut request).await;
+                self.ack(&request, p)
+            }
             _ => text(StatusCode::NOT_FOUND, "no such route"),
         }
     }
@@ -341,6 +405,54 @@ impl Api {
                 self.journal.record(&Entry::new(owner.who(), "claim", "refused", json!({"reason": refusal.words()})));
                 json_response(StatusCode::FORBIDDEN, &json!({"error": refusal.words()}))
             }
+        }
+    }
+
+    async fn join(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+        let Some(switch) = self.operator.get().cloned() else {
+            return json_response(StatusCode::NOT_FOUND, &json!({"error": "this PC's RigDesk takes no sessions started from Rig", "code": "no_join"}));
+        };
+        let Some(body) = Self::body_json(request).await else {
+            return json_response(StatusCode::BAD_REQUEST, &json!({"error": "join wants a JSON body", "code": "bad_request"}));
+        };
+        let (owner, ask) = match crate::operator::request(&body) {
+            Ok(read) => read,
+            Err(why) => return json_response(StatusCode::BAD_REQUEST, &json!({"error": why, "code": "bad_request"})),
+        };
+        let joined = switch.open().map_err(crate::operator::Refused::Closed).and_then(|()| self.shared.join_operator(owner.clone()));
+        let detail = json!({"graph": owner.graph, "ask": ask, "by": "Rig, operator-approved"});
+        match joined {
+            Ok(token) => {
+                self.journal.record(&Entry::new(owner.who(), "join", "ok", detail));
+                json_response(StatusCode::OK, &json!({"session": token, "standing": self.shared.standing()}))
+            }
+            Err(refused) => {
+                self.journal.record(&Entry::new(owner.who(), "join", format!("refused: {}", refused.code()), detail));
+                json_response(StatusCode::FORBIDDEN, &json!({"error": refused.words(), "code": refused.code()}))
+            }
+        }
+    }
+
+    async fn shell(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+        let Some(lane) = self.lane.get().cloned() else {
+            return json_response(StatusCode::NOT_FOUND, &json!({"error": "this PC's RigDesk has no agent shell lane", "code": "no_lane"}));
+        };
+        let Some(body) = Self::body_json(request).await else {
+            return json_response(StatusCode::BAD_REQUEST, &json!({"error": "shell wants a JSON body", "code": "bad_request"}));
+        };
+        let (owner, asked) = match crate::manage::request(&body) {
+            Ok(read) => read,
+            Err(why) => return json_response(StatusCode::BAD_REQUEST, &json!({"error": why, "code": "bad_request"})),
+        };
+        // A command blocks for as long as it runs, so it must not run on the reactor.
+        let served = tokio::task::spawn_blocking(move || lane.serve(&owner, asked)).await;
+        match served {
+            Ok(Ok(answer)) => json_response(StatusCode::OK, &json!(answer)),
+            Ok(Err(refused)) => {
+                let status = if matches!(refused, crate::manage::Refused::NoJob(_)) { StatusCode::NOT_FOUND } else { StatusCode::FORBIDDEN };
+                json_response(status, &json!({"error": refused.words(), "code": refused.code()}))
+            }
+            Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": format!("the shell handler panicked: {e}"), "code": "panicked"})),
         }
     }
 
@@ -575,6 +687,66 @@ mod tests {
         let refused = post(port, "/mcp", &token, &call).await;
         assert_eq!(refused["result"]["isError"], json!(true));
         assert!(shared.standing().owner.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_route_with_no_use_for_the_body_keeps_the_connection_for_a_client_that_waits_to_send_it() {
+        // Windows PowerShell's Invoke-RestMethod: Expect: 100-continue, the body only after 100 Continue or ~350 ms.
+        let api = Api::new(Arc::new(Shared::new(Events::new(64))), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
+        let port = api.serve(0).await.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(b"POST /leave HTTP/1.1\r\nhost: x\r\nauthorization: Bearer b\r\ncontent-type: application/json\r\ncontent-length: 2\r\nexpect: 100-continue\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        stream.write_all(b"{}").await.unwrap();
+        stream.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nauthorization: Bearer b\r\nconnection: close\r\n\r\n").await.unwrap();
+        let mut answer = String::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_to_string(&mut answer)).await;
+        assert!(answer.contains("403 Forbidden"), "{answer}");
+        assert!(answer.contains("\"boot\""), "the connection closed after /leave: {answer}");
+    }
+
+    struct Toggle(std::sync::Mutex<Result<(), crate::operator::Closed>>);
+    impl crate::operator::Switch for Toggle {
+        fn open(&self) -> Result<(), crate::operator::Closed> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rigs_bearer_starts_a_session_only_while_the_pcs_switch_is_open() {
+        let dir = std::env::temp_dir().join(format!("rigdesk-http-{}", rand::random::<u32>()));
+        let shared = Arc::new(Shared::new(Events::new(64)));
+        let journal = Arc::new(Journal::open(dir.join("a.jsonl"), 1 << 20));
+        let api = Api::new(shared.clone(), Arc::new(NoDesk), journal.clone(), "b", None);
+        let switch = Arc::new(Toggle(std::sync::Mutex::new(Err(crate::operator::Closed::Off("rerun the install line".into())))));
+        api.operator_joins(switch.clone());
+        let port = api.serve(0).await.unwrap();
+        let join = json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk-1"});
+        assert_eq!(post(port, "/join", "", &join).await["code"], json!("join_off"));
+        *switch.0.lock().unwrap() = Err(crate::operator::Closed::Paused);
+        assert_eq!(post(port, "/join", "", &join).await["code"], json!("join_paused"));
+        *switch.0.lock().unwrap() = Ok(());
+        let joined = post(port, "/join", "", &join).await;
+        let token = joined["session"].as_str().unwrap().to_string();
+        let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "type", "arguments": {}}});
+        assert_eq!(post(port, "/mcp", &token, &call).await["result"]["isError"], json!(false));
+        let other = json!({"agent": {"id": "a2", "title": "Other", "graph": "g"}, "ask": "desk-2"});
+        let held = post(port, "/join", "", &other).await;
+        assert_eq!(held["code"], json!("held"));
+        assert!(held["error"].as_str().unwrap().contains("Helper holds"));
+        let joins: Vec<String> = journal.tail(20).into_iter().filter(|e| e.what == "join").map(|e| e.outcome).collect();
+        assert_eq!(joins, vec!["refused: join_off", "refused: join_paused", "ok", "refused: held"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pc_without_operator_joins_says_so() {
+        let api = Api::new(Arc::new(Shared::new(Events::new(64))), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
+        let port = api.serve(0).await.unwrap();
+        assert_eq!(post(port, "/join", "", &json!({"agent": {"id": "a1"}})).await["code"], json!("no_join"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

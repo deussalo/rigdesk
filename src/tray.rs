@@ -80,6 +80,19 @@ fn make_tray() -> hbb_common::ResultType<()> {
     } else {
         tray_menu.append_items(&[&open_i]).ok();
     }
+    // While the agent shell is on, the PC says it is managed by Rig, lists what ran, and opens the PIN-locked pause.
+    #[cfg(windows)]
+    let managed_i = crate::platform::windows::agent_lane::digest_file()
+        .filter(|path| path.exists())
+        .map(|_| {
+            let list = MenuItem::new(translate("Managed by Rig: commands run here".to_owned()), true, None);
+            let pause = MenuItem::new(translate("Pause the agent shell...".to_owned()), true, None);
+            tray_menu.append_items(&[&list, &pause]).ok();
+            (list, pause)
+        });
+    // While an agent holds a session the operator started from Rig, the tray names it and can end it.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let mut operator_notice = crate::agent::notice::start();
     let tooltip = |count: usize| {
         if count == 0 {
             format!(
@@ -187,7 +200,25 @@ fn make_tray() -> hbb_common::ResultType<()> {
             }
         }
 
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        operator_notice.tick(&tray_menu);
+
         if let Ok(event) = menu_channel.try_recv() {
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            if operator_notice.clicked(&event) {
+                return;
+            }
+            #[cfg(windows)]
+            if let Some((list, pause)) = &managed_i {
+                if event.id == list.id() {
+                    crate::platform::windows::agent_lane::open_digest();
+                    return;
+                }
+                if event.id == pause.id() {
+                    open_func();
+                    return;
+                }
+            }
             if let Some(quit_i) = &quit_i {
                 if event.id == quit_i.id() {
                     /* failed in windows, seems no permission to check system process
