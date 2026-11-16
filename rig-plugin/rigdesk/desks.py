@@ -24,14 +24,28 @@ import aiohttp
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from core.base import event_log, now_ms, replace_file
+from core.event_kinds import EventField, StateSpec
 from core.model import AgentId, GraphName, RefusedOutcome, SeatId
 from core.node_data import Shape
 from core.plugin_host import LiveEnding, PluginHost, PluginWords
 from core.tasks import TASKS
 
-from .health import STATES, History, Health, State, Thresholds, health, samples_of
+from .health import STATES, History, Health, Thresholds, health, samples_of
 
 ID = "rigdesk"
+PC = f"{ID}.pc"
+PC_HEALTH = f"{ID}.pc_health"
+RENDEZVOUS = f"{ID}.rendezvous"
+_CLIENT = EventField(name="client", type="text", description="The client the PC belongs to")
+REPORTED = (
+    StateSpec(PC, "What Rig's link to a RigDesk PC is now: connecting, up when its agent API answers, down when it does not", "pc",
+              ("connecting", "up", "down"), "Why it is down, or how it answers", (_CLIENT,)),
+    StateSpec(PC_HEALTH, "A RigDesk PC's health, as Rig judges its newest figures: ok, warn, fault, or stale, no sample for a while though the PC "
+              "is up", "pc", STATES, "Each failing check in words, joined by '; '; every check passing when ok", (_CLIENT,)),
+    StateSpec(RENDEZVOUS, "What one of the ID server's daemons is now, up when it takes a TCP connection on its port: hbbs, the rendezvous "
+              "server, or hbbr, the relay", "server", ("up", "down"), "Why it is down, or where it answers",
+              (EventField(name="address", type="text", description="host:port it is asked at"),)),
+)
 _LOG = event_log(__name__)
 RETRY_S = (1.0, 2.0, 5.0, 10.0, 30.0)
 SETTINGS_EVERY_S = 5.0
@@ -377,8 +391,6 @@ class Desks:
         self._granting = asyncio.Lock()
         self._thresholds = Thresholds()
         self._history = History(self._dir / "health")
-        # The health each PC was last published at, so rigdesk.pc_health is emitted once per change, across restarts.
-        self._judged: dict[str, State] = {}
         self._read_state()
 
     # --- state kept across restarts ---
@@ -396,11 +408,10 @@ class Desks:
         self._boots = dict(kept.get("boots", {}))
         self._last = {pc: int(last) for pc, last in kept.get("last", {}).items()}
         self._catalog = {tool["name"]: tool for tool in kept.get("catalog", []) if isinstance(tool, dict) and "name" in tool}
-        self._judged = {pc: state for pc, state in cast(dict[str, State], kept.get("judged", {})).items() if state in STATES}
 
     def _write_state(self) -> None:
         kept = {"sessions": {pc: asdict(held) for pc, held in self._sessions.items()}, "boots": self._boots, "last": self._last,
-                "catalog": list(self._catalog.values()), "judged": self._judged}
+                "catalog": list(self._catalog.values())}
         replace_file(self._state_file, json.dumps(kept).encode(), new_mode=0o600, make_parents=True)
 
     # --- lifecycle ---
@@ -439,6 +450,7 @@ class Desks:
         self._bridge_bin = settings.bridge_bin
         if settings.id_server != self._id_server:
             self._listeners = () if settings.id_server is None else tuple(Listener(role, host, port) for role, host, port in settings.id_server.listeners())
+            self.host.forget(RENDEZVOUS, {listener.role for listener in self._listeners})
             self._probe_now.set()
         self._id_server = settings.id_server
         for pc in [pc for pc in self._sessions if pc not in settings.pcs]:
@@ -464,6 +476,14 @@ class Desks:
                 if spec.stock is not None:
                     link.remote = TASKS.spawn(f"rigdesk-bridge-{name}", self._remote(link, spec.stock))
                 link.task = TASKS.spawn(f"rigdesk-{name}", self._held(link))
+                self._linked(link)
+        self.host.forget(PC, self._pcs.keys())
+        self.host.forget(PC_HEALTH, self._pcs.keys())
+
+    def _linked(self, link: PcLink) -> None:
+        """The PC's link as it is now, told to Rig, which publishes a change of it and prints it in rig status."""
+        why = link.why or ("its agent API answers" if link.state == "up" else f"connecting to {link.spec.url}")
+        self.host.report(PC, link.name, link.state, why, {"client": link.spec.client})
 
     # --- standing grants, rigdesk's own fact ---
 
@@ -563,8 +583,7 @@ class Desks:
             except TimeoutError:
                 pass
 
-    @staticmethod
-    async def _probed(listener: Listener) -> None:
+    async def _probed(self, listener: Listener) -> None:
         try:
             _, writer = await asyncio.wait_for(asyncio.open_connection(listener.host, listener.port), PROBE_LIMIT_S)
         except TimeoutError:
@@ -579,6 +598,8 @@ class Desks:
             if state == "down":
                 _LOG.warning("rigdesk_id_server_down", f"RigDesk ID server: {listener.role} at {listener.address} is down: {why}", role=listener.role)
         listener.state, listener.why, listener.checked_ms = state, why, now_ms()
+        if listener in self._listeners:
+            self.host.report(RENDEZVOUS, listener.role, state, why or f"it takes connections at {listener.address}", {"address": listener.address})
 
     def id_server(self) -> dict[str, Any] | None:
         """The ID server and its daemons' health, for the page and rig status; None with no id_server set."""
@@ -743,6 +764,7 @@ class Desks:
                 link.down_since_ms = now_ms()
                 _LOG.warning("rigdesk_pc_down", f"RigDesk PC {link.name} is down: {why}", pc=link.name)
             link.state, link.why = "down", why
+            self._linked(link)
             self._resync(link)
             await asyncio.sleep(RETRY_S[min(tries, len(RETRY_S) - 1)])
             tries += 1
@@ -771,6 +793,7 @@ class Desks:
                 raise DeskRefused(f"/events answered HTTP {stream.status}")
             link.state, link.why, link.down_since_ms = "up", None, None
             self._reached(link, down if isinstance(down, str) else None)
+            self._linked(link)
             self._resync(link)
             if link.spec.stock is None:
                 TASKS.spawn(f"rigdesk-samples-{link.name}", self._catch_up(link, None))
@@ -819,12 +842,14 @@ class Desks:
             if link.state == "down":
                 _LOG.info("rigdesk_pc_up", f"RigDesk PC {link.name} answers again", pc=link.name)
             link.state, link.why, link.down_since_ms = "up", None, None
+            self._linked(link)
             return
         if link.state != "down":
             link.down_since_ms = now_ms()
             _LOG.warning("rigdesk_pc_down", f"RigDesk PC {link.name} is down: {down}", pc=link.name)
             self._resync(link)
         link.state, link.why = "down", down
+        self._linked(link)
 
     async def _event(self, link: PcLink, event: dict[str, Any]) -> None:
         pc, kind, event_id = link.name, event.get("type"), int(event.get("id") or 0)
@@ -906,19 +931,11 @@ class Desks:
         return health(newest, self._thresholds, now_ms(), link.state == "up")
 
     async def _judge(self) -> None:
-        """Publishes rigdesk.pc_health for each PC whose health moved since it was last published; a PC first judged ok says nothing."""
-        moved = False
-        for pc in sorted(self._pcs):
-            judged = self.judged(pc)
-            was = self._judged.get(pc)
-            if judged is None or judged.state == was or (was is None and judged.state == "ok"):
-                continue
-            self._judged[pc], moved = judged.state, True
-            link = self._pcs[pc]
-            self.host.emit(f"{ID}.pc_health", pc, {"state": judged.state, "was": was or "ok", "failing": judged.said, "client": link.spec.client})
-            _LOG.info("rigdesk_pc_health", f"RigDesk {pc}: health {judged.state}" + (f" ({judged.said})" if judged.failing else ""), pc=pc)
-        if moved:
-            await asyncio.to_thread(self._write_state)
+        """Each PC's health as judged now, told to Rig, which holds it, publishes a change of it and prints it in rig status; a PC Rig holds
+        no sample of is not told."""
+        for pc, link in sorted(self._pcs.items()):
+            if (judged := self.judged(pc)) is not None:
+                self.host.report(PC_HEALTH, pc, judged.state, judged.said if judged.failing else "every check passes", {"client": link.spec.client})
 
     def history(self, pc: str) -> list[Any]:
         return list(self._history.of(pc))

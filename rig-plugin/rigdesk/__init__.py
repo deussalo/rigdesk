@@ -17,11 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapte
 
 from core.ask_said import Confirmed, Then
 from core.base import JsonObject, ToolAnswer, View, as_object, new_id, now_ms, replace_file
-from core.boundary import BranchTool, NoParams, Params, StatusLine
+from core.boundary import BranchTool, NoParams, Params
 from core.kernel_api import RigReach, mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.endpoint import Request, endpoint
-from core.event_kinds import EventField, EventSpec
 from core.model import AgentId, GraphName, NodeId, Refused, RefusedOutcome, SeatId
 from core.mcp_call import TOOL_LIMIT_S, Answer, Call, ToolDef, ToolInput, gloss_of
 from core.plugin_host import Live, PluginHost
@@ -29,8 +28,8 @@ from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
-from .health import STATES, figures_json, series
+from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
+from .health import figures_json, series
 from .desks import PcName as DeskName
 
 BRANCH = "desk"
@@ -43,7 +42,6 @@ SYSTEM_NOT_GRANTED = PluginCode(f"{ID}.system_not_granted")
 # The PC's own refusals on its agent shell, each passed on under its own code.
 PC_SHELL_CODES: dict[str, HTTPStatus] = {"shell_off": HTTPStatus.FORBIDDEN, "shell_paused": HTTPStatus.FORBIDDEN, "blocked": HTTPStatus.FORBIDDEN,
                                          "jobs_full": HTTPStatus.TOO_MANY_REQUESTS, "no_job": HTTPStatus.NOT_FOUND}
-PC_HEALTH = f"{ID}.pc_health"
 
 
 NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); for another, "
@@ -851,30 +849,11 @@ async def post_pc(request: Request[AddParams]) -> PcAdded | RefusedOutcome:
     return PcAdded(name=body.name, entry=added.model_dump(mode="json", exclude_none=True))
 
 
-async def _status(host: PluginHost) -> tuple[StatusLine, ...]:
-    desks = host.live(Desks)
-    server = desks.id_server()
-    lines = () if server is None else (StatusLine(text=f"RigDesk ID server {server['host']}: " + ", ".join(
-        f"{each['role']} {each['state']}" + (f" ({each['why']})" if each["why"] else "") for each in server["listeners"])),)
-    return (*lines, *(StatusLine(text=f"RigDesk {row['name']}: {row['state']}" + (f" ({row['why']})" if row["why"] else ""))
-                      for row in desks.pcs() if row["state"] == "down"),
-            *(StatusLine(text=f"RigDesk {entry['name']}: health fault ({entry['health'].said})")
-              for entry in desks.entries() if entry["health"] is not None and entry["health"].state == "fault"))
-
-
-EVENTS = (EventSpec(PC_HEALTH, "A RigDesk PC's health, as Rig judges its newest figures, moved: published once per change", "pc", (
-    EventField(name="state", type="state", values=STATES, description="ok, warn, fault, or stale: no sample for a while though the PC is up"),
-    EventField(name="was", type="state", values=STATES, description="Its health before"),
-    EventField(name="failing", type="text", description="Each failing check in words, joined by '; '; empty when ok"),
-    EventField(name="client", type="text", description="The client the PC belongs to"))),)
-
-
 CONTRIBUTION = ContributionDescriptor(
-    id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, status=_status,
+    id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, states=REPORTED,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN, SHELL_NOT_ALLOWED: HTTPStatus.FORBIDDEN,
                    SYSTEM_NOT_GRANTED: HTTPStatus.FORBIDDEN, **{f"{ID}.{code}": status for code, status in PC_SHELL_CODES.items()}},
-    events=EVENTS,
     provisions=(provider(REQUEST_CONFIRMED, _request_confirmed),),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
