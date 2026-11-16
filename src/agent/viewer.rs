@@ -164,7 +164,12 @@ fn forward() {
                         broadcast(state);
                     }
                     EventKind::Server { .. } | EventKind::Mcp { .. } => broadcast(state()),
-                    EventKind::Message { .. } | EventKind::Dropped { .. } | EventKind::Reach { .. } => {}
+                    EventKind::Message { .. }
+                    | EventKind::Dropped { .. }
+                    | EventKind::Reach { .. }
+                    | EventKind::Shell { .. }
+                    | EventKind::ShellSwitch { .. }
+                    | EventKind::Health { .. } => {}
                 },
                 Err(RecvError::Lagged(_)) => broadcast(state()),
                 Err(RecvError::Closed) => break,
