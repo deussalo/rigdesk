@@ -98,6 +98,7 @@ class PhoneMcp(private val ctx: Context) {
     }
 
     private class Request(val method: String, val path: String, val headers: Map<String, String>, val body: ByteArray)
+    private class TooLarge(why: String) : Exception(why)
 
     private fun answer(s: Socket) {
         s.use {
@@ -105,8 +106,11 @@ class PhoneMcp(private val ctx: Context) {
                 s.soTimeout = 15_000
                 val input = BufferedInputStream(s.getInputStream())
                 val out = s.getOutputStream()
-                val req = read(input) ?: return
-                val (status, body) = respond(req)
+                val (status, body) = try {
+                    respond(read(input) ?: return)
+                } catch (e: TooLarge) {
+                    "413 Payload Too Large" to json(JSONObject().put("error", e.message))
+                }
                 val head = StringBuilder("HTTP/1.1 $status\r\n")
                 if (status.startsWith("401")) head.append("WWW-Authenticate: Bearer\r\n")
                 if (body != null) head.append("Content-Type: application/json\r\nContent-Length: ${body.size}\r\n")
@@ -140,7 +144,7 @@ class PhoneMcp(private val ctx: Context) {
             if (colon > 0) headers[line.substring(0, colon).trim().lowercase(Locale.ROOT)] = line.substring(colon + 1).trim()
         }
         val length = headers["content-length"]?.toIntOrNull() ?: 0
-        if (length < 0 || length > MAX_BODY) throw IllegalStateException("a body of $length bytes is refused")
+        if (length < 0 || length > MAX_BODY) throw TooLarge("a body of $length bytes is over the phone's $MAX_BODY: send less per call")
         val body = ByteArray(length)
         var got = 0
         while (got < length) {
@@ -223,6 +227,7 @@ fun toolProp(type: String, description: String, choices: List<String>? = null): 
 /** The tools themselves: what each takes, and running one call. A refusal says why, as the call's error. */
 class PhoneTools(private val ctx: Context) {
     private val messages = PhoneMessages(ctx)
+    private val files = PhoneFiles(ctx)
 
     private val main = Handler(Looper.getMainLooper())
     private val speaker = Speaker(ctx)
@@ -247,7 +252,7 @@ class PhoneTools(private val ctx: Context) {
             "unless speak is false, spoken aloud.", listOf("text"),
             "text" to toolProp("string", "What to tell them, short."),
             "speak" to toolProp("boolean", "Speak it as well (default true).")))
-        .also { all -> messages.specs().forEach { all.put(it) } }
+        .also { all -> (messages.specs() + files.specs()).forEach { all.put(it) } }
 
     fun call(name: String, args: JSONObject): JSONObject = try {
         val text = when (name) {
@@ -255,7 +260,7 @@ class PhoneTools(private val ctx: Context) {
             "open" -> open(args.optString("package").trim(), args.optString("uri").trim())
             "key" -> key(args.optString("name"))
             "tell" -> tell(args.optString("text").trim(), args.optBoolean("speak", true))
-            else -> messages.call(name, args) ?: throw Refusal("the phone has no tool $name")
+            else -> messages.call(name, args) ?: files.call(name, args) ?: throw Refusal("the phone has no tool $name")
         }
         result(text, false)
     } catch (e: Refusal) {
