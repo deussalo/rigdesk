@@ -197,7 +197,7 @@ class McpSessionGone(Exception):
 
 
 class Grants(BaseModel):
-    """rigdesk's own doc, written only on an operator's act: who holds a standing grant to each stock PC (Desks.assign, Desks.unassign),
+    """rigdesk's own doc, written only on an operator's act: who holds a standing grant to each PC (Desks.assign, Desks.unassign),
     and who may run commands on each RigDesk PC's agent shell, as the user or as SYSTEM (Desks.allow_shell)."""
     model_config = ConfigDict(frozen=True, extra="forbid")
     pcs: dict[PcName, tuple[Grantee, ...]] = {}
@@ -507,13 +507,12 @@ class Desks:
         return self._grants.pcs.get(pc, ())
 
     async def assign(self, pc: str, grantee: str) -> bool:
-        """Grants one agent or graph a standing grant to a stock PC; False when it held one already."""
+        """Grants one agent or graph a standing grant to a PC; False when it held one already. On a RigDesk PC its sessions start through /join,
+        which the PC's own switch still admits."""
         async with self._granting:
             link = self._pcs.get(pc)
             if link is None:
                 raise DeskRefused(f"no RigDesk PC named {pc} is set up in Rig")
-            if link.spec.stock is None:
-                raise DeskRefused(f"{pc} runs RigDesk: it is shared through its viewer with a share link, and takes no standing grant")
             held = self.granted(pc)
             if grantee in held:
                 return False
@@ -530,14 +529,17 @@ class Desks:
             await self._save_grants(Grants(pcs={name: grantees for name, grantees in (self._grants.pcs | {pc: left}).items() if grantees}, shell=self._grants.shell))
         session = self._sessions.get(pc)
         if session is not None and session.via == "assigned" and not _grants(left, session.agent, session.graph):
-            await self._unassigned(pc)
+            if self._link(pc).spec.stock is None:
+                await self._ungranted(session)
+            else:
+                await self._unassigned(pc)
         return True
 
     async def _prune_grants(self) -> None:
-        """A standing grant exists only on a stock PC set up in Rig, and a shell grant only on a RigDesk PC: a PC removed from settings,
-        or of the other kind now, loses its grants."""
+        """A standing grant exists only on a PC set up in Rig, and a shell grant only on a RigDesk PC: a PC removed from settings,
+        or a stock PC now, loses its grants."""
         async with self._granting:
-            kept = {pc: grantees for pc, grantees in self._grants.pcs.items() if (link := self._pcs.get(pc)) is not None and link.spec.stock is not None}
+            kept = {pc: grantees for pc, grantees in self._grants.pcs.items() if pc in self._pcs}
             shell = {pc: levels for pc, levels in self._grants.shell.items() if (link := self._pcs.get(pc)) is not None and link.spec.stock is None}
             if kept != self._grants.pcs or shell != self._grants.shell:
                 gone = sorted((set(self._grants.pcs) - set(kept)) | (set(self._grants.shell) - set(shell)))
@@ -1273,8 +1275,8 @@ class Desks:
         return held
 
     def assigned_pcs(self, agent: str, graph: str) -> tuple[str, ...]:
-        """The stock PCs this agent, or its graph, holds a standing grant to, by name."""
-        return tuple(sorted(name for name, link in self._pcs.items() if link.spec.stock is not None and _grants(self.granted(name), agent, graph)))
+        """The PCs this agent, or its graph, holds a standing grant to, by name."""
+        return tuple(sorted(name for name in self._pcs if _grants(self.granted(name), agent, graph)))
 
     async def _unassigned(self, pc: str) -> None:
         """The operator took the grant away: its session ends now, and the agent is told by the revoke event."""
@@ -1283,7 +1285,16 @@ class Desks:
         except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
             _LOG.warning("rigdesk_unassign_failed", f"RigDesk {pc}: ending the unassigned session failed: {failed}", pc=pc)
 
-    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "") -> Held:
+    async def _ungranted(self, held: Held) -> None:
+        """The operator took a RigDesk PC's grant away: the session it started ends now, and its agent is told, since no viewer revokes it."""
+        try:
+            await self.leave(held)
+        except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
+            _LOG.warning("rigdesk_unassign_failed", f"RigDesk {held.pc}: ending the unassigned session failed: {failed}", pc=held.pc)
+        await self._ended(held, f"RigDesk {held.pc}: the operator took away your standing access to {held.pc}, so your session there ended. "
+                                "desk/request(pc, why) asks them again.")
+
+    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "", via: Literal["link", "assigned"] = "link") -> Held:
         """The operator accepted this agent's request to join a PC: on a stock PC a share link is minted and claimed for it, as the human would;
         a RigDesk PC is asked for the session itself."""
         mine = self.held_by(agent, graph)
@@ -1293,7 +1304,7 @@ class Desks:
         if other is not None and other.agent != agent:
             raise DeskRefused(f"{other.title} holds {pc} now")
         if self._link(pc).spec.stock is None:
-            return await self._join_operator(pc, agent, graph, node, title, ask)
+            return await self._join_operator(pc, agent, graph, node, title, ask, via)
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title)
 
@@ -1307,7 +1318,7 @@ class Desks:
         link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
         return link.join
 
-    async def _join_operator(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str) -> Held:
+    async def _join_operator(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str, via: Literal["link", "assigned"] = "link") -> Held:
         """Rig's bearer asks a RigDesk PC for its session for this agent, with no share link; the PC's own switch admits it."""
         link = self._link(pc)
         body = {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ask}
@@ -1320,14 +1331,15 @@ class Desks:
         session = said.get("session")
         if not isinstance(session, str):
             raise DeskRefused(f"{pc} accepted the session but sent no session token")
-        held = self._sessions[pc] = Held(pc, agent, graph, node, title, session, now_ms())
+        held = self._sessions[pc] = Held(pc, agent, graph, node, title, session, now_ms(), via)
         link.standing = said.get("standing")
         await asyncio.to_thread(self._write_state)
         self._resync(link)
         return held
 
-    async def join_assigned(self, pc: str, agent: str, graph: str, node: str, title: str) -> Held:
-        """Joins a PC this agent is assigned, as a share link would, unless another agent holds it now."""
+    async def join_assigned(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "standing grant") -> Held:
+        """Joins a PC this agent is assigned, as a share link would, unless another agent holds it now; a RigDesk PC is asked for the session itself,
+        and journals ask."""
         if pc not in self.assigned_pcs(agent, graph):
             raise DeskRefused(f"{pc} is not assigned to you: ask the human there for a share link, or the operator with desk/request(pc, why)")
         mine = self.held_by(agent, graph)
@@ -1337,6 +1349,8 @@ class Desks:
         if other is not None and other.agent != agent:
             frees = f"they leave or after {IDLE_LEAVE_MS // 60_000} minutes without a desk call" if other.via == "assigned" else "they leave or the human ends that share link"
             raise DeskRefused(f"{pc} is assigned to you, but {other.title} holds it now; it frees when {frees}")
+        if self._link(pc).spec.stock is None:
+            return await self._join_operator(pc, agent, graph, node, title, ask, via="assigned")
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title, via="assigned")
 

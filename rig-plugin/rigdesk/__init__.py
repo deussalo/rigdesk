@@ -21,7 +21,7 @@ from core.boundary import BranchTool, NoParams, Params
 from core.kernel_api import RigReach, mcp_capability, plugin_capability
 from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.endpoint import Request, endpoint
-from core.model import AgentId, GraphName, NodeId, Refused, RefusedOutcome, SeatId
+from core.model import AgentId, Choice, Choices, GraphName, NodeId, Refused, RefusedOutcome, SeatId
 from core.mcp_call import TOOL_LIMIT_S, Answer, Call, ToolDef, ToolInput, gloss_of
 from core.plugin_host import Live, PluginHost
 from core.provided import Provision, provider
@@ -49,6 +49,9 @@ NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to
 
 
 REQUEST_CONFIRMED = Provision("rigdesk.request_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
+# A RigDesk PC's ask: "always" joins and grants that agent the PC, so its later desk/request or desk/join(pc) joins with no ask.
+RIGDESK_CHOICES = Choices(choices=(Choice(id="accept", label="Join once", tone="allow"), Choice(id="always", label="Always allow", tone="allow"),
+                                   Choice(id="deny", label="Deny", tone="deny")), safe_choice="deny")
 
 
 type RequestKind = Literal["join", "assign"]
@@ -67,7 +70,7 @@ REQUESTED: TypeAdapter[Requested] = TypeAdapter(Requested)
 
 class JoinInput(ToolInput):
     link: str | None = Field(default=None, description="The share link the human gave you: rigdesk://<pc>/<grant>#<secret>. It works once.")
-    pc: str | None = Field(default=None, description="Instead of a link: a stock PC assigned to you, by name.")
+    pc: str | None = Field(default=None, description="Instead of a link: a PC assigned to you, by name.")
 
 
 class LeaveInput(ToolInput):
@@ -75,7 +78,7 @@ class LeaveInput(ToolInput):
 
 
 class RequestInput(ToolInput):
-    pc: str = Field(description="The PC you need, by its name in Rig; desk/pcs lists them. A RigDesk PC takes kind join only, and only while its own switch allows sessions started from Rig.")
+    pc: str = Field(description="The PC you need, by its name in Rig; desk/pcs lists them. A RigDesk PC takes it only while its own switch allows sessions started from Rig.")
     why: str = Field(min_length=1, max_length=1000, description="What you need it for, in a sentence or two; the operator reads it before deciding.")
     kind: RequestKind = Field(default="join", description="join: one session, now, until you leave or the human ends it. "
                                                            "assign: a standing grant, so you join it by name with desk/join(pc), across restarts, until unassigned.")
@@ -177,7 +180,8 @@ def _reached_by(entry: PcEntry) -> str:
     if switch is None:
         return "a share link from the human in the RigDesk viewer only: its RigDesk takes no sessions started from Rig"
     if switch.get("open"):
-        return "desk/request (join; the operator accepts in Rig), or a share link from the human in the RigDesk viewer"
+        return ("desk/request (the operator picks Join once or Always allow in Rig), desk/join(pc) while it is assigned to you, "
+                "or a share link from the human in the RigDesk viewer")
     return f"a share link from the human in the RigDesk viewer only: {switch.get('words')}"
 
 
@@ -277,8 +281,6 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     if entry is None:
         return call.refused(REFUSED, f"no RigDesk PC named {given.pc} is set up in Rig; desk/pcs lists those that are")
     if not entry["stock"]:
-        if given.kind == "assign":
-            return call.refused(REFUSED, f"{given.pc} runs RigDesk, which is not assigned standing access; ask with kind join for one session, or ask the human there for a share link")
         holder = entry["held_by"]
         if holder is not None and holder["agent_id"] != agent:
             return call.refused(REFUSED, f"{holder['title']} holds {given.pc} now; ask again once they leave or the share ends")
@@ -293,26 +295,35 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     assigned = given.pc in desks.assigned_pcs(agent, graph)
     if given.kind == "assign" and assigned:
         return call.refused(REFUSED, f"{given.pc} is already assigned to you: desk/join(pc) joins it")
+    if given.kind == "join" and assigned and not entry["stock"]:
+        return await _join(desks, call, JoinInput(pc=given.pc))
     if given.kind == "join" and assigned:
         return call.refused(REFUSED, f"{given.pc} is assigned to you, so you need no approval: desk/join(pc) joins it")
     held = desks.held_by(agent, graph)
     if given.kind == "join" and held is not None and held.pc == given.pc:
         return call.refused(REFUSED, f"you already own the session on {given.pc}")
     seat, asked = call.contract.place.seat, new_id("desk")
-    lets = ("Accept starts its session on that RigDesk PC now, with no share link: until it leaves, or the person at the PC ends it from RigDesk's tray "
-            "icon, where they are told who it is." if not entry["stock"] else
+    lets = ("Join once starts its session on that RigDesk PC now, with no share link: until it leaves, or the person at the PC ends it from RigDesk's tray "
+            "icon, where they are told who it is. Always allow does the same, and lets it join again with no ask until you unassign it on the RigDesk page."
+            if not entry["stock"] else
             "Accept joins it to that PC now, for one session: until it leaves, or you end the share." if given.kind == "join" else
             "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the RigDesk page.")
     wants = "to join" if given.kind == "join" else "a standing grant to"
     reason = f"{title} ({agent}, in {graph}) asks {wants} RigDesk PC {given.pc}:\n\n{given.why.strip()}\n\n{lets}"[:2000]
-    state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                     Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind, "ask": asked}))
+    if entry["stock"]:
+        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
+                                         Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind, "ask": asked}))
+    else:
+        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
+                                         Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": "join", "ask": asked}),
+                                         RIGDESK_CHOICES)
     return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
             "said": "Nothing is granted yet: the operator is asked to Accept, and the decision arrives as your next input."}
 
 
 async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
-    """The operator's Accept: the agent that asked joins the PC now, or is assigned a stock PC, if it still stands at its seat."""
+    """The operator's Accept: the agent that asked joins the PC now, or is assigned a stock PC, if it still stands at its seat.
+    Always allow, on a RigDesk PC, assigns it the PC and joins it through that grant; a join that fails takes the new grant back."""
     given = REQUESTED.validate_python(asked["given"])
     seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
     identity = await host.roster.identity(seat)
@@ -320,6 +331,8 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
         raise Refused(REFUSED, f"{given['agent']} no longer stands at {seat.graph}/{seat.node}, so nothing was done on {given['pc']}")
     desks = host.live(Desks)
     try:
+        if asked.get("choice") == "always":
+            return await _always_allowed(desks, given, seat.node, identity.label)
         if given["kind"] == "join":
             held = await desks.join_approved(given["pc"], given["agent"], given["graph"], seat.node, identity.label, given.get("ask", ""))
             return f"You joined {held.pc}: its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there."
@@ -329,6 +342,19 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
     except (aiohttp.ClientError, TimeoutError, OSError) as failed:
         raise Refused(DOWN, f"{given['pc']} did not answer: {failure(failed)}; nothing was done") from failed
     return f"{'Assigned' if changed else 'Already assigned'} {given['pc']} to you: desk/join(pc) joins it, with no share link, until the operator unassigns it on the RigDesk page."
+
+
+async def _always_allowed(desks: Desks, given: Requested, node: str, title: str) -> str:
+    grantee = f"agent:{given['agent']}"
+    changed = await desks.assign(given["pc"], grantee)
+    try:
+        held = await desks.join_approved(given["pc"], given["agent"], given["graph"], node, title, given.get("ask", ""), via="assigned")
+    except Exception:
+        if changed:
+            await desks.unassign(given["pc"], grantee)
+        raise
+    return (f"You joined {held.pc}, and the operator allowed you it always: from now on desk/join(pc) joins it with no ask, until they unassign you "
+            "on the RigDesk page. Its session is yours until you desk/leave or the person at the PC ends it.")
 
 
 async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answer:
