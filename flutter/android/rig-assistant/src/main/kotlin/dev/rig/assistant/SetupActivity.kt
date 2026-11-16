@@ -111,14 +111,22 @@ class SetupActivity : Activity() {
         val url = link.getQueryParameter("url").orEmpty().trim()
         val token = link.getQueryParameter("token").orEmpty().trim()
         val phone = link.getQueryParameter("phone").orEmpty().trim().ifEmpty { Config.defaultPhone() }
-        val host = try { Uri.parse(url).host } catch (e: Exception) { null }
-        if (host == null || token.isEmpty()) {
+        val target = try { Uri.parse(url) } catch (e: Exception) { null }
+        val host = target?.host
+        if (target == null || host == null || token.isEmpty()) {
             state.text = "That pairing link is incomplete: it needs Rig's address and a token"
             return
         }
+        if (target.scheme != "https" && !private(host)) {
+            state.text = "That pairing link would send Rig's token unencrypted to $host: only https, or http on the tailnet, is taken"
+            return
+        }
+        val origin = "${target.scheme}://$host" + if (target.port != -1) ":${target.port}" else ""
+        val before = Config.load(this).first?.origin
+        val replaces = if (before != null && before != url) "\n\nThis replaces the Rig at $before." else ""
         AlertDialog.Builder(this)
             .setTitle("Pair with Rig?")
-            .setMessage("Connect this phone to the Rig at $host as \"$phone\". Its agent can then use the phone's tools you allow.")
+            .setMessage("Connect this phone to the Rig at $origin as \"$phone\". Its agent can then use the phone's tools you allow.$replaces")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Pair") { _, _ ->
                 Config.prefs(this).edit().putString("url", url).putString("token", token).putString("phone", phone).apply()
@@ -142,6 +150,13 @@ class SetupActivity : Activity() {
 
     private fun ask(vararg permissions: String) {
         if (Build.VERSION.SDK_INT >= 23) requestPermissions(permissions, 1)
+    }
+
+    /** Loopback or the tailnet (100.64.0.0/10, *.ts.net), where http is already encrypted by WireGuard. */
+    private fun private(host: String): Boolean {
+        if (host == "localhost" || host == "127.0.0.1" || host.endsWith(".ts.net")) return true
+        val parts = host.split('.').mapNotNull { it.toIntOrNull() }
+        return parts.size == 4 && parts[0] == 100 && parts[1] in 64..127
     }
 
     private fun isAssistant(): Boolean = if (Build.VERSION.SDK_INT >= 29)
