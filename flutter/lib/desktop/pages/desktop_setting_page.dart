@@ -6,6 +6,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/rig_theme.dart';
+import 'package:flutter_hbb/common/rigdesk.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -2589,22 +2591,22 @@ class _AboutState extends State<_About> {
                       .marginSymmetric(vertical: 4.0)),
               InkWell(
                   onTap: () {
-                    launchUrlString('https://rustdesk.com/privacy.html');
+                    launchUrlString(kRigDeskSource);
                   },
                   child: Text(
-                    translate('Privacy Statement'),
+                    'source',
                     style: linkStyle,
                   ).marginSymmetric(vertical: 4.0)),
               InkWell(
                   onTap: () {
-                    launchUrlString('https://rustdesk.com');
+                    launchUrlString(kRustDeskSite);
                   },
                   child: Text(
-                    translate('Website'),
+                    kBuiltOn,
                     style: linkStyle,
                   ).marginSymmetric(vertical: 4.0)),
               Container(
-                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
+                decoration: const BoxDecoration(color: RigTheme.surfaceRaised),
                 padding:
                     const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
                 child: SelectionArea(
@@ -2616,13 +2618,13 @@ class _AboutState extends State<_About> {
                         children: [
                           Text(
                             'Copyright © ${DateTime.now().toString().substring(0, 4)} Purslane Tech Pte. Ltd.\n$license',
-                            style: const TextStyle(color: Colors.white),
+                            style: const TextStyle(color: RigTheme.text),
                           ),
                           Text(
                             translate('Slogan_tip'),
                             style: TextStyle(
-                                fontWeight: FontWeight.w800,
-                                color: Colors.white),
+                                fontWeight: RigTheme.strong,
+                                color: RigTheme.text),
                           )
                         ],
                       ),

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/common/rigdesk.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:get/get.dart';
@@ -38,7 +39,6 @@ class SettingsPage extends StatefulWidget implements PageShape {
   State<SettingsPage> createState() => _SettingsState();
 }
 
-const url = 'https://rustdesk.com/';
 
 enum KeepScreenOn {
   never,
@@ -1049,12 +1049,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           tiles: [
             SettingsTile(
                 onPressed: (context) async {
-                  await launchUrl(Uri.parse(url));
+                  await launchUrl(Uri.parse(kRigDeskSource));
                 },
                 title: Text(translate("Version: ") + version),
                 value: Padding(
                   padding: EdgeInsets.symmetric(vertical: 8),
-                  child: Text('rustdesk.com',
+                  child: Text('source',
                       style: TextStyle(
                         decoration: TextDecoration.underline,
                       )),
@@ -1085,10 +1085,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 ),
                 leading: Icon(Icons.perm_identity)),
             SettingsTile(
-              title: Text(translate("Privacy Statement")),
-              onPressed: (context) =>
-                  launchUrlString('https://rustdesk.com/privacy.html'),
-              leading: Icon(Icons.privacy_tip),
+              title: Text(kBuiltOn),
+              onPressed: (context) => launchUrlString(kRustDeskSite),
+              leading: Icon(Icons.copyright),
             )
           ],
         ),
@@ -1170,18 +1169,21 @@ void showAbout(OverlayDialogManager dialogManager) {
       title: Text(translate('About RustDesk')),
       content: Wrap(direction: Axis.vertical, spacing: 12, children: [
         Text('Version: $version'),
-        InkWell(
-            onTap: () async {
-              const url = 'https://rustdesk.com/';
-              await launchUrl(Uri.parse(url));
-            },
-            child: Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text('rustdesk.com',
-                  style: TextStyle(
-                    decoration: TextDecoration.underline,
-                  )),
-            )),
+        for (final (label, link) in [
+          ('source', kRigDeskSource),
+          (kBuiltOn, kRustDeskSite)
+        ])
+          InkWell(
+              onTap: () async {
+                await launchUrl(Uri.parse(link));
+              },
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(label,
+                    style: TextStyle(
+                      decoration: TextDecoration.underline,
+                    )),
+              )),
       ]),
       actions: [],
     );
