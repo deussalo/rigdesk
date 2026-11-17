@@ -176,6 +176,7 @@ class Tools(private val ctx: Context) {
                 try {
                     windows().addView(v, lp)
                     bubble = v
+                    Stop.raise()
                 } catch (e: Exception) {
                     Log.w(TAG, "bubble: $e")
                     notify(text)

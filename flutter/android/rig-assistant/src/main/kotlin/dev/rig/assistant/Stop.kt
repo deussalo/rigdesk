@@ -115,6 +115,19 @@ object Stop {
         }
     }
 
+    /** Puts the pill back on top: an overlay added later, such as a reply's bubble, would cover it and take its taps. Main thread. */
+    fun raise() {
+        val view = pill ?: return
+        val lp = view.layoutParams as? WindowManager.LayoutParams ?: return
+        try {
+            windows().removeView(view)
+            windows().addView(view, lp)
+        } catch (e: Exception) {
+            Log.w(TAG, "raise: $e")
+            pill = null
+        }
+    }
+
     private fun removePill() {
         pill?.let { try { windows().removeView(it) } catch (_: Exception) {} }
         pill = null
