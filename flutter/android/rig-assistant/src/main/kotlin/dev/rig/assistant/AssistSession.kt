@@ -55,6 +55,8 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
     /** When the recogniser last said it was ready, and how many segments in a row ended at once with nothing heard. */
     private var readyAt = 0L
     private var quick = 0
+    /** A segmented session settled some words before it ended. */
+    private var heardInSession = false
     @Volatile private var image: JSONObject? = null
     private var shot = CountDownLatch(1)
 
@@ -110,6 +112,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
         failures = 0
         sent = false
         quick = 0
+        heardInSession = false
         image = null
         shot = CountDownLatch(1)
         heard.text = ""
@@ -176,11 +179,16 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
             return
         }
         showListening()
-        r.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        // The recogniser reads these lengths with getInt: a Long is dropped with a Bundle warning and counts as unset.
+        val asked = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 10_000L)
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 10_000L))
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, SILENCE_MS)
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, SILENCE_MS)
+        // A segmented session keeps the microphone open across pauses and hands each settled stretch over as it ends,
+        // so no words fall into the gap of a restart; it ends only after SILENCE_MS of silence, and is then restarted.
+        if (Build.VERSION.SDK_INT >= 33) asked.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS)
+        r.startListening(asked)
     }
 
     /** Settles what is being heard into what was said. */
@@ -221,6 +229,19 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
                 hearing = words.trim()
                 render()
             }
+        }
+
+        override fun onSegmentResults(segmentResults: Bundle) {
+            val words = segmentResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: hearing
+            if (words.isNotBlank()) heardInSession = true
+            settle(words)
+        }
+
+        override fun onEndOfSegmentedSession() {
+            settle(hearing)
+            val heardSome = heardInSession
+            heardInSession = false
+            segmentEnded(heardSome)
         }
 
         override fun onResults(results: Bundle?) {
@@ -271,6 +292,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
         main.removeCallbacks(deliverLate)
         if (sent) return
         settle(hearing)
+        heardInSession = false
         stopRecording()
         val text = listOf(said.toString().trim(), typed.text.toString().trim()).filter { it.isNotEmpty() }.joinToString("\n")
         if (text.isEmpty()) {
@@ -297,6 +319,8 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
         private const val QUICK_MS = 500L
         /** How long Send waits for the recogniser's final words after stopping it. */
         private const val LAST_WORDS_MS = 2_000L
+        /** Silence that ends a recogniser session; the sheet then starts another, so this only bounds an idle microphone. */
+        private const val SILENCE_MS = 30_000
 
         private fun jpeg(screenshot: Bitmap): JSONObject {
             val scale = minOf(1f, 1280f / maxOf(screenshot.width, screenshot.height))
