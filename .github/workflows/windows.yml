@@ -175,11 +175,19 @@ jobs:
         shell: bash
         run: |
           found=0
-          for needle in rs-ny.rustdesk.com api.rustdesk.com admin.rustdesk.com relay.rustdesk.com \
-                        OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw= 5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=; do
+          for needle in api.rustdesk.com admin.rustdesk.com relay.rustdesk.com 5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=; do
             hits=$(grep -rlaF "$needle" rigdesk || true)
             if [ -n "$hits" ]; then echo "::error::$needle found in: $hits"; found=1; fi
           done
+          # The public ID server and its key are in the binary for the viewer to dial a stock peer by ID; no source but
+          # src/viewer_dial.rs may name them, and only the viewer's outbound dial (src/client.rs) may use that module.
+          for needle in rs-ny.rustdesk.com OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=; do
+            hits=$(git grep -lF "$needle" -- . ':!.github' ':!src/viewer_dial.rs' || [ $? -eq 1 ])
+            hits="$hits$(git -C libs/hbb_common grep -lF "$needle" || [ $? -eq 1 ])"
+            if [ -n "$hits" ]; then echo "::error::$needle found in: $hits"; found=1; fi
+          done
+          users=$(git grep -l viewer_dial -- src ':!src/viewer_dial.rs' ':!src/lib.rs' ':!src/client.rs' || [ $? -eq 1 ])
+          if [ -n "$users" ]; then echo "::error::viewer_dial used outside the viewer's outbound dial: $users"; found=1; fi
           exit $found
       - name: Agent API smoke test against Notepad
         timeout-minutes: 10
