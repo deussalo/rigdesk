@@ -73,7 +73,7 @@ fn bearer() -> Option<String> {
 }
 
 /// The API's loopback port. `tailscale serve` publishes it on the tailnet; only the tailnet reaches it.
-const API_PORT: u16 = 21119;
+pub(crate) const API_PORT: u16 = 21119;
 
 /// Start the agent API in the current (user-session server) process, once. A missing token file leaves it off, so a
 /// PC that was never enrolled for the agent serves nothing.

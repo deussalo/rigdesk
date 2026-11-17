@@ -3,6 +3,7 @@
 //! This crate holds what decides who may act, and serves it; the tools themselves are the host's, behind [`Desk`].
 
 pub mod desk;
+pub mod digest;
 pub mod events;
 pub mod found;
 pub mod health;
