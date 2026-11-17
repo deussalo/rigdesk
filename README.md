@@ -106,6 +106,68 @@ client sign this text too before you run the line with it on.
 > *Pause sessions started from Rig*, in RigDesk's security settings behind the admin PIN, refuses new sessions until it
 > is unticked. Rerunning the install line with `-AgentJoin off` turns them off.
 
+### A Linux PC
+
+Debian or Ubuntu with systemd. You need the same values as for Windows, and a **lane token** too (32-128 of
+`A-Za-z0-9_-`, not the agent token): the desktop user can read the agent token, so the agent shell, which runs as
+root, takes its own. Give it to Rig through the plugin's `lane_token_file`. Write the secrets into a file only you can
+read (`chmod 600`; the line below opens it as you, then hands it to sudo), one `key=value` a line, so no command line or
+shell history holds them:
+
+```
+tailscale_auth_key=tskey-auth-...
+password=...
+pin=...
+agent_token=...
+lane_token=...
+```
+
+Then run the line from the release's notes as a user with sudo; it checks `install-linux.sh` against its SHA-256:
+
+```bash
+f=$(mktemp) && curl -fsSL -o "$f" https://github.com/deussalo/rigdesk/releases/download/<tag>/install-linux.sh && echo "<INSTALL_LINUX_SHA256>  $f" | sha256sum -c --quiet - && sudo bash "$f" --client <slug> --user <desktop user> < secrets; rm -f "$f"
+```
+
+and delete the secrets file. The script ([install/install-linux.sh](install/install-linux.sh)):
+
+1. installs Tailscale and joins as `tag:pc,tag:client-<slug>` (leave out `tailscale_auth_key` where it is already up);
+2. downloads the `rigdesk` package pinned by that release, **checks its SHA-256**, and installs it. It replaces a
+   stock `rustdesk` package (the two cannot be installed together) and leaves a RustDesk Flatpak alone. Its
+   `rigdesk.service` runs as root and starts at boot; the desktop user's session runs RigDesk's server and tray;
+3. hands the lane token and the switch to the root service through `/var/lib/rigdesk/enroll.json`, and the password,
+   PIN and agent token to the desktop user's server through `~/.config/rigdesk/agent/enroll.json`, each 0600 and
+   deleted once applied;
+4. lets TCP 21118 in from the tailnet only (nftables, applied again at every start of the service);
+5. publishes the agent API at `/` and the agent shell's lane at `/lane` with `tailscale serve`. The lane is a unix
+   socket only root can connect to.
+
+`--agent-shell on|off` (on when left out) and `--agent-join on|off` work as `-AgentShell` and `-AgentJoin` do on
+Windows; the agent shell runs commands as root, or as the user signed in at the PC's screen in their own session.
+Commands as that user run while they wait; background jobs run as root only. Every command is its own systemd unit
+(`rigdesk-run-*`, `rigdesk-job-*`), so a job outlives RigDesk's restart and is ended whole. `apt remove rigdesk`
+stops it and keeps the enrollment; `apt purge rigdesk` forgets it. CI moves a stock RustDesk install to RigDesk with
+the same script against every build: see `.github/smoke/deb.sh`.
+
+Have the client sign this text before you run the line with the agent shell on:
+
+> **Remote management of this computer by Rig**
+>
+> RigDesk is installed on this computer as a system service that starts with it. While its *agent shell* is on,
+> automated agents run by **<operator>** through Rig may run commands on this computer at any time, **as root, with
+> the highest local rights,** or as the user signed in at the screen, without a window and without interrupting
+> whoever is at the computer. Such a command can read, change or delete anything on this computer. Commands reach it
+> only over a private network (Tailscale) from Rig's host, carrying a secret token that Rig keeps readable only by its
+> own user.
+>
+> **What is run is recorded.** Every command, run or refused, is logged on this computer with the agent that sent it,
+> whom it ran as, its exit code and how long it took. The tray icon's *Managed by Rig: commands run here* opens a list
+> of the latest 200 (`/var/log/rigdesk/managed-by-rig.txt`). *Pause the agent shell*, in RigDesk's security settings
+> behind the admin PIN, stops new commands and ends running ones until it is unticked. Blocking an agent in RigDesk
+> refuses its commands too. You see what ran after it ran, not as it runs.
+>
+> Turning the agent shell off (rerunning the install line with `--agent-shell off`) stops remote commands;
+> uninstalling RigDesk removes it.
+
 ### Tailnet policy
 
 ```jsonc

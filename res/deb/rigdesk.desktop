@@ -1,0 +1,18 @@
+[Desktop Entry]
+Name=RigDesk
+GenericName=Remote Desktop
+Comment=Remote Desktop
+Exec=rigdesk %u
+Icon=rigdesk
+Terminal=false
+Type=Application
+StartupNotify=true
+Categories=Network;RemoteAccess;GTK;
+Keywords=internet;linux;dart;rust;remote-control;p2p;teamviewer;rust-lang;rdp;remote-desktop;vnc;
+Actions=new-window;
+StartupWMClass=rustdesk
+
+
+[Desktop Action new-window]
+Name=Open a New Window
+Exec=rigdesk %u

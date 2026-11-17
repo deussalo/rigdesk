@@ -197,3 +197,48 @@ jobs:
         with:
           name: rigdesk-linux-x64
           path: rigdesk-linux-x64.tar.gz
+      - name: The rigdesk package
+        id: deb
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          .github/ci/build_deb.sh rigdesk "$base+rd${GITHUB_RUN_NUMBER}.g${GITHUB_SHA::7}" rigdesk-linux-x64.deb
+      - name: Package smoke test (stock RustDesk to RigDesk, the lane as root, the switch, remove and purge)
+        if: ${{ !cancelled() && steps.deb.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/ci/fetch_asset.py https://github.com/rustdesk/rustdesk/releases/download/1.5.3/rustdesk-1.5.3-x86_64.deb "$RUNNER_TEMP/rustdesk-1.5.3.deb"
+          .github/smoke/deb.sh rigdesk-linux-x64.deb "$RUNNER_TEMP/rustdesk-1.5.3.deb"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() && steps.deb.outcome == 'success' }}
+        with:
+          name: rigdesk-linux-x64-deb
+          path: rigdesk-linux-x64.deb
+
+  # A tag v* adds the package, install-linux.sh pinned to it, and their checksums to the release windows.yml creates.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: linux-x64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigdesk-linux-x64-deb
+          path: ./
+      - name: Package and pin
+        run: .github/release/package-linux.sh "$GITHUB_REF_NAME"
+      - name: Publish, once windows.yml has created the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          until gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; do echo "waiting for windows.yml's release"; sleep 60; done
+          gh release upload "$GITHUB_REF_NAME" out-linux/rigdesk-linux-x64.deb out-linux/install-linux.sh out-linux/SHA256SUMS-linux --clobber
+          # The Linux section comes last; a rerun, which rebuilds the package, replaces it with the new checksums.
+          gh release view "$GITHUB_REF_NAME" --json body --jq .body | sed '/^## Linux x64/,$d' > "$RUNNER_TEMP/notes.md"
+          cat out-linux/NOTES.md >> "$RUNNER_TEMP/notes.md"
+          gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

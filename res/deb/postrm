@@ -1,0 +1,9 @@
+#!/bin/bash
+# Purging forgets the PC's enrollment: the lane's token, switch, journal and jobs, root's config and the tray's list.
+set -e
+case "$1" in
+    remove) rm -rf /run/rigdesk ;;
+    purge) rm -rf /var/lib/rigdesk /var/log/rigdesk /run/rigdesk /root/.config/rigdesk ;;
+esac
+[ -d /run/systemd/system ] && systemctl daemon-reload || true
+exit 0
