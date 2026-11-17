@@ -36,13 +36,39 @@ def test_the_agent_hears_of_stop_and_block_but_not_of_the_humans_passing_input_o
 def test_a_rigdesk_pc_says_whether_the_operator_can_start_a_session_there() -> None:
     from rigdesk import _reached_by
 
-    def entry(join: object) -> object:
-        return {"stock": False, "join": join}
+    def entry(join: object, state: str = "up") -> object:
+        return {"name": "dell", "stock": False, "join": join, "state": state}
 
     assert "desk/request (the operator picks Join once or Always allow" in _reached_by(entry({"open": True, "code": None, "words": None}))  # type: ignore[arg-type]
     paused = _reached_by(entry({"open": False, "code": "join_paused", "words": "the person at this PC paused sessions started from Rig"}))  # type: ignore[arg-type]
     assert paused.startswith("a share link") and "paused" in paused
     assert "takes no sessions started from Rig" in _reached_by(entry(None))  # type: ignore[arg-type]
+    for state in ("down", "connecting"):
+        unheard = _reached_by(entry(None, state))  # type: ignore[arg-type]
+        assert "unknown until dell is reachable" in unheard and "takes no sessions" not in unheard, unheard
+
+
+def test_a_rigdesk_pc_rig_has_not_heard_from_says_its_shell_is_unknown_not_missing() -> None:
+    from rigdesk import _shell_words
+
+    class NoGrants:
+        def held_by(self, agent: str, graph: str) -> None:
+            return None
+
+        def shell_level(self, pc: str, agent: str, graph: str) -> None:
+            return None
+
+        def top_rights(self, pc: str) -> str:
+            return "root"
+
+    def words(shell: object, state: str) -> str:
+        return _shell_words(NoGrants(), {"name": "dell", "stock": False, "shell": shell, "state": state}, "a", "g")  # type: ignore[arg-type]
+
+    for state in ("down", "connecting"):
+        unheard = words(None, state)
+        assert unheard == "you may not run commands there; whether its RigDesk offers an agent shell is unknown until dell is reachable", unheard
+    assert "offers no agent shell" in words(None, "up")
+    assert "lane_down" in words({"open": False, "code": "lane_down", "words": "its management lane at /lane does not answer: x"}, "down")
 
 
 def test_a_stock_pc_names_the_mcp_servers_on_its_own_address_by_http_url() -> None:

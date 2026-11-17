@@ -164,12 +164,18 @@ def _shell_level(desks: Desks, pc: str, agent: str, graph: str) -> ShellLevel | 
     return desks.shell_level(pc, agent, graph) or ("user" if held is not None and held.pc == pc else None)
 
 
+def _unknown(entry: PcEntry) -> str:
+    """What a RigDesk PC's switches are while Rig has not heard from it: its absent answer says nothing about them."""
+    return f"unknown until {entry['name']} is reachable"
+
+
 def _shell_words(desks: Desks, entry: PcEntry, agent: str, graph: str) -> str:
     if entry["stock"]:
         return "none: stock RustDesk runs commands only in a joined session, as its user"
     level = _shell_level(desks, entry["name"], agent, graph)
     switch = entry["shell"]
-    pc_says = ("its RigDesk offers no agent shell: install it with the agent shell on" if switch is None else "its agent shell is on" if switch.get("open")
+    pc_says = (f"whether its RigDesk offers an agent shell is {_unknown(entry)}" if switch is None and entry["state"] != "up" else
+               "its RigDesk offers no agent shell: install it with the agent shell on" if switch is None else "its agent shell is on" if switch.get("open")
               else f"{switch.get('words')} ({switch.get('code')})")
     top = desks.top_rights(entry["name"])
     may = {"system": f"you may run commands as {top} (as: system) or as the user", "user": "you may run commands as its signed-in user", None: "you may not run commands there"}[level]
@@ -180,6 +186,8 @@ def _reached_by(entry: PcEntry) -> str:
     if entry["stock"]:
         return "desk/request (join or assign), or a share link"
     switch = entry["join"]
+    if switch is None and entry["state"] != "up":
+        return f"a share link from the human in the RigDesk viewer; whether its RigDesk takes sessions started from Rig is {_unknown(entry)}"
     if switch is None:
         return "a share link from the human in the RigDesk viewer only: its RigDesk takes no sessions started from Rig"
     if switch.get("open"):
