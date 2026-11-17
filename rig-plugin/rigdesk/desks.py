@@ -214,6 +214,10 @@ class DeskRefused(Exception):
     """A call that cannot go through, with the words the agent reads."""
 
 
+class McpAnswered(DeskRefused):
+    """A PC's MCP server, or the PC itself, answered and refused: a JSON-RPC error, or the PC's own 403 or 404. The server is not failing."""
+
+
 class McpSessionGone(Exception):
     """A PC's MCP server no longer knows the session it gave: MCP's answer is HTTP 404, and the client opens a new one."""
 
@@ -1205,6 +1209,8 @@ class Desks:
                 link.mcp_on, link.mcp_why = None, f"its MCP servers could not be listed: {failed}"
                 listed = {name: server.says for name, server in link.servers.items()}
             dropped += [(link.servers.pop(name), "the PC no longer offers it") for name in [name for name in link.servers if name not in listed]]
+            for server, _ in dropped:
+                link.server_faults.pop(server.name, None)
             opened: list[PcServer] = []
             for name, says in listed.items():
                 if name in link.servers:
@@ -1283,7 +1289,8 @@ class Desks:
             if answer.status == 404 and sid and "no MCP server" not in text:
                 raise McpSessionGone(text[:300])
             if answer.status not in (200, 202):
-                raise DeskRefused(f"{link.name}.{name} answered HTTP {answer.status}" + (f": {text[:300]}" if text else ""))
+                refused = McpAnswered if answer.status in (403, 404) else DeskRefused
+                raise refused(f"{link.name}.{name} answered HTTP {answer.status}" + (f": {text[:300]}" if text else ""))
             streamed = answer.content_type == "text/event-stream"
         if notice:
             return {}, sid
@@ -1292,7 +1299,7 @@ class Desks:
         if reply is None:
             raise DeskRefused(f"{link.name}.{name} sent no answer to {method}")
         if "error" in reply:
-            raise DeskRefused(f"{link.name}.{name}: {_object(reply['error']).get('message', 'error')}")
+            raise McpAnswered(f"{link.name}.{name}: {_object(reply['error']).get('message', 'error')}")
         return _object(reply.get("result")), sid
 
     async def mcp_call(self, held: Held, key: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1310,6 +1317,8 @@ class Desks:
                 async with link.syncing:
                     server = link.servers[server.name] = await self._open_server(link, held, server.name, server.says)
                 result, _ = await self._mcp_post(link, held, server.name, server.sid, server.protocol, "tools/call", params, MCP_CALL_LIMIT_S)
+        except McpAnswered:
+            raise
         except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
             words = str(failed) if isinstance(failed, DeskRefused) else f"MCP server {server.name} on {held.pc} did not answer {tool}: {failure(failed)}"
             link.server_faults[server.name] = (words, now_ms())

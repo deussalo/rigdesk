@@ -538,7 +538,7 @@ def test_a_connect_ask_that_lapses_is_withdrawn_from_the_operator_and_its_agent_
 
 
 def test_a_pc_server_that_fails_a_call_shows_as_not_answering_with_its_own_error_until_it_answers_again() -> None:
-    from rigdesk.desks import DeskRefused, PcServer
+    from rigdesk.desks import DeskRefused, McpAnswered, PcServer
 
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
@@ -547,7 +547,8 @@ def test_a_pc_server_that_fails_a_call_shows_as_not_answering_with_its_own_error
             desks._sessions["deus"] = held
             link = desks._pcs["deus"] = PcLink("deus", PCS["deus"], state="up")
             link.servers["blender"] = PcServer("deus", "blender", "blender-mcp 1.2", ({"name": "get_scene"},), "sid", "2025-06-18", "s", now_ms())
-            answers: list[object] = [DeskRefused("deus.blender: Could not connect to Blender. Make sure the addon is running."), {"content": [{"type": "text", "text": "Cube"}]}]
+            answers: list[object] = [McpAnswered("deus.blender: Unknown tool: get_scen"), DeskRefused("deus.blender answered HTTP 502: Could not connect to Blender."),
+                                     {"content": [{"type": "text", "text": "Cube"}]}]
 
             async def post(*_args: object) -> tuple[object, None]:
                 answer = answers.pop(0)
@@ -560,6 +561,11 @@ def test_a_pc_server_that_fails_a_call_shows_as_not_answering_with_its_own_error
             def server_row() -> dict[str, object]:
                 return next(row for row in desks.pcs() if row["name"] == "deus")["mcp"]["servers"][0]
 
+            try:
+                await desks.mcp_call(held, "deus.blender", "get_scen", {})
+            except DeskRefused as refused:
+                assert "Unknown tool" in str(refused), refused
+            assert server_row()["failing"] is None, "a server that answered with an error is not failing"
             try:
                 await desks.mcp_call(held, "deus.blender", "get_scene", {})
             except DeskRefused as refused:

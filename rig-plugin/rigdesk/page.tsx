@@ -322,7 +322,7 @@ function McpServers({ mcp, now }: { readonly mcp: Mcp; readonly now: number }): 
     <BoardPart name="MCP servers">
       <BoardFacts label="MCP servers" facts={mcp.servers.map((each): Fact => [each.name,
         <span key={each.key}>{each.says} <i>{`· ${String(each.tools.length)} ${each.tools.length === 1 ? 'tool' : 'tools'} as ${each.key}/… · opened ${agoOf(each.since_ms, now)}`}</i>
-          {each.failing === null ? null : <Quiet>{`not answering since ${agoOf(each.failing_since_ms ?? now, now)}: ${each.failing}`}</Quiet>}</span>])} />
+          {each.failing === null ? null : <Text text={`not answering since ${agoOf(each.failing_since_ms ?? now, now)}: ${each.failing}`} ink="hold" size="xs" />}</span>])} />
     </BoardPart>
   )
 }
