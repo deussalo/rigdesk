@@ -322,6 +322,11 @@ def _shell_said(text: str) -> JsonObject:
     return cast(JsonObject, said) if isinstance(said, dict) else {"text": text}
 
 
+def _shell_answered(pc: str, given: ShellInput, run_as: ShellLevel, said: JsonObject) -> JsonObject:
+    """What a PC's shell answered, as the agent reads it. A job ran as system whatever the read asked: a PC starts background jobs as SYSTEM or root only."""
+    return {"pc": pc, "as": "system" if given.job is not None else run_as, "ok": said.get("ok") is True} | _shell_said(str(said.get("text") or ""))
+
+
 async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
     agent, graph, _ = _who(call)
     if (given.job is None) == (given.command is None):
@@ -354,7 +359,7 @@ async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
     except Exception as failed:  # noqa: BLE001
         return _refused(call, failed)
     if status == HTTPStatus.OK:
-        return {"pc": pc, "as": None if given.job is not None else run_as, "ok": said.get("ok") is True} | _shell_said(str(said.get("text") or ""))
+        return _shell_answered(pc, given, run_as, said)
     code, words = str(said.get("code") or ""), str(said.get("error") or f"HTTP {status}")
     if code == "no_lane" and holds is not None and run_as == "user" and not given.background:
         return await _shell_in_session(desks, call, holds, given)

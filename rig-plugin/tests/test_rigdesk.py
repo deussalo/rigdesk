@@ -71,6 +71,17 @@ def test_a_rigdesk_pc_rig_has_not_heard_from_says_its_shell_is_unknown_not_missi
     assert "lane_down" in words({"open": False, "code": "lane_down", "words": "its management lane at /lane does not answer: x"}, "down")
 
 
+def test_a_job_read_says_the_job_ran_as_system() -> None:
+    import json
+    from rigdesk import ShellInput, _shell_answered
+    state = {"job": "j-c17fcc63", "command": "sleep 1", "started_ms": 1, "output": "", "cut_bytes": 0, "state": "running"}
+    for asked in ({"pc": "dell", "job": "j-c17fcc63"}, {"pc": "dell", "job": "j-c17fcc63", "as": "user"}):
+        read = _shell_answered("dell", ShellInput.model_validate(asked), "user" if "as" in asked else "system", {"ok": True, "text": json.dumps(state)})
+        assert read["as"] == "system" and read["job"] == "j-c17fcc63" and read["state"] == "running", read
+    ran = _shell_answered("dell", ShellInput.model_validate({"pc": "dell", "command": "id -un", "as": "user"}), "user", {"ok": True, "text": json.dumps({"exit_code": 0, "output": "deus"})})
+    assert ran["as"] == "user" and ran["output"] == "deus", ran
+
+
 def test_a_stock_pc_names_the_mcp_servers_on_its_own_address_by_http_url() -> None:
     from rigdesk.desks import StockRemote
     phone = StockRemote(id="123456789", password_file="/dev/null", mcp_servers=[{"url": "http://100.81.214.29:8790/mcp", "token_file": "/dev/null"}])

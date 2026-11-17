@@ -96,11 +96,15 @@ while read -r name rota tran; do
     DISKS+=("{\"name\":$(js "/dev/$name"),\"media\":$(js "$media"),\"health\":$(js "$health"),\"wear_pct\":$(jn "${wear:-null}"),\"temperature_c\":$(jn "${temp:-null}")}")
 done < <(lsblk -dn -o NAME,TYPE,ROTA,TRAN 2>/dev/null | awk '$2 == "disk" && $1 !~ /^(loop|zram|ram)/ {print $1, $3, $4}')
 
-# stopped services: units that failed, with the code their main process last exited with.
+# stopped services: units that failed, with the code their main process last exited with. A transient unit (a login
+# session's scope, a systemd-run command) and a user's own manager (user@UID) are none of the services the PC runs: a
+# login that ended badly leaves one failed until the next boot.
 STOPPED=()
 FAILED_UNITS=$(systemctl list-units --state=failed --no-legend --plain 2>&1) || { fail "services: systemctl list-units failed: $(printf '%s' "$FAILED_UNITS" | head -1)"; FAILED_UNITS=''; }
 while read -r unit; do
     [ -n "$unit" ] || continue
+    case "$unit" in *.scope|user@*.service) continue;; esac
+    [ "$(systemctl show -p Transient --value "$unit" 2>/dev/null)" = yes ] && continue
     desc=$(systemctl show -p Description --value "$unit" 2>/dev/null)
     code=$(systemctl show -p ExecMainStatus --value "$unit" 2>/dev/null)
     # A unit can fail with a clean exit (a time-out, a failed condition): it failed all the same.
