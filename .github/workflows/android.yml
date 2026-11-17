@@ -210,8 +210,10 @@ jobs:
           done
           # The public ID server and its key are in the binary for the viewer to dial a stock peer by ID; no source but
           # src/viewer_dial.rs may name them, and only the viewer's outbound dial (src/client.rs) may use that module.
+          # rig-plugin/rigdesk/adhoc.py names them too: it runs in Rig on its host, not in this build, as desk/connect's
+          # default ID server for a bare ID, which the operator chose; the connect_server setting replaces it.
           for needle in rs-ny.rustdesk.com OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=; do
-            hits=$(git grep -lF "$needle" -- . ':!.github' ':!src/viewer_dial.rs' || [ $? -eq 1 ])
+            hits=$(git grep -lF "$needle" -- . ':!.github' ':!src/viewer_dial.rs' ':!rig-plugin/rigdesk/adhoc.py' || [ $? -eq 1 ])
             hits="$hits$(git -C libs/hbb_common grep -lF "$needle" || [ $? -eq 1 ])"
             if [ -n "$hits" ]; then echo "::error::$needle found in: $hits"; found=1; fi
           done

@@ -1690,6 +1690,9 @@ class Desks:
             claimed = _object(await answer.json(content_type=None))
             if answer.status != 200 or not isinstance(claimed.get("session"), str):
                 raise DeskRefused(f"{name}'s rigdesk-bridge refused the session: {claimed.get('error') or f'HTTP {answer.status}'}")
+        other = self.held_by(agent, graph)
+        if other is not None:
+            raise DeskRefused(f"you came to own the session on {other.pc} while this connect ran; desk/leave it before connecting to another")
         held = self._sessions[name] = Held(name, agent, graph, node, title, claimed["session"], now_ms(), "adhoc")
         link.standing = claimed.get("standing")
         await asyncio.to_thread(self._write_state)
