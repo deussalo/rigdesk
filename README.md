@@ -20,7 +20,8 @@ README is kept at [docs/README-upstream.md](docs/README-upstream.md).
   `https://<pc>.<tailnet>.ts.net/` by `tailscale serve`. Every request needs the PC's bearer token, and every tool
   call also needs the session token that `/claim` returns for a share link.
 - **Settings.** The Security and Network pages are shown: the permanent password, and the ID and relay servers, can
-  be set at the PC as well as by the install line. The admin settings PIN guards them.
+  be set at the PC as well as by the install line. The admin settings PIN guards them. As in stock RustDesk, the PC
+  shows a one-time password beside its ID, and either password logs in; it still takes connections from the tailnet only.
 - **Trimmed.** English only, Flutter UI only (the Sciter UI, iOS and Linux packaging are gone). Port forwarding,
   the remote terminal and the remote printer are switched off in the embedded settings.
 

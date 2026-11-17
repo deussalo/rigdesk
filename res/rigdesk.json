@@ -7,7 +7,7 @@
     "allow-auto-update": "N",
     "enable-lan-discovery": "N",
     "allow-remote-config-modification": "N",
-    "verification-method": "use-permanent-password",
+    "verification-method": "use-both-passwords",
     "approve-mode": "password",
     "enable-tunnel": "N",
     "enable-terminal": "N",
