@@ -178,11 +178,19 @@ Known limits against a RigDesk PC:
 
 ## Agent shell and health (RigDesk PCs)
 
-A RigDesk PC installed with `-AgentShell on` runs commands from Rig with no desktop session: as SYSTEM in session 0,
+A Windows RigDesk PC installed with `-AgentShell on` runs commands from Rig with no desktop session: as SYSTEM in session 0,
 where nothing it starts can draw on the user's screen, or as the signed-in user. The client signs the consent text in
 the [RigDesk README](../../README.md#consent-text) first. **The PC's bearer token is then a SYSTEM credential:** keep
 its `token_file` 0600 under `~/.rig/rigdesk`, let only Rig's host reach `tag:pc`, and rotate it by rerunning the
 install line.
+
+A Linux PC installed with `install-linux.sh` (agent shell on by default) runs commands as root, from its own transient
+systemd unit with no display, or as the user signed in at its screen. Its agent shell is root's **management lane**,
+apart from the desktop user's agent API, whose token that user can read: it takes its own token, the lane token, and
+answers at `<url>/lane`. Keep it with `POST /x/rigdesk/token {pc, token, lane: true}` (it lands in
+`~/.rig/rigdesk/<pc>.lane.token`, 0600) and name it as the PC's `lane_token_file`; `desk/shell`, the switch and what ran
+then go to the lane. **The lane token is a root credential.** While the lane does not answer, the PC's shell reads as
+closed (`lane_down`). The grant level stays `system` on the wire and reads "root" for a Linux PC.
 
 * `desk/shell(pc, command, as, timeout_s)` runs one command on the named PC without joining it and without waiting on
   the person at it; `background: true` starts a job and answers its id at once, and `desk/shell(pc, job)` reads its

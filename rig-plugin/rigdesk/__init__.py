@@ -90,14 +90,15 @@ class PcsInput(ToolInput):
 
 
 class ShellInput(ToolInput):
-    command: str | None = Field(default=None, min_length=1, max_length=32 * 1024, description="What to run, in PowerShell on Windows. Omit it to read a job.")
+    command: str | None = Field(default=None, min_length=1, max_length=32 * 1024, description="What to run: in PowerShell on Windows, in bash on Linux. Omit it to read a job.")
     timeout_s: int | None = Field(default=None, ge=1, le=SHELL_LIMIT_S, description="How long it may run before the PC ends it; 60 by default. A job runs up to a day.")
     pc: str | None = Field(default=None, description="A RigDesk PC by name: runs there with no session and without touching its desktop, if the operator "
                                                      "allowed you its shell (desk/pcs says where). Omitted: the PC you joined.")
-    run_as: Literal["system", "user"] | None = Field(default=None, alias="as", description="system runs it as SYSTEM, off every desktop; user as the signed-in "
-                                                                                           "user, refused with nobody signed in. Default: the most you are allowed.")
+    run_as: Literal["system", "user"] | None = Field(default=None, alias="as", description="system runs it with the highest local rights, off every desktop: "
+                                                                                           "SYSTEM on Windows, root on Linux; user as the signed-in user, refused with nobody "
+                                                                                           "signed in. Default: the most you are allowed.")
     background: bool = Field(default=False, description="Start it as a job and answer its id at once; it outlives the call and Rig's restarts, a reboot ends it. "
-                                                        "As SYSTEM only; a PC runs at most 8.")
+                                                        "As system only; a PC runs at most 8.")
     job: str | None = Field(default=None, pattern=r"^j-[0-9a-f]{8}$", description="A job's id: answers its state and its output so far, instead of running anything.")
 
 
@@ -168,9 +169,10 @@ def _shell_words(desks: Desks, entry: PcEntry, agent: str, graph: str) -> str:
         return "none: stock RustDesk runs commands only in a joined session, as its user"
     level = _shell_level(desks, entry["name"], agent, graph)
     switch = entry["shell"]
-    pc_says = ("its RigDesk has no agent shell (RigDesk has one on Windows only)" if switch is None else "its agent shell is on" if switch.get("open")
+    pc_says = ("its RigDesk offers no agent shell: install it with the agent shell on" if switch is None else "its agent shell is on" if switch.get("open")
               else f"{switch.get('words')} ({switch.get('code')})")
-    may = {"system": "you may run commands as SYSTEM or as the user", "user": "you may run commands as its signed-in user", None: "you may not run commands there"}[level]
+    top = desks.top_rights(entry["name"])
+    may = {"system": f"you may run commands as {top} (as: system) or as the user", "user": "you may run commands as its signed-in user", None: "you may not run commands there"}[level]
     return f"{may}; {pc_says}"
 
 
@@ -254,12 +256,12 @@ async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
         return await _shell_in_session(desks, call, holds, given)
     level = _shell_level(desks, pc, agent, graph)
     if level is None:
-        return call.refused(SHELL_NOT_ALLOWED, f"the operator has not allowed you the agent shell on {pc}; they allow an agent or a graph, as the user or as SYSTEM, "
+        return call.refused(SHELL_NOT_ALLOWED, f"the operator has not allowed you the agent shell on {pc}; they allow an agent or a graph, as the user or as {desks.top_rights(pc)}, "
                                                "on the RigDesk page. desk/pcs says where you may run one.")
     run_as = given.run_as or level
     if level != "system" and (run_as == "system" or given.background or given.job is not None):
-        return call.refused(SYSTEM_NOT_GRANTED, f"on {pc} you may run commands as its signed-in user only (as: user): running as SYSTEM, and background jobs, "
-                                                "need the operator's SYSTEM grant on the RigDesk page")
+        return call.refused(SYSTEM_NOT_GRANTED, f"on {pc} you may run commands as its signed-in user only (as: user): running as {desks.top_rights(pc)} (as: system), "
+                                                f"and background jobs, need the operator's {desks.top_rights(pc)} grant on the RigDesk page")
     try:
         status, said = await desks.shell(pc, agent, graph, await call.kernel.caller_title(), _shell_asked(given, run_as))
     except Exception as failed:  # noqa: BLE001
@@ -459,7 +461,8 @@ def _built(desks: Desks) -> tuple[ToolDef, ...]:
             _native(desks, "leave", "Leave the RigDesk PC you joined; its session ends.", LeaveInput, _leave),
             _native(desks, "pcs", "Every RigDesk PC in Rig: its client, whether it is up, whether it is assigned to you, who holds it now, whether you may run "
                                   "commands there, and its health; with pc, that PC's newest health sample in full.", PcsInput, _pcs, read_only=True),
-            _native(desks, "shell", "Run a command on a RigDesk PC: named by pc, with no session and nothing on its screen, as SYSTEM or its user, where the operator "
+            _native(desks, "shell", "Run a command on a RigDesk PC: named by pc, with no session and nothing on its screen, as SYSTEM (Windows) or root (Linux), "
+                                    "or as its user, where the operator "
                                     "allowed you; unnamed, on the PC you joined. background starts a job; job reads one.", ShellInput, _shell,
                     limit_s=CALL_LIMIT_S + SHELL_LIMIT_S + 10),
             _native(desks, "request", "Ask the operator to let you join a PC now (kind join), or to assign a stock RustDesk PC to you (kind assign).", RequestInput, _request),
@@ -553,12 +556,12 @@ class PcMcpRow(View):
 
 class ShellSwitchRow(View):
     open: bool
-    code: str | None = Field(description="Why it is closed: shell_off (the install line or the PC's settings) or shell_paused (the person at the PC).")
+    code: str | None = Field(description="Why it is closed: shell_off (the install line or the PC's settings), shell_paused (the person at the PC) or lane_down (a Linux PC's management lane does not answer).")
     words: str | None
 
 
 class ShellGrantRow(GrantRow):
-    level: ShellLevel = Field(description="user: as the signed-in user; system: as SYSTEM too, and background jobs.")
+    level: ShellLevel = Field(description="user: as the signed-in user; system: with the highest local rights too (SYSTEM on Windows, root on Linux), and background jobs.")
 
 
 class PcShellRow(View):
@@ -602,6 +605,7 @@ class PcRow(View):
     client: str
     url: str
     stock: bool = Field(description="A stock RustDesk PC, driven through rigdesk-bridge on this host; its share and holder buttons are on this page.")
+    os: str | None = Field(description="windows or linux, as its agent API says; null until it answers, and for a stock PC.")
     state: str
     why: str | None
     down_since_ms: int | None
@@ -758,7 +762,7 @@ class ShellGrantParams(Params):
 
 @endpoint(ShellGrantParams, OPERATOR)
 async def post_shell_grant(request: Request[ShellGrantParams]) -> AssignDone | RefusedOutcome:
-    """Lets one agent, or every agent in a graph, run commands on a RigDesk PC's agent shell as the user or as SYSTEM, or takes that away."""
+    """Lets one agent, or every agent in a graph, run commands on a RigDesk PC's agent shell as the user or with the highest local rights (SYSTEM on Windows, root on Linux), or takes that away."""
     body = request.params.body
     try:
         changed = await request.host().live(Desks).allow_shell(body.pc, body.grantee, body.level)
@@ -849,6 +853,7 @@ class TokenBody(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", defer_build=True)
     pc: PcName
     token: Token
+    lane: bool = False
 
 
 class TokenParams(Params):
@@ -856,7 +861,8 @@ class TokenParams(Params):
 
 
 class TokenKept(View):
-    token_file: str = Field(description="Where the PC's agent-API token is kept, readable by this user alone: name it as the PC's token_file in plugins.rigdesk.pcs.")
+    token_file: str = Field(description="Where the token is kept, readable by this user alone: name it as the PC's token_file, or for a lane token its lane_token_file, "
+                                        "in plugins.rigdesk.pcs.")
 
 
 def _kept(path: Path, token: str) -> None:
@@ -868,9 +874,10 @@ def _kept(path: Path, token: str) -> None:
 
 @endpoint(TokenParams, OPERATOR)
 async def post_token(request: Request[TokenParams]) -> TokenKept:
-    """Keeps a PC's agent-API token, the one its install line sets, in a 0600 file of its own; a second call for the same PC replaces it, as rerunning the line rotates it."""
+    """Keeps a PC's agent-API token, or with lane a Linux PC's management-lane token, the one its install line sets, in a 0600 file of its own; a second call for
+    the same PC replaces it, as rerunning the line rotates it."""
     body = request.params.body
-    path = TOKENS / f"{body.pc}.token"
+    path = TOKENS / f"{body.pc}.lane.token" if body.lane else TOKENS / f"{body.pc}.token"
     await asyncio.to_thread(_kept, path.expanduser(), body.token)
     return TokenKept(token_file=str(path))
 

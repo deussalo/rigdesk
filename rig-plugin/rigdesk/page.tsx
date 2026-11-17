@@ -43,6 +43,7 @@ type PcRow = {
   readonly client: string
   readonly url: string
   readonly stock: boolean
+  readonly os: string | null
   readonly state: 'connecting' | 'up' | 'down'
   readonly why: string | null
   readonly down_since_ms: number | null
@@ -201,15 +202,17 @@ function Assign({ pc, forFleet }: { readonly pc: PcRow; readonly forFleet: boole
   )
 }
 
-/** Lets an agent or a graph run commands on a RigDesk PC's agent shell, as the user or as SYSTEM, or takes that away (level null). */
+/** Lets an agent or a graph run commands on a RigDesk PC's agent shell, as the user or as SYSTEM or root, or takes that away (level null). */
 const allowingShell = (pc: string, grantee: string, level: Level | null) => async (): Promise<Refused | null> => {
   const done = await routes('POST', 'shell_grant', { pc, grantee, level })
   return done.ok ? null : told(level === null ? 'shell grant not removed' : 'shell not allowed', done.refused)
 }
 
 const LEVELS: readonly Level[] = ['user', 'system']
-const LEVEL_WORDS: Readonly<Record<Level, string>> = { user: 'as the user', system: 'as SYSTEM' }
-const SWITCH_WORDS: Readonly<Record<string, string>> = { shell_off: 'off on the PC', shell_paused: 'paused by the person at the PC' }
+/** The level system is the PC's highest local rights: root on Linux, SYSTEM on Windows. */
+const topOf = (pc: PcRow): string => (pc.os === 'linux' ? 'root' : 'SYSTEM')
+const levelWords = (pc: PcRow): Readonly<Record<Level, string>> => ({ user: 'as the user', system: `as ${topOf(pc)}` })
+const SWITCH_WORDS: Readonly<Record<string, string>> = { shell_off: 'off on the PC', shell_paused: 'paused by the person at the PC', lane_down: 'unreachable' }
 
 type ShellRan = { readonly at_ms: number; readonly who: string; readonly graph: string | null; readonly as: Level | null; readonly command: string; readonly outcome: string; readonly took_ms: number | null; readonly job: string | null }
 
@@ -226,7 +229,7 @@ function Ran({ pc, now }: { readonly pc: PcRow; readonly now: number }): ReactNo
       <span key={`${String(each.at_ms)}-${each.command}`}>
         <code>{each.command}</code>{' '}
         <i className={css.inked} data-ink={each.outcome.startsWith('exit 0') || each.outcome === 'started' ? undefined : 'hold'}>
-          {[each.as === null ? null : LEVEL_WORDS[each.as], each.outcome, each.took_ms === null ? null : durationOf(each.took_ms, 100), each.job].filter(Boolean).join(' · ')}
+          {[each.as === null ? null : levelWords(pc)[each.as], each.outcome, each.took_ms === null ? null : durationOf(each.took_ms, 100), each.job].filter(Boolean).join(' · ')}
         </i>
       </span>])} />
   )
@@ -244,24 +247,25 @@ function Shell({ pc, shell, now, forFleet }: { readonly pc: PcRow; readonly shel
     return openDesk(who.graph, who.agent)
   }
   const switched = shell.switch
+  const words = levelWords(pc)
   return (
     <>
       <BoardBar>
-        <Text text={switched === null ? 'this PC\'s RigDesk has no agent shell: RigDesk has one on Windows only, from an up-to-date build' : switched.open ? 'on at the PC'
+        <Text text={switched === null ? 'this PC\'s RigDesk offers no agent shell: install it with the agent shell on, from an up-to-date build' : switched.open ? 'on at the PC'
           : `${SWITCH_WORDS[switched.code ?? ''] ?? switched.code ?? 'closed'}${switched.words === null ? '' : `: ${switched.words}`}`} ink={switched === null || switched.open ? 'idle' : 'hold'} size="xs" />
       </BoardBar>
       {shell.granted.map(each => (
         <BoardBar key={each.grantee} apart={<Action label="remove" tone="outlined" pending="removing…" onInvoke={allowingShell(pc.name, each.grantee, null)} />}>
           {each.agent_id !== null && each.graph !== null ? <Link href={href('agent', { graph: each.graph, agent: each.agent_id })}>{each.label}</Link> : <span>{grantLabel(each, labelOf)}</span>}
-          <Text text={LEVEL_WORDS[each.level]} ink="idle" size="xs" />
+          <Text text={words[each.level]} ink="idle" size="xs" />
         </BoardBar>
       ))}
       {shell.granted.length === 0 ? <Quiet>no agent may run commands here without its session; the agent holding the session may, as the user</Quiet> : null}
       {who.none ? null : (
         <BoardForm label={`allow shell on ${pc.name}`} onLeave={() => undefined}>
           {who.fields(`It runs commands on this PC with desk/shell(pc), with no session and nothing on its screen.${forFleet ? '' : ' An agent is also given the desk server.'}`)}
-          <Field kind="select" label="as" value={level} options={LEVELS} labels={LEVEL_WORDS} onChange={value => { setLevel(textOf(value) === 'system' ? 'system' : 'user') }}
-            about="SYSTEM runs anything on the PC, off every desktop, and starts background jobs; the user runs as whoever is signed in." />
+          <Field kind="select" label="as" value={level} options={LEVELS} labels={words} onChange={value => { setLevel(textOf(value) === 'system' ? 'system' : 'user') }}
+            about={`${topOf(pc)} runs anything on the PC, off every desktop, and starts background jobs; the user runs as whoever is signed in.`} />
           <BoardBar><Action label="allow" tone="primary" pending="allowing…" disabled={who.graph === null || shell.granted.some(each => each.grantee === who.grant && each.level === level)} onInvoke={allow} /></BoardBar>
         </BoardForm>
       )}
