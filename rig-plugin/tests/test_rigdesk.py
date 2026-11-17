@@ -484,7 +484,7 @@ def test_connect_dials_a_pc_not_ours_only_once_the_operator_approves_and_leaves_
                 else:
                     raise AssertionError("a PC not ours was joined unasked")
                 assert "--id-server" not in dialed.read_text() and os.listdir(Path(state) / "secrets") == [] and desks.held_by("a1", "g") is None
-                desks.connect_asked("desk-1", "105 517 719", "hunter2-secret", "a1", SeatId(GraphName("g"), NodeId("n")))
+                desks.connect_asked("desk-1", "105 517 719", "hunter2-secret", "a1", SeatId(GraphName("g"), NodeId("n")), ("p", {"ask": "desk-1"}))
                 try:
                     await desks.connect_approved("desk-1", "a1", "g", "n", "A")
                 except DeskRefused as refused:
@@ -503,6 +503,36 @@ def test_connect_dials_a_pc_not_ours_only_once_the_operator_approves_and_leaves_
             assert dialed.read_text().count("--login-id") == 1, dialed.read_text()
             assert "nothing was dialed" in again, again
             assert os.listdir(Path(state) / "secrets") == [] and desks.entries() == () and desks.held_by("a1", "g") is None
+
+    asyncio.run(run())
+
+
+def test_a_connect_ask_that_lapses_is_withdrawn_from_the_operator_and_its_agent_told() -> None:
+    from rigdesk import desks as desks_module
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            ended: list[tuple[SeatId, str, object]] = []
+            told: list[str] = []
+
+            async def route_ended(seat: SeatId, provision: str, given: object) -> int:
+                ended.append((seat, provision, given))
+                return 1
+
+            async def tell(_held: object, words: str, _key: str, _timing: str = "steer") -> bool:
+                told.append(words)
+                return True
+            desks = Desks(SimpleNamespace(state_dir=Path(state), route_ended=route_ended))  # type: ignore[arg-type]
+            desks._tell = tell  # type: ignore[method-assign]
+            seat, lapse = SeatId(GraphName("g"), NodeId("n")), desks_module.CONNECT_ASK_S
+            desks_module.CONNECT_ASK_S = 0
+            try:
+                desks.connect_asked("desk-1", "105517719", "hunter2-secret", "a1", seat, ("p", {"ask": "desk-1"}))
+                await asyncio.sleep(0.05)
+            finally:
+                desks_module.CONNECT_ASK_S = lapse
+            assert ended == [(seat, "p", {"ask": "desk-1"})], ended
+            assert len(told) == 1 and "lapsed" in told[0] and "request is withdrawn" in told[0] and "hunter2" not in told[0], told
 
     asyncio.run(run())
 
