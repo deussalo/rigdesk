@@ -214,6 +214,10 @@ class DeskRefused(Exception):
     """A call that cannot go through, with the words the agent reads."""
 
 
+class McpAnswered(DeskRefused):
+    """A PC's MCP server, or the PC itself, answered and refused: a JSON-RPC error, or the PC's own 403 or 404. The server is not failing."""
+
+
 class McpSessionGone(Exception):
     """A PC's MCP server no longer knows the session it gave: MCP's answer is HTTP 404, and the client opens a new one."""
 
@@ -258,6 +262,8 @@ class PcLink:
     servers: dict[str, PcServer] = field(default_factory=dict[str, PcServer])
     mcp_on: bool | None = None
     mcp_why: str | None = None
+    # Each open server whose last call failed, by name: what went wrong and when; a later call that it answers clears it.
+    server_faults: dict[str, tuple[str, int]] = field(default_factory=dict[str, tuple[str, int]])
     syncing: asyncio.Lock = field(default_factory=asyncio.Lock)
     # What the health watch is asking the PC now, and how long it waits, so a timeout can say what went unanswered.
     asking: tuple[str, float] = ("GET /health", 15.0)
@@ -1203,6 +1209,8 @@ class Desks:
                 link.mcp_on, link.mcp_why = None, f"its MCP servers could not be listed: {failed}"
                 listed = {name: server.says for name, server in link.servers.items()}
             dropped += [(link.servers.pop(name), "the PC no longer offers it") for name in [name for name in link.servers if name not in listed]]
+            for server, _ in dropped:
+                link.server_faults.pop(server.name, None)
             opened: list[PcServer] = []
             for name, says in listed.items():
                 if name in link.servers:
@@ -1214,6 +1222,7 @@ class Desks:
                     _LOG.warning("rigdesk_server_unopened", f"RigDesk {link.name}: {link.mcp_why}", pc=link.name)
                     continue
                 link.servers[name] = server
+                link.server_faults.pop(name, None)
                 opened.append(server)
             self._revision += bool(stale or dropped or opened)
         for server, why in dropped:
@@ -1280,7 +1289,8 @@ class Desks:
             if answer.status == 404 and sid and "no MCP server" not in text:
                 raise McpSessionGone(text[:300])
             if answer.status not in (200, 202):
-                raise DeskRefused(f"{link.name}.{name} answered HTTP {answer.status}" + (f": {text[:300]}" if text else ""))
+                refused = McpAnswered if answer.status in (403, 404) else DeskRefused
+                raise refused(f"{link.name}.{name} answered HTTP {answer.status}" + (f": {text[:300]}" if text else ""))
             streamed = answer.content_type == "text/event-stream"
         if notice:
             return {}, sid
@@ -1289,7 +1299,7 @@ class Desks:
         if reply is None:
             raise DeskRefused(f"{link.name}.{name} sent no answer to {method}")
         if "error" in reply:
-            raise DeskRefused(f"{link.name}.{name}: {_object(reply['error']).get('message', 'error')}")
+            raise McpAnswered(f"{link.name}.{name}: {_object(reply['error']).get('message', 'error')}")
         return _object(reply.get("result")), sid
 
     async def mcp_call(self, held: Held, key: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1301,11 +1311,21 @@ class Desks:
             raise DeskRefused(f"{key} is not open on {held.pc} now; the MCP servers there reach you when they run")
         params = {"name": tool, "arguments": arguments}
         try:
-            result, _ = await self._mcp_post(link, held, server.name, server.sid, server.protocol, "tools/call", params, MCP_CALL_LIMIT_S)
-        except McpSessionGone:
-            async with link.syncing:
-                server = link.servers[server.name] = await self._open_server(link, held, server.name, server.says)
-            result, _ = await self._mcp_post(link, held, server.name, server.sid, server.protocol, "tools/call", params, MCP_CALL_LIMIT_S)
+            try:
+                result, _ = await self._mcp_post(link, held, server.name, server.sid, server.protocol, "tools/call", params, MCP_CALL_LIMIT_S)
+            except McpSessionGone:
+                async with link.syncing:
+                    server = link.servers[server.name] = await self._open_server(link, held, server.name, server.says)
+                result, _ = await self._mcp_post(link, held, server.name, server.sid, server.protocol, "tools/call", params, MCP_CALL_LIMIT_S)
+        except McpAnswered:
+            raise
+        except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
+            words = str(failed) if isinstance(failed, DeskRefused) else f"MCP server {server.name} on {held.pc} did not answer {tool}: {failure(failed)}"
+            link.server_faults[server.name] = (words, now_ms())
+            self._revision += 1
+            raise DeskRefused(words) from failed
+        if link.server_faults.pop(server.name, None) is not None:
+            self._revision += 1
         return await self._answered(held.pc, f"{server.name}-{tool}", result) | {"server": server.name}
 
     async def _answered(self, pc: str, what: str, result: dict[str, Any]) -> dict[str, Any]:
@@ -1575,7 +1595,8 @@ class Desks:
                          "health": self._health_row(name, link), "adhoc": self._adhoc_row(name),
                          "mcp": {"allowed": link.spec.mcp, "on": link.mcp_on, "why": link.mcp_why,
                                  "servers": [{"name": server.name, "key": server.key, "says": server.says, "tools": [tool["name"] for tool in server.tools],
-                                              "since_ms": server.since_ms} for server in link.servers.values()]}})
+                                              "since_ms": server.since_ms, "failing": link.server_faults.get(server.name, (None,))[0],
+                                              "failing_since_ms": link.server_faults.get(server.name, (None, None))[1]} for server in link.servers.values()]}})
         return rows
 
     def _health_row(self, name: str, link: PcLink) -> dict[str, Any] | None:

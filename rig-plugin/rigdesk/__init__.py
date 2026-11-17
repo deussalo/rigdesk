@@ -643,6 +643,8 @@ class PcServerRow(View):
     says: str = Field(description="Its own words for itself: serverInfo's name and version.")
     tools: tuple[str, ...]
     since_ms: int = Field(description="When the holding agent's session opened it.")
+    failing: str | None = Field(default=None, description="Why its last call failed, in its own words where it gave any; null once it answers again.")
+    failing_since_ms: int | None = Field(default=None, description="When that call failed.")
 
 
 class PcMcpRow(View):

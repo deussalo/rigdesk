@@ -10,7 +10,10 @@ const EVERY_MS = Math.min(REREAD_MS, 5_000)
 type Owner = { readonly id: string | null; readonly title: string | null; readonly graph: string | null }
 type Grant = { readonly grantee: string; readonly label: string; readonly graph: string | null; readonly agent_id: string | null }
 type Shot = { readonly mime: string; readonly data: string; readonly taken_ms: number }
-type McpServer = { readonly name: string; readonly key: string; readonly says: string; readonly tools: readonly string[]; readonly since_ms: number }
+type McpServer = {
+  readonly name: string; readonly key: string; readonly says: string; readonly tools: readonly string[]; readonly since_ms: number
+  readonly failing: string | null; readonly failing_since_ms: number | null
+}
 /** The PC's own MCP servers: Rig's switch, the PC's as it last said (null while no agent holds it), why none is offered, and those open for the holder. */
 type Mcp = { readonly allowed: boolean; readonly on: boolean | null; readonly why: string | null; readonly servers: readonly McpServer[] }
 type Level = 'user' | 'system'
@@ -318,7 +321,8 @@ function McpServers({ mcp, now }: { readonly mcp: Mcp; readonly now: number }): 
   return (
     <BoardPart name="MCP servers">
       <BoardFacts label="MCP servers" facts={mcp.servers.map((each): Fact => [each.name,
-        <span key={each.key}>{each.says} <i>{`· ${String(each.tools.length)} ${each.tools.length === 1 ? 'tool' : 'tools'} as ${each.key}/… · opened ${agoOf(each.since_ms, now)}`}</i></span>])} />
+        <span key={each.key}>{each.says} <i>{`· ${String(each.tools.length)} ${each.tools.length === 1 ? 'tool' : 'tools'} as ${each.key}/… · opened ${agoOf(each.since_ms, now)}`}</i>
+          {each.failing === null ? null : <Text text={`not answering since ${agoOf(each.failing_since_ms ?? now, now)}: ${each.failing}`} ink="hold" size="xs" />}</span>])} />
     </BoardPart>
   )
 }

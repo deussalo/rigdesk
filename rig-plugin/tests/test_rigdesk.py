@@ -537,6 +537,49 @@ def test_a_connect_ask_that_lapses_is_withdrawn_from_the_operator_and_its_agent_
     asyncio.run(run())
 
 
+def test_a_pc_server_that_fails_a_call_shows_as_not_answering_with_its_own_error_until_it_answers_again() -> None:
+    from rigdesk.desks import DeskRefused, McpAnswered, PcServer
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
+            held = Held("deus", "agent_a", "g", "n", "A", "s", 0)
+            desks._sessions["deus"] = held
+            link = desks._pcs["deus"] = PcLink("deus", PCS["deus"], state="up")
+            link.servers["blender"] = PcServer("deus", "blender", "blender-mcp 1.2", ({"name": "get_scene"},), "sid", "2025-06-18", "s", now_ms())
+            answers: list[object] = [McpAnswered("deus.blender: Unknown tool: get_scen"), DeskRefused("deus.blender answered HTTP 502: Could not connect to Blender."),
+                                     {"content": [{"type": "text", "text": "Cube"}]}]
+
+            async def post(*_args: object) -> tuple[object, None]:
+                answer = answers.pop(0)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer, None
+
+            desks._mcp_post = post  # type: ignore[method-assign]
+
+            def server_row() -> dict[str, object]:
+                return next(row for row in desks.pcs() if row["name"] == "deus")["mcp"]["servers"][0]
+
+            try:
+                await desks.mcp_call(held, "deus.blender", "get_scen", {})
+            except DeskRefused as refused:
+                assert "Unknown tool" in str(refused), refused
+            assert server_row()["failing"] is None, "a server that answered with an error is not failing"
+            try:
+                await desks.mcp_call(held, "deus.blender", "get_scene", {})
+            except DeskRefused as refused:
+                assert "Could not connect to Blender" in str(refused), refused
+            else:
+                raise AssertionError("a failed call answered")
+            row = server_row()
+            assert "Could not connect to Blender" in str(row["failing"]) and row["failing_since_ms"] is not None, row
+            assert (await desks.mcp_call(held, "deus.blender", "get_scene", {}))["text"] == "Cube"
+            assert server_row()["failing"] is None
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
