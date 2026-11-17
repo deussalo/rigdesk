@@ -155,9 +155,13 @@ class DeskPc(Shape):
     client: Annotated[str, Field(description="The client this PC belongs to.")] = ""
     stock: Annotated[StockRemote | None, Field(description="Set for a PC running stock RustDesk instead of RigDesk; who may act on it with no share link is set on the RigDesk page.")] = None
     mcp: Annotated[bool, Field(description="The MCP servers running on the PC reach the agent holding it, as <pc>.<server>/<tool>; off, Rig opens none. The person at the PC has a switch of their own.")] = True
+    lane_token_file: Annotated[str | None, Field(description="A Linux PC's: a file readable by this user alone holding its management lane's token, a root credential apart from the agent-API token. "
+                                                             "Its agent shell is then reached at <url>/lane with it; unset, at <url> with token_file, as on Windows.")] = None
 
     @model_validator(mode="after")
     def _stock_is_local(self) -> DeskPc:
+        if self.stock is not None and self.lane_token_file is not None:
+            raise ValueError("a stock PC has no management lane: leave lane_token_file out")
         if self.stock is not None:
             parts = urlsplit(self.url)
             if parts.scheme != "http" or parts.hostname not in ("127.0.0.1", "localhost") or parts.port is None:
@@ -205,7 +209,7 @@ class McpSessionGone(Exception):
 
 class Grants(BaseModel):
     """rigdesk's own doc, written only on an operator's act: who holds a standing grant to each PC (Desks.assign, Desks.unassign),
-    and who may run commands on each RigDesk PC's agent shell, as the user or as SYSTEM (Desks.allow_shell)."""
+    and who may run commands on each RigDesk PC's agent shell, as the user or with the highest local rights, SYSTEM or root (Desks.allow_shell)."""
     model_config = ConfigDict(frozen=True, extra="forbid")
     pcs: dict[PcName, tuple[Grantee, ...]] = {}
     shell: dict[PcName, dict[Grantee, ShellLevel]] = {}
@@ -248,6 +252,10 @@ class PcLink:
     asking: tuple[str, float] = ("GET /health", 15.0)
     # The PC's agent shell as it last said: {open, code, words}; None for a RigDesk without one, or a stock PC.
     shell: dict[str, Any] | None = None
+    # The OS its agent API names in /health: "windows" or "linux"; None until it answers, or from a RigDesk older than that.
+    os: str | None = None
+    # A Linux PC's watch on its management lane, which says the agent shell's switch apart from the desktop's agent API.
+    lane: asyncio.Task[None] | None = None
     # The PC's switch for sessions the operator starts from Rig, as it last said: {open, code, words}; None for a RigDesk without /join, or a stock PC.
     join: dict[str, Any] | None = None
     sampling: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -288,6 +296,7 @@ class PcEntry(TypedDict):
     assigned: tuple[str, ...]
     held_by: PcHolder | None
     shell: dict[str, Any] | None
+    os: str | None
     health: Health | None
     join: dict[str, Any] | None
 
@@ -468,7 +477,7 @@ class Desks:
         carried: dict[str, dict[str, PcServer]] = {}
         for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
             link = self._pcs.pop(name)
-            for task in (link.task, link.remote):
+            for task in (link.task, link.remote, link.lane):
                 if task is not None:
                     task.cancel()
             if link.servers:
@@ -483,6 +492,8 @@ class Desks:
                 if spec.stock is not None:
                     link.remote = TASKS.spawn(f"rigdesk-bridge-{name}", self._remote(link, spec.stock))
                 link.task = TASKS.spawn(f"rigdesk-{name}", self._held(link))
+                if spec.lane_token_file is not None:
+                    link.lane = TASKS.spawn(f"rigdesk-lane-{name}", self._lane_held(link))
                 self._linked(link)
         self.host.forget(PC, self._pcs.keys())
         self.host.forget(PC_HEALTH, self._pcs.keys())
@@ -736,18 +747,25 @@ class Desks:
 
     # --- one PC ---
 
-    def _token(self, spec: DeskPc) -> str:
+    @staticmethod
+    def _token(token_file: str) -> str:
         try:
-            token = Path(spec.token_file).expanduser().read_text().strip()
+            token = Path(token_file).expanduser().read_text().strip()
         except OSError as unread:
-            raise DeskRefused(f"its token file {spec.token_file} could not be read: {unread}") from unread
+            raise DeskRefused(f"its token file {token_file} could not be read: {unread}") from unread
         if not token or any(ord(char) < 0x21 or ord(char) > 0x7e for char in token):
-            raise DeskRefused(f"its token file {spec.token_file} is empty or holds characters a token cannot")
+            raise DeskRefused(f"its token file {token_file} is empty or holds characters a token cannot")
         return token
 
     def _headers(self, link: PcLink, session: str | None = None) -> dict[str, str]:
-        headers = {"Authorization": f"Bearer {self._token(link.spec)}"}
+        headers = {"Authorization": f"Bearer {self._token(link.spec.token_file)}"}
         return headers | ({"X-Desk-Session": session} if session else {})
+
+    def _shell_at(self, link: PcLink) -> tuple[str, dict[str, str]]:
+        """Where the PC's agent shell answers, and with which token: a Linux PC's management lane, or the agent API itself on Windows."""
+        if link.spec.lane_token_file is None:
+            return link.spec.url, self._headers(link)
+        return f"{link.spec.url}/lane", {"Authorization": f"Bearer {self._token(link.spec.lane_token_file)}"}
 
     def _client(self) -> aiohttp.ClientSession:
         if self._http is None:
@@ -788,7 +806,9 @@ class Desks:
                 raise DeskRefused(f"/health answered HTTP {answer.status}" + (": the token is refused" if answer.status == 401 else ""))
             health = await answer.json()
         link.standing = health.get("standing")
-        link.shell = _object(health["shell"]) if isinstance(health.get("shell"), dict) else None
+        link.os = health["os"] if isinstance(health.get("os"), str) else None
+        if link.spec.lane_token_file is None:
+            link.shell = _object(health["shell"]) if isinstance(health.get("shell"), dict) else None
         link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
         down = health.get("down")
         boot = str(health.get("boot", ""))
@@ -821,6 +841,44 @@ class Desks:
                     data = []
                     if isinstance(event, dict):
                         await self._event(link, event)
+
+    async def _lane_held(self, link: PcLink) -> None:
+        """A Linux PC's agent shell is root's management lane, apart from the desktop user's agent API: its switch is read from the lane's
+        /health and kept by the lane's switch events; while the lane does not answer, the shell reads as closed and says why."""
+        tries = 0
+        while True:
+            try:
+                url, headers = self._shell_at(link)
+                async with self._client().get(f"{url}/health", headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as answer:
+                    if answer.status != 200:
+                        raise DeskRefused(f"/lane/health answered HTTP {answer.status}" + (": the lane token is refused" if answer.status == 401 else ""))
+                    health = _object(await answer.json(content_type=None))
+                link.shell = _object(health["shell"]) if isinstance(health.get("shell"), dict) else None
+                tries = 0
+                async with self._client().get(f"{url}/events", headers=headers | {"Accept": "text/event-stream"},
+                                              timeout=aiohttp.ClientTimeout(total=None, sock_read=EVENTS_SILENT_S)) as stream:
+                    if stream.status != 200:
+                        raise DeskRefused(f"/lane/events answered HTTP {stream.status}")
+                    async for raw in stream.content:
+                        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            event = _object(json.loads(line[5:].lstrip()))
+                        except ValueError:
+                            continue
+                        if event.get("type") == "shell_switch":
+                            link.shell = {"open": event.get("open") is True, "code": event.get("code"), "words": event.get("words")}
+                why = "its event stream ended"
+            except asyncio.CancelledError:
+                raise
+            except Exception as failed:  # noqa: BLE001
+                why = str(failed) if isinstance(failed, DeskRefused) else failure(failed)
+            if link.shell is None or link.shell.get("code") != "lane_down":
+                _LOG.warning("rigdesk_lane_down", f"RigDesk {link.name}: its management lane does not answer: {why}", pc=link.name)
+            link.shell = {"open": False, "code": "lane_down", "words": f"its management lane at /lane does not answer: {why}"}
+            await asyncio.sleep(RETRY_S[min(tries, len(RETRY_S) - 1)])
+            tries += 1
 
     async def _rebooted(self, pc: str, boot: str) -> None:
         """A PC whose agent host restarted lost its sessions and numbers its events afresh."""
@@ -883,7 +941,7 @@ class Desks:
             self._resync(link, None if event.get("found") else (str(event.get("name") or ""), str(event.get("why") or "it stopped")))
         if kind == "mcp":
             self._resync(link)
-        if kind == "shell_switch":
+        if kind == "shell_switch" and link.spec.lane_token_file is None:
             link.shell = {"open": event.get("open") is True, "code": event.get("code"), "words": event.get("words")}
         if kind == "health":
             TASKS.spawn(f"rigdesk-samples-{link.name}", self._catch_up(link, int(event.get("sample") or 0)))
@@ -920,7 +978,7 @@ class Desks:
                 async with self._client().get(f"{link.spec.url}/samples?after={after}", headers=self._headers(link),
                                               timeout=aiohttp.ClientTimeout(total=SAMPLES_LIMIT_S)) as answer:
                     if answer.status == 404:
-                        link.samples_why = "this PC's RigDesk takes no health samples (RigDesk takes them on Windows only)"
+                        link.samples_why = "this PC's RigDesk takes no health samples" + (" (RigDesk takes them on Windows only)" if link.os == "linux" else "")
                         return
                     if answer.status != 200:
                         raise DeskRefused(f"/samples answered HTTP {answer.status}")
@@ -961,7 +1019,8 @@ class Desks:
         timeout_s = asked.get("timeout_s")
         limit_s = CALL_LIMIT_S + (timeout_s if isinstance(timeout_s, int) and 0 < timeout_s <= SHELL_LIMIT_S else 60)
         body = {"agent": {"id": agent, "title": title, "graph": graph}} | asked
-        async with self._client().post(f"{link.spec.url}/shell", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=limit_s)) as answer:
+        url, headers = self._shell_at(link)
+        async with self._client().post(f"{url}/shell", json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=limit_s)) as answer:
             said = await answer.json(content_type=None)
             return answer.status, _object(said)
 
@@ -970,7 +1029,8 @@ class Desks:
         link = self._link(pc)
         if link.state != "up":
             raise DeskRefused(f"RigDesk PC {pc} is down: {link.why or 'not reached yet'}")
-        async with self._client().get(f"{link.spec.url}/log?n={SHELL_LOG_READ}", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
+        url, headers = self._shell_at(link)
+        async with self._client().get(f"{url}/log?n={SHELL_LOG_READ}", headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as answer:
             if answer.status != 200:
                 raise DeskRefused(f"{pc}'s journal answered HTTP {answer.status}")
             entries = _objects(_object(await answer.json(content_type=None)).get("entries"))
@@ -1440,7 +1500,7 @@ class Desks:
             standing = link.standing or {}
             owner = standing.get("owner") or None
             held = self._sessions.get(name)
-            rows.append({"name": name, "client": link.spec.client, "url": link.spec.url, "stock": link.spec.stock is not None, "state": link.state, "why": link.remote_why or link.why,
+            rows.append({"name": name, "client": link.spec.client, "url": link.spec.url, "stock": link.spec.stock is not None, "os": link.os, "state": link.state, "why": link.remote_why or link.why,
                          "down_since_ms": link.down_since_ms, "holder": standing.get("holder") if owner else None,
                          "owner": None if owner is None else {"id": owner.get("agent_id"), "title": owner.get("title"), "graph": owner.get("graph")},
                          "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id"), "assigned": self.granted(name),
@@ -1464,13 +1524,18 @@ class Desks:
                     "ram_used_pct": round(100 * (1 - figures.ram.free_mb / figures.ram.total_mb), 1) if figures.ram.total_mb else None,
                     "cpu_pct": figures.cpu.load_pct, "build": figures.os.build, "uptime_s": figures.uptime_s, "pending_reboot": figures.pending_reboot}}
 
+    def top_rights(self, pc: str) -> str:
+        """Who the grant level system runs as on this PC, in its own OS's word: root on Linux, SYSTEM on Windows and while it is unknown."""
+        link = self._pcs.get(pc)
+        return "root" if link is not None and link.os == "linux" else "SYSTEM"
+
     def entries(self) -> tuple[PcEntry, ...]:
         rows: list[PcEntry] = []
         for name, link in sorted(self._pcs.items()):
             held = self._sessions.get(name)
             rows.append(PcEntry(name=name, client=link.spec.client, stock=link.spec.stock is not None, state=link.state, why=link.remote_why or link.why,
                                 assigned=self.granted(name), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph),
-                                shell=link.shell, health=self.judged(name), join=link.join))
+                                shell=link.shell, os=link.os, health=self.judged(name), join=link.join))
         return tuple(rows)
 
     def session_of(self, graph: str, agent: str) -> dict[str, Any] | None:
