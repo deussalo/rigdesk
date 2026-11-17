@@ -77,7 +77,7 @@ RigDesk's PIN-locked security settings. Have the client sign the text below befo
 > edition, build and uptime; processor name and load; memory in use; size and free space of each local drive;
 > whether a restart is pending; Windows Update's last install and pending count (checked hourly); Defender's
 > real-time protection and signature age; BitLocker status per drive; each physical disk's health, wear and
-> temperature; automatic services that are stopped; the count of errors in the System event log in the last 24 hours; the
+> temperature; automatic services that are stopped; the count of System-log errors in the last 24 hours; the
 > battery where there is one; and RigDesk's own version. It reads no files, documents, browsing or keystrokes. The
 > computer keeps the last 24 hours of these readings; Rig fetches them over the same private network and keeps 7 days
 > of them on its host, where they are shown to **<operator>** and their agents and checked for faults.

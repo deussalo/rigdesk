@@ -43,14 +43,16 @@ RAM_FREE=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)
 # volumes: each local block device's file system once, by its mount point.
 VOLUMES=()
 declare -A SEEN=()
+# df exits non-zero when any one file system is unreadable, and still lists the rest.
+DF=$(df -l -P -BM -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x ramfs 2>&1); DF_EXIT=$?
+[ "$DF_EXIT" = 0 ] || fail "volumes: df exited $DF_EXIT: $(printf '%s\n' "$DF" | grep -v '^Filesystem' | grep -v '^/' | head -1)"
 while read -r dev total avail target; do
     [[ "$dev" == /dev/* ]] || continue
     [ -n "${SEEN[$dev]:-}" ] && continue
     SEEN[$dev]=1
     label=$(lsblk -no LABEL "$dev" 2>/dev/null | head -1)
     VOLUMES+=("{\"name\":$(js "$target"),\"label\":$(js "$label"),\"total_mb\":$(jn "${total%M}"),\"free_mb\":$(jn "${avail%M}")}")
-done < <(df -l -P -BM -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x ramfs 2>/dev/null | awk 'NR>1{print $1, $2, $4, $6}') \
-    || fail "volumes: df failed"
+done < <(printf '%s\n' "$DF" | awk 'NR>1 && $1 ~ /^\// {print $1, $2, $4, $6}')
 
 # pending reboot: Debian's and Ubuntu's marker, and a kernel newer than the running one.
 REBOOT_WHY=()
@@ -62,11 +64,17 @@ NEWEST_KERNEL=$(ls /boot/vmlinuz-* 2>/dev/null | sed 's|^/boot/vmlinuz-||' | sor
 # updates: from apt's cache as it stands; this never fetches, so checked_ms says how fresh the cache is.
 UPDATES=null
 if command -v apt-get > /dev/null; then
-    PENDING=$(apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null | grep -c '^Inst ')
+    # A broken cache or a held lock fails the simulation: then pending is unknown, not 0.
+    APT_ERROR=null
+    if SIMULATED=$(apt-get -s -o Debug::NoLocking=1 upgrade 2>&1); then
+        PENDING=$(printf '%s\n' "$SIMULATED" | grep -c '^Inst ')
+    else
+        PENDING=null; APT_ERROR=$(js "apt-get -s upgrade failed: $(printf '%s\n' "$SIMULATED" | grep -E '^(E|W):' | head -1)")
+    fi
     CHECKED=$(stat -c %Y /var/lib/apt/periodic/update-success-stamp /var/lib/apt/lists/partial 2>/dev/null | sort -n | tail -1)
     LAST=$(zgrep -h ' status installed ' /var/log/dpkg.log* 2>/dev/null | sort | tail -1 | cut -d' ' -f1,2)
     LAST_MS=null; [ -n "$LAST" ] && LAST_MS=$(date -d "$LAST" +%s%3N 2>/dev/null || echo null)
-    UPDATES="{\"checked_ms\":$( [ -n "$CHECKED" ] && echo $((CHECKED * 1000)) || echo null),\"last_install_ms\":$(jn "$LAST_MS"),\"pending\":$(jn "$PENDING"),\"error\":null}"
+    UPDATES="{\"checked_ms\":$( [ -n "$CHECKED" ] && echo $((CHECKED * 1000)) || echo null),\"last_install_ms\":$(jn "$LAST_MS"),\"pending\":$(jn "$PENDING"),\"error\":$APT_ERROR}"
 fi
 
 # disks: each physical disk, with SMART's verdict, wear and temperature where smartctl is installed.
@@ -75,7 +83,8 @@ while read -r name rota tran; do
     media=$([ "$tran" = nvme ] && echo NVMe || { [ "$rota" = 1 ] && echo HDD || echo SSD; })
     health=Unknown wear=null temp=null
     if command -v smartctl > /dev/null; then
-        smart=$(smartctl -H -A "/dev/$name" 2>/dev/null)
+        # -n standby leaves a spun-down disk asleep (it reads Unknown that time) rather than waking it every 10 minutes.
+        smart=$(smartctl -n standby -H -A "/dev/$name" 2>/dev/null)
         case "$smart" in
             *"test result: PASSED"*|*"SMART Health Status: OK"*) health=Healthy ;;
             *"test result: FAILED"*) health=Unhealthy ;;
@@ -89,6 +98,7 @@ done < <(lsblk -dn -o NAME,TYPE,ROTA,TRAN 2>/dev/null | awk '$2 == "disk" && $1 
 
 # stopped services: units that failed, with the code their main process last exited with.
 STOPPED=()
+FAILED_UNITS=$(systemctl list-units --state=failed --no-legend --plain 2>&1) || { fail "services: systemctl list-units failed: $(printf '%s' "$FAILED_UNITS" | head -1)"; FAILED_UNITS=''; }
 while read -r unit; do
     [ -n "$unit" ] || continue
     desc=$(systemctl show -p Description --value "$unit" 2>/dev/null)
@@ -96,11 +106,15 @@ while read -r unit; do
     # A unit can fail with a clean exit (a time-out, a failed condition): it failed all the same.
     [ "${code:-0}" = 0 ] && code=-1
     STOPPED+=("{\"name\":$(js "$unit"),\"display\":$(js "$desc"),\"delayed\":false,\"exit_code\":$(jn "$code")}")
-done < <(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}') \
-    || fail "services: systemctl failed"
+done < <(printf '%s\n' "$FAILED_UNITS" | awk '{print $1}')
 
 # system log: errors and worse in the system journal over the last 24 hours.
-SYSTEM_ERRORS=$(journalctl --system -q --no-pager -p err --since "-24h" -o cat 2>/dev/null | wc -l) || { fail "system log: journalctl failed"; SYSTEM_ERRORS=null; }
+if JOURNAL=$(journalctl --system -q --no-pager -p err --since "-24h" -o cat 2>/dev/null); then
+    SYSTEM_ERRORS=0; [ -n "$JOURNAL" ] && SYSTEM_ERRORS=$(printf '%s\n' "$JOURNAL" | wc -l)
+else
+    fail "system log: journalctl failed"; SYSTEM_ERRORS=null
+fi
+unset JOURNAL
 
 # battery: the first, where there is one.
 BATTERY=null
