@@ -3,6 +3,6 @@
   "provides": [
     { "type": "route", "path": "all", "module": "page.tsx", "export": "RigdeskPage" },
     { "type": "entry", "list": "menu", "id": "rigdesk", "order": 21, "module": "page.tsx", "export": "RigdeskTab" },
-    { "type": "entry", "list": "agent_holds", "id": "rigdesk", "module": "holds.tsx", "export": "RigdeskHold" }
+    { "type": "entry", "list": "agent_tools", "id": "rigdesk", "module": "tools.tsx", "export": "RigdeskTool" }
   ]
 }

@@ -8,13 +8,19 @@ type Session = { readonly pc: string; readonly state: string; readonly holder: '
 
 type Ink = 'live' | 'hold' | 'fault' | 'idle'
 
-const HELD: Readonly<Record<NonNullable<Session['holder']>, { readonly word: string; readonly ink: Ink }>> = {
-  agent: { word: 'agent has input', ink: 'live' }, human: { word: 'human has input', ink: 'hold' }, blocked: { word: 'blocked by the human', ink: 'hold' },
+type Shown = { readonly word: string; readonly ink: Ink }
+
+/** The link's state, each with its own ink; a link still connecting is not yet down. */
+const LINKED: Readonly<Record<string, Shown>> = { connecting: { word: 'connecting', ink: 'hold' }, down: { word: 'down', ink: 'fault' }, missing: { word: 'missing', ink: 'fault' } }
+
+/** An up PC the human has taken is paused for the agent: its calls are refused until the human lets go. */
+const HELD: Readonly<Record<NonNullable<Session['holder']>, Shown>> = {
+  agent: { word: 'up', ink: 'live' }, human: { word: 'paused · human has input', ink: 'hold' }, blocked: { word: 'paused · blocked by the human', ink: 'hold' },
 }
 
 /** The PC's link comes first: a PC that is not up says so, whoever holds its input. */
-const shownOf = (session: Session): { readonly word: string; readonly ink: Ink } =>
-  session.state !== 'up' ? { word: session.state, ink: 'fault' } : session.holder === null ? { word: 'joined', ink: 'idle' } : HELD[session.holder]
+const shownOf = (session: Session): Shown =>
+  session.state !== 'up' ? LINKED[session.state] ?? { word: session.state, ink: 'fault' } : session.holder === null ? { word: 'up', ink: 'live' } : HELD[session.holder]
 
 const useSession = (graph: string, agent: string): Session | null => {
   const [session, setSession] = useState<Session | null>(null)
@@ -31,8 +37,8 @@ const useSession = (graph: string, agent: string): Session | null => {
   return session
 }
 
-/** The RigDesk PC the agent has joined, as one row beside its shell and sub-agents: the PC, where its input stands, how long it has been joined; the row opens RigDesk. */
-export function RigdeskHold({ graph, agent }: ListProps<'agent_holds'>): ReactNode {
+/** The RigDesk PC the agent has joined, as one row of its tools beside its shell: the PC, its link up, connecting, down or paused, how long it has been joined; the row opens RigDesk. */
+export function RigdeskTool({ graph, agent }: ListProps<'agent_tools'>): ReactNode {
   const session = useSession(graph, agent)
   const now = useNow(1000)
   if (session === null) return null
