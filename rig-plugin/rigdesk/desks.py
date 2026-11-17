@@ -53,6 +53,8 @@ SETTINGS_EVERY_S = 5.0
 IDLE_LEAVE_MS = 5 * 60_000
 CALL_LIMIT_S = 120.0
 EVENTS_SILENT_S = 45.0
+# How long a desk/connect to a PC not ours waits for the operator's approval before its password is dropped.
+CONNECT_ASK_S = 15 * 60
 SHELL_LIMIT_S = 600
 
 
@@ -322,6 +324,22 @@ class AdHoc:
     port: int | None = None
 
 
+@dataclass
+class AskedConnect:
+    """A desk/connect waiting on the operator's approval to dial out: its password is held here, in memory alone, until they accept or it lapses."""
+    target: str
+    password: str
+    agent: str
+    expiry: asyncio.Task[None] | None = None
+
+
+class ConnectAsk(Exception):
+    """desk/connect found none of our PCs under that ID: dialing out, to where, waits for the operator's approval."""
+    def __init__(self, target: str, where: str, tried: tuple[str, ...]) -> None:
+        super().__init__(f"{target} through {where}")
+        self.target, self.where, self.tried = target, where, tried
+
+
 def failure(failed: BaseException) -> str:
     """An exception in words. A timeout's own text is usually empty, so it is named as one."""
     words = str(failed).strip()
@@ -430,6 +448,7 @@ class Desks:
         self._thresholds = Thresholds()
         self._history = History(self._dir / "health")
         self._adhoc: dict[str, AdHoc] = {}
+        self._asked: dict[str, AskedConnect] = {}
         self._adhoc_lost: list[Held] = []
         self._read_state()
 
@@ -470,6 +489,10 @@ class Desks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._adhoc_end_all()
+        for asked in self._asked.values():
+            if asked.expiry is not None:
+                asked.expiry.cancel()
+        self._asked.clear()
         if self._http is not None:
             await self._http.close()
 
@@ -1612,7 +1635,7 @@ class Desks:
                 if settings.connect_server is None else
                 adhoc.Route(("--id", target.id, "--id-server", settings.connect_server.host, "--key-file", str(key_file)), f"the ID server {settings.connect_server.host}")]
 
-    async def connect(self, given_id: str, password: str, agent: str, graph: str, node: str, title: str) -> tuple[Held, str]:
+    async def connect(self, given_id: str, password: str, agent: str, graph: str, node: str, title: str, approved: bool = False) -> tuple[Held, str]:
         """Joins a PC by its RustDesk ID and a password, with no settings entry: our RigDesk PCs that answer are tried first over the tailnet
         under that ID (one that is not it says so before it looks at the password), then the public ID server, or the server the ID names.
         The session is this agent's until it leaves or the PC ends it."""
@@ -1630,13 +1653,43 @@ class Desks:
                               else f"{name} is set up in Rig's settings: desk/request or desk/join reaches it")
         kept = self._adhoc[name] = AdHoc(target.id)
         try:
-            return await self._adhoc_joined(name, kept, target, password, settings, agent, graph, node, title)
+            return await self._adhoc_joined(name, kept, target, password, settings, agent, graph, node, title, approved)
         except BaseException:
             await self._adhoc_closed(name, None)
             raise
 
+    def connect_asked(self, ask: str, given_id: str, password: str, agent: str, seat: SeatId) -> None:
+        """Holds a desk/connect's password, in memory only, while the operator decides; it lapses unanswered after CONNECT_ASK_S."""
+        asked = self._asked[ask] = AskedConnect(given_id, password, agent)
+        asked.expiry = TASKS.spawn(f"rigdesk-connect-ask-{ask}", self._connect_lapsed(ask, seat))
+
+    def connect_dropped(self, ask: str) -> None:
+        asked = self._asked.pop(ask, None)
+        if asked is not None and asked.expiry is not None:
+            asked.expiry.cancel()
+
+    async def connect_approved(self, ask: str, agent: str, graph: str, node: str, title: str) -> tuple[Held, str]:
+        """The operator's Accept: the asked desk/connect dials out now, with the password held for it."""
+        asked = self._asked.pop(ask, None)
+        if asked is None:
+            raise DeskRefused(f"its password was dropped, as the request went unanswered for {CONNECT_ASK_S // 60} minutes or Rig restarted, so nothing was dialed; "
+                              "the agent can desk/connect again")
+        if asked.expiry is not None:
+            asked.expiry.cancel()
+        return await self.connect(asked.target, asked.password, agent, graph, node, title, approved=True)
+
+    async def _connect_lapsed(self, ask: str, seat: SeatId) -> None:
+        await asyncio.sleep(CONNECT_ASK_S)
+        asked = self._asked.pop(ask, None)
+        if asked is None or await self.host.confirming(seat, ask) is None:
+            return
+        words = (f"RigDesk: your desk/connect to {asked.target} lapsed: the operator did not approve it within {CONNECT_ASK_S // 60} minutes, so nothing was dialed "
+                 "and its password is gone. Accepting the request later does nothing; desk/connect again if you still need it.")
+        lapsed = Held(f"id-{asked.target}", asked.agent, seat.graph, seat.node, "", f"lapsed-{ask}", now_ms(), "adhoc")
+        await self._tell(lapsed, words, f"lapsed:{ask}", "queue")
+
     async def _adhoc_joined(self, name: str, kept: AdHoc, target: adhoc.Target, password: str, settings: RigdeskSettings,
-                            agent: str, graph: str, node: str, title: str) -> tuple[Held, str]:
+                            agent: str, graph: str, node: str, title: str, approved: bool) -> tuple[Held, str]:
         secret = f"adhoc-{target.id}"
         password_file = Path(await asyncio.to_thread(self._keep_secret, secret, "password", password)).expanduser()
         token_file = Path(await asyncio.to_thread(self._keep_secret, secret, "token", secrets.token_urlsafe(32))).expanduser()
@@ -1645,6 +1698,9 @@ class Desks:
         kept.files = (password_file, token_file, key_file)
         busy = {pc: held.title for pc, held in self._sessions.items() if pc in settings.pcs and held.agent != agent}
         routes = await self._adhoc_routes(target, settings, key_file, set(busy))
+        # Only our own PCs are dialed unasked; any other waits for the operator's approval, and once given, ours are not tried again.
+        outside = [] if approved else [route for route in routes if route.rigdesk is None]
+        routes = [route for route in routes if (route.rigdesk is None) == approved]
         unasked = "".join(f"; {pc} was not tried, as {holder} holds it" for pc, holder in sorted(busy.items()))
         bridge = str(Path(settings.bridge_bin).expanduser()) if "/" in settings.bridge_bin else settings.bridge_bin
         tried: list[str] = []
@@ -1674,6 +1730,8 @@ class Desks:
                 continue
             raise DeskRefused(adhoc.refusal(target, route, said) + (f" (it is not {', '.join(tried)} either)" if tried else "") + unasked)
         else:
+            if outside:
+                raise ConnectAsk(target.id, outside[0].words, tuple(tried))
             raise DeskRefused(f"{target.id} could not be reached")
         assert kept.process is not None
         stock = StockRemote(peer=route.argv[1], password_file=str(password_file)) if route.rigdesk is not None else StockRemote(id=target.id, password_file=str(password_file))
