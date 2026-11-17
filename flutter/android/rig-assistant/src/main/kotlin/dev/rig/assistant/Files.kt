@@ -1,4 +1,4 @@
-package com.carriez.flutter_hbb
+package dev.rig.assistant
 
 import android.content.Context
 import android.os.Build
@@ -16,7 +16,7 @@ import java.util.Date
 import java.util.Locale
 
 /** The phone's shared storage (/storage: the internal "Phone storage" and any SD card) for the holder, with All files access. */
-class PhoneFiles(private val ctx: Context) {
+class Files(private val ctx: Context) {
     fun specs(): List<JSONObject> = listOf(
         toolSpec("files", "Files", true, "List a folder in the phone's shared storage: each entry's name, size or (dir), and when it " +
             "changed, folders first, at most $MAX_ENTRIES. A path not starting with / is under ${home()}.", emptyList(),
@@ -49,8 +49,8 @@ class PhoneFiles(private val ctx: Context) {
     private fun shared(path: String): File {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) throw Refusal("the file tools need Android 11 or newer (All files access)")
         if (!Environment.isExternalStorageManager())
-            throw Refusal("RigDesk has no All files access: turn it on in the phone's Settings > Apps > Special app access > All files access > RigDesk " +
-                "(or adb shell appops set --uid ${ctx.packageName} MANAGE_EXTERNAL_STORAGE allow)")
+            throw Needs("Rig Assistant has no All files access: turn it on in the phone's Settings > Apps > Special app access > All files access > RigDesk " +
+                "(or adb shell appops set --uid ${ctx.packageName} MANAGE_EXTERNAL_STORAGE allow)", "All files access (to read and write your files)", Switch.allFiles(ctx))
         val file = (if (path.startsWith("/")) File(path) else File(home(), path)).canonicalFile
         if (!file.path.startsWith("/storage/")) throw Refusal("${file.path} is not in shared storage (/storage)")
         return file

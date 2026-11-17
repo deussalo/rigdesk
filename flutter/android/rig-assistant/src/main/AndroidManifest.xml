@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rig Assistant: the phone's assistant button, voice and native tools, beside RigDesk in the same app and independent of its screen sharing. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <!-- the apps tool lists every app with a launcher icon -->
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application>
+        <activity
+            android:name="dev.rig.assistant.SetupActivity"
+            android:exported="true"
+            android:icon="@android:drawable/ic_btn_speak_now"
+            android:label="Rig Assistant"
+            android:launchMode="singleTop"
+            android:taskAffinity="dev.rig.assistant"
+            android:theme="@android:style/Theme.DeviceDefault">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Pairing: rigassistant://pair?url=…&token=…&phone=…, from a QR code or a tapped link; the person confirms it. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="rigassistant" android:host="pair" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="dev.rig.assistant.GrantActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="dev.rig.assistant.grant"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <service
+            android:name="dev.rig.assistant.LinkService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Holds the person's connection to their own Rig server, so their assistant can act on the phone." />
+        </service>
+
+        <service
+            android:name="dev.rig.assistant.AssistService"
+            android:exported="true"
+            android:label="Rig Assistant"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data android:name="android.voice_interaction" android:resource="@xml/assist" />
+        </service>
+
+        <service
+            android:name="dev.rig.assistant.AssistSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+        <service
+            android:name="dev.rig.assistant.Recognition"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+            <meta-data android:name="android.speech" android:resource="@xml/recognition" />
+        </service>
+
+        <receiver
+            android:name="dev.rig.assistant.Configure"
+            android:exported="true"
+            android:permission="android.permission.WRITE_SECURE_SETTINGS" />
+
+        <service
+            android:name="dev.rig.assistant.RigNotifications"
+            android:exported="true"
+            android:label="Rig Assistant"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>
