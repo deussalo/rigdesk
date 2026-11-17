@@ -25,7 +25,8 @@ struct Enrollment {
     pin: String,
     #[serde(default)]
     agent_token: String,
-    /// `on` or `off`: whether agents may run commands on this PC without a session, from `-AgentShell`.
+    /// `on` or `off`: whether agents may run commands on this PC without a session, from `-AgentShell`. Windows only: on
+    /// Linux the switch is root's, in the root enrollment (`platform::linux::agent_lane`).
     #[serde(default)]
     agent_shell: String,
     /// `on` or `off`: whether the operator may start agent sessions on this PC from Rig, with no share link, from `-AgentJoin`.
@@ -90,11 +91,15 @@ pub fn apply() {
     }
     match enrollment.agent_shell.as_str() {
         "" => {}
+        #[cfg(target_os = "linux")]
+        _ => log::error!("enroll: agent_shell is root's on Linux, in /var/lib/rigdesk/enroll.json; the desktop user's enroll.json cannot set it"),
+        #[cfg(windows)]
         on @ ("on" | "off") => match super::data_dir().map(|dir| std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("agent-shell"), on))) {
             Some(Ok(())) => log::info!("enroll: agent shell {on}"),
             Some(Err(e)) => log::error!("enroll: could not keep the agent shell switch: {e}"),
             None => log::error!("enroll: no config dir for the agent shell switch"),
         },
+        #[cfg(windows)]
         other => log::error!("enroll: agent_shell is on or off, not {other}; the switch is left as it was"),
     }
     match enrollment.agent_join.as_str() {

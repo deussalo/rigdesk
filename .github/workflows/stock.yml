@@ -7,7 +7,7 @@ on:
   push:
     branches: [main, "s*"]
     tags: ["v*"]
-    paths: [libs/bridge/**, libs/agent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/workflows/stock.yml]
+    paths: [libs/bridge/**, libs/agent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/smoke/lane.sh, .github/workflows/stock.yml]
   pull_request:
   workflow_dispatch:
 
@@ -24,7 +24,7 @@ jobs:
       - name: Install prerequisites
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y clang pkg-config libx11-dev
+          sudo apt-get install -y clang pkg-config libx11-dev dbus-user-session
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -33,6 +33,10 @@ jobs:
           prefix-key: stock-linux
       - name: Unit tests
         run: cargo test -p rigdesk-bridge -p rigdesk-agent --locked
+      - name: Linux management lane smoke test (root and user through systemd, jobs, time-out, switch, pause, root-only socket)
+        run: |
+          cargo build -p rigdesk-agent --example lane_host --locked
+          .github/smoke/lane.sh target/debug/examples/lane_host
       - name: Build
         run: |
           cargo build --release -p rigdesk-bridge --locked

@@ -2,6 +2,7 @@ use super::{gtk_sudo, CursorData, ResultType};
 use desktop::Desktop;
 pub use base::platform::linux::*;
 
+pub mod agent_lane;
 mod agent_shell;
 pub use agent_shell::run_shell_as_user;
 
@@ -1132,6 +1133,7 @@ pub fn start_os_service() {
     std::thread::spawn(|| {
         allow_err!(crate::ipc::start(crate::POSTFIX_SERVICE));
     });
+    std::thread::spawn(agent_lane::serve);
 
     // DRM/KMS capture producer (opt-in `drm` feature): a dedicated thread + runtime that streams
     // scanout frames to the user `--server` over the `_drm` service-scoped channel. Runs here

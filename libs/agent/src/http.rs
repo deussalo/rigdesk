@@ -62,6 +62,9 @@ pub struct Api {
     /// Fresh each start: event ids and sessions do not outlive the process, so a client that sees a new boot starts over.
     boot: String,
     viewer_routes: bool,
+    /// Serves the management lane alone: /health, /log, /events and /shell. A Linux PC's root service is such an API,
+    /// beside the desktop user's, which serves the rest.
+    lane_only: bool,
     found: Option<Arc<Found>>,
     lane: std::sync::OnceLock<Arc<Lane>>,
     collector: std::sync::OnceLock<Arc<Collector>>,
@@ -112,6 +115,19 @@ async fn drain(request: &mut Request<Incoming>) {
     }
 }
 
+/// The desktop a lane-only API has: none, since it never serves /mcp.
+struct NoDesk;
+
+impl Desk for NoDesk {
+    fn tools(&self) -> Vec<crate::desk::ToolSpec> {
+        Vec::new()
+    }
+
+    fn call(&self, tool: &str, _args: &Value) -> Result<crate::desk::Called, String> {
+        Err(format!("the management lane has no desktop, so no {tool}"))
+    }
+}
+
 fn text(status: StatusCode, body: &str) -> Response<Body> {
     Response::builder().status(status).body(full(body.to_string())).unwrap_or_else(|_| Response::new(full("")))
 }
@@ -121,7 +137,7 @@ impl Api {
     pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, lane_only: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() })
     }
 
     /// As `new`, plus the `/viewer/*` routes: the human's share and holder buttons, for a host with no RigDesk viewer.
@@ -129,7 +145,17 @@ impl Api {
     pub fn hosted(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, lane_only: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() })
+    }
+
+    /// An API that serves the management lane alone, with its own bearer and journal: a Linux PC's root service, whose
+    /// lane the desktop user's processes must not reach.
+    pub fn lane_only(lane: Arc<Lane>, shared: Arc<Shared>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
+        let mcp = Arc::new(Mcp { shared: shared.clone(), desk: Arc::new(NoDesk), journal: journal.clone() });
+        let boot = format!("{:016x}", rand::random::<u64>());
+        let api = Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, lane_only: true, found: None, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() };
+        let _ = api.lane.set(lane);
+        Arc::new(api)
     }
 
     /// Offers the management lane at /shell and, with a collector, health samples at /samples. Before `serve`, once.
@@ -186,14 +212,52 @@ impl Api {
         Ok(bound)
     }
 
+    /// Serve until the process ends on a unix socket at `path`, made anew and connectable by its owner alone: on a Linux
+    /// PC, root's, so only tailscaled (root) reaches it, not the desktop user's processes. A lane-only API: no MCP
+    /// servers and no collector, so only the journal of holder changes and the lane's sweep run beside it.
+    #[cfg(unix)]
+    pub async fn serve_unix(self: Arc<Self>, path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let listener = tokio::net::UnixListener::bind(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        tokio::spawn(journal_holder_changes(self.shared.events.subscribe(), self.journal.clone()));
+        if let Some(lane) = self.lane.get() {
+            tokio::spawn(crate::manage::sweep_forever(lane.clone()));
+        }
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { continue };
+                let api = self.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req| {
+                        let api = api.clone();
+                        async move { Ok::<_, Infallible>(api.route(req).await) }
+                    });
+                    let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
+                });
+            }
+        });
+        Ok(())
+    }
+
     async fn route(self: Arc<Self>, mut request: Request<Incoming>) -> Response<Body> {
         let path = request.uri().path().to_string();
         if !self.bearer_ok(&request) {
             return text(StatusCode::UNAUTHORIZED, "bad bearer token");
         }
         let method = request.method().clone();
+        if self.lane_only && !matches!((method.as_str(), path.as_str()), ("GET", "/health" | "/log" | "/events") | ("POST", "/shell")) {
+            return text(StatusCode::NOT_FOUND, "this is the PC's management lane: /health, /log, /events and /shell; the desktop's routes are on its other API");
+        }
         match (method.as_str(), path.as_str()) {
-            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "standing": self.shared.standing(), "down": self.shared.down(),
+            ("GET", "/health") if self.lane_only => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "os": std::env::consts::OS, "lane": true,
+                                                                  "shell": self.lane.get().map(|lane| lane.switch())})),
+            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "os": std::env::consts::OS, "standing": self.shared.standing(), "down": self.shared.down(),
                                                                   "shell": self.lane.get().map(|lane| lane.switch()),
                                                                   "join": self.operator.get().map(|switch| crate::operator::said(switch.as_ref()))})),
             ("POST", "/claim") => self.claim(request).await,
