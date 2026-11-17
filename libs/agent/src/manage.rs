@@ -51,15 +51,27 @@ pub trait Runner: Send + Sync + 'static {
     fn run_system(&self, command: &str, dir: &Path, limit: Duration) -> Result<Ended, String>;
     /// One command as the signed-in user, as the desktop's own shell runs it; Err when nobody is signed in.
     fn run_user(&self, command: &str, limit: Duration) -> Result<(Printed, Ended), String>;
-    /// Starts a command as SYSTEM, off every desktop, and returns its process id at once: its output goes to `dir/o`,
-    /// and its exit code to `dir/x` when it ends.
-    fn start_system(&self, command: &str, dir: &Path) -> Result<u32, String>;
-    /// Whether the process `pid` this lane started still runs.
-    fn alive(&self, pid: u32) -> bool;
-    /// Ends the process `pid` and every process it started.
-    fn end(&self, pid: u32);
+    /// Starts a command as SYSTEM, off every desktop, and returns at once how this host finds it again: its output goes
+    /// to `dir/o`, and its exit code to `dir/x` when it ends.
+    fn start_system(&self, command: &str, dir: &Path) -> Result<JobHandle, String>;
+    /// Whether the job `handle` names still runs.
+    fn alive(&self, handle: &JobHandle) -> bool;
+    /// Ends the job `handle` names and every process it started.
+    fn end(&self, handle: &JobHandle);
     /// This boot of the PC: the same until it restarts.
     fn boot(&self) -> String;
+}
+
+/// How the host that started a background job finds it again: a process id on Windows, a systemd unit on Linux. Only the
+/// runner that made it reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct JobHandle(pub String);
+
+impl std::fmt::Display for JobHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Why the lane would not run a command; each is its own refusal.
@@ -155,7 +167,7 @@ struct Meta {
     run_as: RunAs,
     command: String,
     boot: String,
-    pid: u32,
+    handle: JobHandle,
     started_ms: u64,
     /// Set once the end was journaled, so it is journaled once.
     #[serde(default)]
@@ -307,7 +319,7 @@ impl Lane {
 
     fn state_of(&self, dir: &Path, meta: &Meta) -> JobState {
         let x = std::fs::read_to_string(dir.join("x")).ok();
-        job_state(meta, x.as_deref(), &self.runner.boot(), || self.runner.alive(meta.pid))
+        job_state(meta, x.as_deref(), &self.runner.boot(), || self.runner.alive(&meta.handle))
     }
 
     fn start(&self, owner: &Owner, command: &str, run_as: RunAs) -> Result<Answer, Refused> {
@@ -319,12 +331,12 @@ impl Lane {
         }
         let id = format!("j-{:08x}", rand::random::<u32>());
         let dir = self.jobs_dir().join(&id);
-        let mut meta = Meta { id: id.clone(), owner: owner.clone(), run_as, command: command.to_string(), boot: self.runner.boot(), pid: 0, started_ms: now_ms(), told: false };
+        let mut meta = Meta { id: id.clone(), owner: owner.clone(), run_as, command: command.to_string(), boot: self.runner.boot(), handle: JobHandle(String::new()), started_ms: now_ms(), told: false };
         let started = std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot make {}: {e}", dir.display()))
             .and_then(|_| self.runner.start_system(command, &dir))
-            .and_then(|pid| {
-                meta.pid = pid;
+            .and_then(|handle| {
+                meta.handle = handle;
                 write_meta(&dir, &meta)
             });
         if let Err(why) = started {
@@ -332,7 +344,7 @@ impl Lane {
             self.record(owner, Some(run_as), command, "failed", json!({"error": why}), None);
             return Ok(Answer { ok: false, text: format!("cannot start the job: {why}") });
         }
-        self.record(owner, Some(run_as), command, "started", json!({"pid": meta.pid}), Some(&id));
+        self.record(owner, Some(run_as), command, "started", json!({"handle": meta.handle}), Some(&id));
         Ok(Answer { ok: true, text: json!({"job": id, "state": "running", "said": "read it with desk/shell(job=...) until it ends"}).to_string() })
     }
 
@@ -406,7 +418,7 @@ impl Lane {
                 };
                 if let Some(why) = over {
                     let _ = std::fs::write(dir.join("x"), &why);
-                    self.runner.end(meta.pid);
+                    self.runner.end(&meta.handle);
                     state = self.state_of(&dir, &meta);
                 }
             }
@@ -482,6 +494,10 @@ impl ShRunner {
         std::fs::write(dir.join("c.sh"), script)?;
         std::process::Command::new("sh").arg("-c").arg("sh ./c.sh > o 2>&1").current_dir(dir).process_group(0).spawn()
     }
+
+    fn kill_group(pid: u32) {
+        let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -505,7 +521,7 @@ impl Runner for ShRunner {
                 return Ok(Ended::Exited(status.code().unwrap_or(-1)));
             }
             if Instant::now() >= deadline {
-                self.end(child.id());
+                Self::kill_group(child.id());
                 let _ = child.wait();
                 return Ok(Ended::TimedOut(limit));
             }
@@ -521,20 +537,22 @@ impl Runner for ShRunner {
         ran
     }
 
-    fn start_system(&self, command: &str, dir: &Path) -> Result<u32, String> {
+    fn start_system(&self, command: &str, dir: &Path) -> Result<JobHandle, String> {
         let script = format!("(\n{command}\n)\necho $? > x.new && mv x.new x\n");
         let mut child = Self::sh(&script, dir).map_err(|e| e.to_string())?;
         let pid = child.id();
         std::thread::spawn(move || child.wait());
-        Ok(pid)
+        Ok(JobHandle(pid.to_string()))
     }
 
-    fn alive(&self, pid: u32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(false, |stat| stat.rsplit(')').next().map_or(false, |rest| !rest.trim_start().starts_with('Z')))
+    fn alive(&self, handle: &JobHandle) -> bool {
+        std::fs::read_to_string(format!("/proc/{handle}/stat")).map_or(false, |stat| stat.rsplit(')').next().map_or(false, |rest| !rest.trim_start().starts_with('Z')))
     }
 
-    fn end(&self, pid: u32) {
-        let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+    fn end(&self, handle: &JobHandle) {
+        if let Ok(pid) = handle.0.parse::<u32>() {
+            Self::kill_group(pid);
+        }
     }
 
     fn boot(&self) -> String {
@@ -612,8 +630,8 @@ mod tests {
         assert_eq!(start("sleep 30").unwrap_err().code(), "jobs_full");
 
         for id in &ids {
-            let pid = serde_json::from_slice::<Meta>(&std::fs::read(dir.join("shell/jobs").join(id).join("meta.json")).unwrap()).unwrap().pid;
-            runner.end(pid);
+            let handle = serde_json::from_slice::<Meta>(&std::fs::read(dir.join("shell/jobs").join(id).join("meta.json")).unwrap()).unwrap().handle;
+            runner.end(&handle);
         }
         *runner.boot.lock().unwrap() = "boot-2".into();
         assert_eq!(read(&ids[0])["why"], json!("ended because the PC rebooted"));
