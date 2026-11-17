@@ -1,0 +1,11 @@
+#!/bin/bash
+# The service stops before its files go; on removal it no longer starts at boot. Jobs the agent shell started are their
+# own systemd units and are left to end by themselves.
+set -e
+if [ -d /run/systemd/system ]; then
+    case "$1" in
+        remove|deconfigure) systemctl disable --now rigdesk.service || true ;;
+        upgrade) systemctl stop rigdesk.service || true ;;
+    esac
+fi
+exit 0

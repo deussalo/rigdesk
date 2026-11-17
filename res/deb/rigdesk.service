@@ -1,0 +1,22 @@
+[Unit]
+Description=RigDesk
+Requires=network.target
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+# The installer's rule letting the direct port 21118 in from the tailnet only, where it left one.
+ExecStartPre=-/bin/sh -c '[ ! -f /etc/rigdesk/firewall.nft ] || /usr/sbin/nft -f /etc/rigdesk/firewall.nft'
+ExecStart=/usr/bin/rigdesk --service
+# The desktop user's tray and server are RigDesk's own processes, started by the session, not this unit: end them too.
+# Only RigDesk's binary, by its path: never a job the agent shell started, which is its own unit. None running is no failure.
+ExecStop=-/usr/bin/pkill -f "^/usr/(bin|share/rigdesk)/rigdesk --(tray|server|cm)"
+PIDFile=/run/rigdesk.pid
+KillMode=mixed
+TimeoutStopSec=30
+User=root
+LimitNOFILE=100000
+Environment="PULSE_LATENCY_MSEC=60" "PIPEWIRE_LATENCY=1024/48000"
+
+[Install]
+WantedBy=multi-user.target
