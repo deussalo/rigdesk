@@ -410,6 +410,49 @@ def test_a_screenshot_comes_back_as_an_image_at_its_own_pixels_or_says_how_to_ma
     assert "multiply x,y by 1.92" in wide.note
 
 
+def test_an_operator_names_a_pc_by_rustdesk_id_or_by_id_at_a_self_hosted_server_with_its_key() -> None:
+    from rigdesk.adhoc import PUBLIC_KEY, Target, target_of
+    assert target_of(" 105 517 719 ") == Target("105517719", None, None)
+    assert target_of(f"105517719@rd.example.com:21116?key={PUBLIC_KEY}") == Target("105517719", "rd.example.com:21116", PUBLIC_KEY)
+    assert "give its public key too" in str(target_of("105517719@rd.example.com"))
+    assert "not RustDesk's" in str(target_of("105517719@rd.example.com?key=" + "A" * 40))
+    assert "not a RustDesk ID" in str(target_of("rigdesk://deus/x"))
+
+
+def test_connect_skips_a_rigdesk_pc_that_is_not_that_id_and_fails_with_the_pcs_own_words_leaving_no_password_behind() -> None:
+    import os
+    import stat
+    from rigdesk import adhoc, desks as desks_module
+    from rigdesk.desks import DeskRefused, RigdeskSettings
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            fake = Path(state) / "bridge"
+            fake.write_text('#!/bin/sh\ncase "$*" in *--login-id*) echo "refused: Offline";; *) echo "refused: Wrong Password";; esac\nexit 3\n')
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            settings = RigdeskSettings(pcs={"dell": DeskPc(url="https://dell.tail1234.ts.net", token_file="/dev/null")}, bridge_bin=str(fake))
+            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            secrets_dir, answers = desks_module.SECRETS, adhoc.answers
+            desks_module.SECRETS = Path(state) / "secrets"
+
+            async def reached(_host: str, _port: int = 0) -> bool:
+                return True
+            adhoc.answers = reached  # type: ignore[assignment]
+            try:
+                await desks.connect("105 517 719", "hunter2-secret", "a1", "g", "n", "A")
+            except DeskRefused as refused:
+                said = str(refused)
+            else:
+                raise AssertionError("a refused login joined")
+            finally:
+                desks_module.SECRETS, adhoc.answers = secrets_dir, answers
+            assert "public server" in said and "refused the login: Wrong Password" in said and "it is not dell either" in said, said
+            assert "hunter2" not in said
+            assert os.listdir(Path(state) / "secrets") == [] and desks.entries() == () and desks.held_by("a1", "g") is None
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

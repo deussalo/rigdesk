@@ -8,7 +8,7 @@
 //!
 //!   rigdesk-bridge --peer <tailnet name or 100.x address[:port]> --password-file <file> --token-file <file>
 //!   rigdesk-bridge --id <RustDesk ID> --id-server <hbbs host[:port]> --key-file <hbbs public key file> ...
-//!                  [--port 21120] [--journal <file>] [--name "Rig agent"]
+//!                  [--port 21120] [--journal <file>] [--name "Rig agent"] [--once] [--login-id <ID, with --peer>]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
 //!                  [--mcp-server http://<host>[:port][/path] [--mcp-token-file <file>]]...
 //!
@@ -42,6 +42,7 @@ struct Args {
     name: String,
     viewer: Option<(u16, PathBuf)>,
     servers: Vec<Remote>,
+    once: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -57,6 +58,8 @@ fn parse_args() -> Result<Args, String> {
     let mut viewer_port = None;
     let mut viewer_password_file = None;
     let mut servers: Vec<(String, Option<PathBuf>)> = Vec::new();
+    let mut once = false;
+    let mut login_id = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -73,6 +76,8 @@ fn parse_args() -> Result<Args, String> {
             "--viewer-port" => viewer_port = Some(value()?.parse().map_err(|_| "--viewer-port needs a number".to_string())?),
             "--viewer-password-file" => viewer_password_file = Some(PathBuf::from(value()?)),
             "--mcp-server" => servers.push((value()?, None)),
+            "--once" => once = true,
+            "--login-id" => login_id = Some(value()?),
             "--mcp-token-file" => match servers.last_mut() {
                 Some((_, file @ None)) => *file = Some(PathBuf::from(value()?)),
                 _ => return Err("--mcp-token-file follows the --mcp-server it is for, once".into()),
@@ -85,8 +90,15 @@ fn parse_args() -> Result<Args, String> {
         (None, None) => None,
         _ => return Err("--viewer-port and --viewer-password-file go together".into()),
     };
+    if login_id.is_some() && peer.is_none() {
+        return Err("--login-id goes with --peer".into());
+    }
     let route = match (peer, id, id_server, key_file) {
-        (Some(peer), None, None, None) => link::Route::direct(&peer),
+        // A RigDesk PC registers nowhere, but refuses a login under any ID but its own: it is found by the ID it shows.
+        (Some(peer), None, None, None) => match login_id {
+            Some(id) => (link::Route::direct(&peer).0, rendezvous::parse_id(&id)?),
+            None => link::Route::direct(&peer),
+        },
         (None, Some(id), Some(host), Some(key_file)) => {
             let key = read_secret(&key_file, "ID server key")?;
             link::Route::by_id(rendezvous::parse_id(&id)?, rendezvous::Server::parse(&host, &key)?)
@@ -108,6 +120,7 @@ fn parse_args() -> Result<Args, String> {
         name,
         viewer,
         servers,
+        once,
     })
 }
 
@@ -157,6 +170,9 @@ fn main() {
         let what = args.route.0.label();
         let shared = Arc::new(Shared::new(Events::new(EVENT_RING)));
         let link = link::Link::new(args.route, password, args.name.clone(), shared.clone());
+        if args.once {
+            link.set_once();
+        }
         tokio::spawn(link.clone().run());
         let journal = match &args.journal {
             Some(path) => Journal::open(path.clone(), JOURNAL_BYTES),

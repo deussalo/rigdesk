@@ -114,6 +114,7 @@ pub async fn dial(server: &Server, id: &str) -> ResultType<FramedStream> {
         };
         let Ok(msg) = RendezvousMessage::parse_from_bytes(&bytes?) else { continue };
         match msg.union {
+            Some(rendezvous_message::Union::PunchHoleResponse(ph)) if ph.is_local() => return dial_local(&ph, server, id).await,
             Some(rendezvous_message::Union::PunchHoleResponse(ph)) => bail!("{}", punch_failure(&ph, id)),
             Some(rendezvous_message::Union::RelayResponse(rr)) => {
                 if !rr.refuse_reason.is_empty() {
@@ -143,6 +144,17 @@ pub async fn dial(server: &Server, id: &str) -> ResultType<FramedStream> {
         ..Default::default()
     });
     stream.send(&join).await?;
+    exchange_keys(&mut stream, &their_sign_pk, id).await?;
+    Ok(stream)
+}
+
+/// hbbs ignores force_relay when the PC and the bridge reach it from one address or one LAN: it hands over the PC's
+/// own address instead, where the PC listens for one direct connection, as stock's client then dials.
+async fn dial_local(ph: &hbb_common::rendezvous_proto::PunchHoleResponse, server: &Server, id: &str) -> ResultType<FramedStream> {
+    let their_sign_pk = verified_pk(&ph.pk, &server.verify, id)?;
+    let addr = hbb_common::AddrMangle::decode(&ph.socket_addr);
+    log::info!("joining the PC {id} at {addr} on its own network, as the ID server directed");
+    let mut stream = FramedStream::new(addr, None, CONNECT_TIMEOUT_MS).await?;
     exchange_keys(&mut stream, &their_sign_pk, id).await?;
     Ok(stream)
 }

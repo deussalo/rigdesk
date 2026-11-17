@@ -28,6 +28,7 @@ from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
+from . import adhoc
 from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
 from .health import figures_json, series
 from .shots import inline
@@ -45,7 +46,8 @@ PC_SHELL_CODES: dict[str, HTTPStatus] = {"shell_off": HTTPStatus.FORBIDDEN, "she
                                          "jobs_full": HTTPStatus.TOO_MANY_REQUESTS, "no_job": HTTPStatus.NOT_FOUND}
 
 
-NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); for another, "
+NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); given a PC's "
+              "RustDesk ID and its password (permanent or one-time), desk/connect(id, password) joins it yourself; for another, "
               "ask the operator with desk/request(pc, why), or call desk/join with a share link the human at the PC gives you. A desk call never joins one by itself")
 
 
@@ -76,6 +78,13 @@ class JoinInput(ToolInput):
 
 class LeaveInput(ToolInput):
     pass
+
+
+class ConnectInput(ToolInput):
+    id: str = Field(min_length=6, max_length=400, description="The PC's RustDesk ID as the operator gave it: the digits it shows (spaces allowed); "
+                                                              "ID@host?key=<key> for a PC on a self-hosted ID server; or the ID one of our RigDesk PCs shows.")
+    password: str = Field(min_length=1, max_length=128, description="The PC's permanent password, or the one-time password it shows now, as the operator gave it. "
+                                                                    "Rig keeps it in a file only Rig's user reads while the session lives, and never repeats it.")
 
 
 class RequestInput(ToolInput):
@@ -141,6 +150,18 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
                                                     "for 3 s. If they press Stop you are told, and every call is refused until they resume you.")}
 
 
+async def _connect(desks: Desks, call: Call, given: ConnectInput) -> Answer:
+    agent, graph, node = _who(call)
+    title = await call.kernel.caller_title()
+    try:
+        held, reached = await desks.connect(given.id, given.password, agent, graph, node, title)
+    except Exception as failed:  # noqa: BLE001
+        return _refused(call, failed)
+    return {"pc": held.pc, "joined": True, "reached": reached,
+            "said": (f"You own the session on {held.pc} and hold its input; desk/<tool> acts there. It lasts until you desk/leave, the PC ends it, or "
+                     f"{adhoc.IDLE_MS // 60_000} minutes pass without a desk call; a one-time password then works no more.")}
+
+
 async def _leave(desks: Desks, call: Call, _given: LeaveInput) -> Answer:
     agent, graph, _ = _who(call)
     held = desks.held_by(agent, graph)
@@ -177,6 +198,8 @@ def _shell_words(desks: Desks, entry: PcEntry, agent: str, graph: str) -> str:
 
 
 def _reached_by(entry: PcEntry) -> str:
+    if (joined := entry.get("adhoc")) is not None:
+        return f"desk/connect(id, password) only: joined by its RustDesk ID through {joined['via']}, and gone when that session ends"
     if entry["stock"]:
         return "desk/request (join or assign), or a share link"
     switch = entry["join"]
@@ -207,7 +230,7 @@ async def _pcs(desks: Desks, call: Call, given: PcsInput) -> Answer:
         history = desks.history(given.pc)
         return {"pc": _pc_entry(desks, entry, agent, graph, mine), "sample": figures_json(history[-1]) if history else None}
     return {"pcs": [_pc_entry(desks, entry, agent, graph, mine) for entry in entries],
-            "said": "desk/join(pc) joins a PC assigned to you; desk/request(pc, why, kind) asks the operator to let you join one now or assign it to you. "
+            "said": "desk/join(pc) joins a PC assigned to you; desk/connect(id, password) joins any PC whose RustDesk ID and password you were given; desk/request(pc, why, kind) asks the operator to let you join one now or assign it to you. "
                     "desk/shell(pc, command) runs a command on a PC whose shell you are allowed, with no session; desk/pcs(pc) gives its newest health sample."}
 
 
@@ -456,9 +479,15 @@ def _native[I: ToolInput](desks: Desks, tool: str, words: str, shape: type[I], h
 
 
 def _built(desks: Desks) -> tuple[ToolDef, ...]:
-    return (_native(desks, "join", "Join a RigDesk PC with the share link its human gave you (it works once), or a stock PC assigned to you by name; you then own its session alone.",
+    return (_native(desks, "join", "Join a RigDesk PC with the share link its human gave you (it works once), or a stock PC assigned to you by name; you then own its session alone. "
+                                  "Given a RustDesk ID and password instead, call desk/connect.",
                     JoinInput, _join),
             _native(desks, "leave", "Leave the RigDesk PC you joined; its session ends.", LeaveInput, _leave),
+            _native(desks, "connect", "Join a PC by the RustDesk ID and password you were given (its permanent or one-time password): a stock RustDesk "
+                                      "PC on RustDesk's public server, one on a self-hosted server as ID@host?key=<key>, or one of our RigDesk PCs by the ID it "
+                                      "shows. Nothing needs setting up in Rig or on the RigDesk page and nobody is asked: being handed them is the consent. You then "
+                                      "own its session alone; desk/screenshot, click, type and the rest act there; desk/leave ends it.", ConnectInput, _connect,
+                    limit_s=CALL_LIMIT_S + 4 * adhoc.LOGIN_LIMIT_S),
             _native(desks, "pcs", "Every RigDesk PC in Rig: its client, whether it is up, whether it is assigned to you, who holds it now, whether you may run "
                                   "commands there, and its health; with pc, that PC's newest health sample in full.", PcsInput, _pcs, read_only=True),
             _native(desks, "shell", "Run a command on a RigDesk PC: named by pc, with no session and nothing on its screen, as SYSTEM (Windows) or root (Linux), "
@@ -616,6 +645,7 @@ class PcRow(View):
     mcp: PcMcpRow = Field(description="The MCP servers running on the PC, as they reach the agent holding it.")
     shell: PcShellRow | None = Field(description="A RigDesk PC's agent shell: its switch and who may use it; null for a stock PC.")
     health: PcHealthRow | None = Field(description="A RigDesk PC's health; null for a stock PC.")
+    adhoc: dict[str, str] | None = Field(default=None, description="A PC an agent joined by RustDesk ID and password: id, and via, how it was reached; null otherwise.")
 
 
 class ListenerRow(View):

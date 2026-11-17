@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -118,6 +118,9 @@ pub struct Link {
     shots: Mutex<HashMap<String, std_mpsc::Sender<Result<Vec<u8>, String>>>>,
     viewers: AtomicUsize,
     to_viewers: broadcast::Sender<ToViewer>,
+    /// One session, for an ad-hoc join: opened at once, held while the bridge lives, and the bridge exits when it ends.
+    once: AtomicBool,
+    logged_in: AtomicBool,
 }
 
 fn now_ms() -> u64 {
@@ -166,11 +169,37 @@ impl Link {
             shots: Mutex::new(HashMap::new()),
             viewers: AtomicUsize::new(0),
             to_viewers: broadcast::channel(RELAY_BACKLOG).0,
+            once: AtomicBool::new(false),
+            logged_in: AtomicBool::new(false),
         })
     }
 
+    /// An ad-hoc join's one session: a one-time password stops working when its connection closes, so the connection is
+    /// never let go while held, a refused login is never retried, and the session's end is the bridge's. What happens is
+    /// told on stdout, one line each, for the plugin that started it: `logged in …`, then `ended: …`; or `refused: …`
+    /// (the PC's own words) or `failed: …` before any login.
+    pub fn set_once(&self) {
+        self.once.store(true, Ordering::SeqCst);
+    }
+
+    fn ended_once(&self, ended: &ResultType<()>) -> ! {
+        let said = match ended {
+            Ok(()) => "the session closed".to_string(),
+            Err(e) => e.to_string(),
+        };
+        let line = if self.logged_in.load(Ordering::SeqCst) {
+            format!("ended: {said}")
+        } else if let Some(words) = said.strip_prefix("login refused by the PC: ") {
+            format!("refused: {words}")
+        } else {
+            format!("failed: {said}")
+        };
+        println!("{}", line.replace('\n', " "));
+        std::process::exit(if line.starts_with("ended") { 0 } else { 3 });
+    }
+
     fn wanted(&self) -> bool {
-        self.viewers.load(Ordering::SeqCst) > 0 || now_ms().saturating_sub(self.last_use_ms.load(Ordering::SeqCst)) < IDLE.as_millis() as u64
+        self.once.load(Ordering::SeqCst) || self.viewers.load(Ordering::SeqCst) > 0 || now_ms().saturating_sub(self.last_use_ms.load(Ordering::SeqCst)) < IDLE.as_millis() as u64
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -195,6 +224,9 @@ impl Link {
             let _ = self.to_viewers.send(ToViewer::Ended);
             for (_, waiter) in self.shots.lock().unwrap().drain() {
                 let _ = waiter.send(Err("the RustDesk session to the PC closed".into()));
+            }
+            if self.once.load(Ordering::SeqCst) {
+                self.ended_once(&ended);
             }
             match ended {
                 Ok(()) => log::info!("closed the session to {} after it went idle", self.addr),
@@ -319,6 +351,9 @@ impl Link {
                     state.out = Some(tx.clone());
                     state.failure = None;
                     self.shared.set_down(None);
+                    if let Some(peer) = state.peer.as_ref().filter(|_| self.once.load(Ordering::SeqCst) && !self.logged_in.swap(true, Ordering::SeqCst)) {
+                        println!("logged in {} ({}, RustDesk {})", peer.hostname.replace('\n', " "), peer.platform.replace('\n', " "), peer.version.replace('\n', " "));
+                    }
                 }
                 _ => {}
             },
