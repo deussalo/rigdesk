@@ -439,7 +439,7 @@ class Desks:
         self._probe = TASKS.spawn("rigdesk-id-server", self._probing())
 
     async def end(self, _ending: LiveEnding) -> None:
-        tasks = [task for task in (self._watch, self._probe, *(link.task for link in self._pcs.values()), *(link.remote for link in self._pcs.values())) if task is not None]
+        tasks = [task for task in (self._watch, self._probe, *(task for link in self._pcs.values() for task in (link.task, link.remote, link.lane))) if task is not None]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -761,6 +761,14 @@ class Desks:
         headers = {"Authorization": f"Bearer {self._token(link.spec.token_file)}"}
         return headers | ({"X-Desk-Session": session} if session else {})
 
+    @staticmethod
+    def _shell_reachable(link: PcLink) -> None:
+        """Refuses while the process serving the PC's agent shell is not reached: on Windows the agent API; a Linux PC's lane is root's own
+        process, up while the desktop's is not (nobody signed in, the user's RigDesk restarting), and a lane that does not answer fails at
+        the request."""
+        if link.spec.lane_token_file is None and link.state != "up":
+            raise DeskRefused(f"RigDesk PC {link.name} is down: {link.why or 'not reached yet'}")
+
     def _shell_at(self, link: PcLink) -> tuple[str, dict[str, str]]:
         """Where the PC's agent shell answers, and with which token: a Linux PC's management lane, or the agent API itself on Windows."""
         if link.spec.lane_token_file is None:
@@ -1014,8 +1022,7 @@ class Desks:
     async def shell(self, pc: str, agent: str, graph: str, title: str, asked: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         """One request to a RigDesk PC's agent shell, as the calling agent: the PC's HTTP status and its answer, {ok, text} or {error, code}."""
         link = self._link(pc)
-        if link.state != "up":
-            raise DeskRefused(f"RigDesk PC {pc} is down: {link.why or 'not reached yet'}")
+        self._shell_reachable(link)
         timeout_s = asked.get("timeout_s")
         limit_s = CALL_LIMIT_S + (timeout_s if isinstance(timeout_s, int) and 0 < timeout_s <= SHELL_LIMIT_S else 60)
         body = {"agent": {"id": agent, "title": title, "graph": graph}} | asked
@@ -1027,8 +1034,7 @@ class Desks:
     async def shell_ran(self, pc: str) -> list[dict[str, Any]]:
         """The PC's newest agent-shell commands from its own journal, newest first: who ran what, as whom, and how it ended."""
         link = self._link(pc)
-        if link.state != "up":
-            raise DeskRefused(f"RigDesk PC {pc} is down: {link.why or 'not reached yet'}")
+        self._shell_reachable(link)
         url, headers = self._shell_at(link)
         async with self._client().get(f"{url}/log?n={SHELL_LOG_READ}", headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as answer:
             if answer.status != 200:
