@@ -19,7 +19,7 @@ use hbb_common::{log, tokio};
 use rigdesk_agent::{
     events::EventKind,
     health::{Collector, Samples, INTERVAL},
-    manage::{Lane, Refused, Runner},
+    manage::{JobHandle, Lane, Refused, Runner},
     shell::{self, Ended, Printed},
     Api, Journal, Shared,
 };
@@ -152,11 +152,12 @@ impl Runner for WindowsRunner {
         super::run_shell_as_user(command, limit).map_err(|e| e.to_string())
     }
 
-    fn start_system(&self, command: &str, dir: &Path) -> Result<u32, String> {
-        Ok(launch(&line(dir, command, true)?, dir)?.pid)
+    fn start_system(&self, command: &str, dir: &Path) -> Result<JobHandle, String> {
+        Ok(JobHandle(launch(&line(dir, command, true)?, dir)?.pid.to_string()))
     }
 
-    fn alive(&self, pid: u32) -> bool {
+    fn alive(&self, job: &JobHandle) -> bool {
+        let Ok(pid) = job.0.parse::<u32>() else { return false };
         let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }) else { return false };
         let mut code = 0u32;
         let read = unsafe { GetExitCodeProcess(handle, &mut code) };
@@ -166,8 +167,11 @@ impl Runner for WindowsRunner {
         read.is_ok() && code == STILL_ACTIVE.0 as u32
     }
 
-    fn end(&self, pid: u32) {
-        end_tree(pid);
+    fn end(&self, job: &JobHandle) {
+        match job.0.parse::<u32>() {
+            Ok(pid) => end_tree(pid),
+            Err(_) => log::warn!("agent shell: job handle {job} is not a process id; nothing ended"),
+        }
     }
 
     fn boot(&self) -> String {
