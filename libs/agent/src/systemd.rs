@@ -70,7 +70,7 @@ impl Runner for SystemdRunner {
         let mut run = Command::new("systemd-run");
         run.args(["--quiet", "--collect", "--wait", "--pipe", "--uid=root"]).arg(format!("--unit={unit}"));
         unit_limits(&mut run, limit + BACKSTOP);
-        run.arg(format!("--setenv=PATH={ROOT_PATH}")).arg("--").args(root_shell()).arg(command);
+        run.arg(format!("--setenv=PATH={ROOT_PATH}")).arg("--").args(root_shell()).arg(unexpanded(command));
         let child = run.stdin(Stdio::null()).stdout(out.try_clone().map_err(|e| e.to_string())?).stderr(out).spawn().map_err(|e| format!("cannot start systemd-run: {e}"))?;
         wait(child, limit, || systemctl(None, &["kill", "--signal=SIGKILL", &unit]))
     }
@@ -90,7 +90,7 @@ impl Runner for SystemdRunner {
             let mut run = as_user(&user, "systemd-run");
             run.args(["--user", "--quiet", "--collect", "--wait", "--pipe"]).arg(format!("--unit={unit}"));
             unit_limits(&mut run, limit + BACKSTOP);
-            run.arg("--").arg(&user.shell).arg("-c").arg(command);
+            run.arg("--").arg(&user.shell).arg("-c").arg(unexpanded(command));
             let child = run.stdin(Stdio::null()).stdout(out.try_clone().map_err(|e| e.to_string())?).stderr(out).spawn().map_err(|e| format!("cannot start systemd-run as {}: {e}", user.name))?;
             let ended = wait(child, limit, || systemctl(Some(&user), &["--user", "kill", "--signal=SIGKILL", &unit]))?;
             Ok((shell::printed_file(&path).map_err(|e| format!("cannot read the command's output: {e}"))?, ended))
@@ -131,6 +131,13 @@ impl Runner for SystemdRunner {
     fn boot(&self) -> String {
         std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map_or_else(|_| "boot-unknown".into(), |id| format!("boot-{}", id.trim()))
     }
+}
+
+/// `command` as systemd-run must be given it to run it as written. systemd expands `${NAME}` and `$NAME` in a unit's
+/// command line and turns `$$` into `$`, and systemd-run passes `$` through (before systemd 254 always, after it by
+/// default), so each `$` goes as `$$`. It leaves `%` as written.
+fn unexpanded(command: &str) -> String {
+    command.replace('$', "$$")
 }
 
 /// bash where the PC has it, as Rig's agents expect; else sh.
