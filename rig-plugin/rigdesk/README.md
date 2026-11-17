@@ -167,7 +167,8 @@ Known limits against a RigDesk PC:
   opens each under the holder's session (initialize, then tools/list) and tells the holder each one's tools by exact
   name, and when one goes. They load on request, for the holder alone: `tool_load` `<pc>.<server>/` lists their tools to
   it, any other agent is shown none, and a call by any but the holder is refused. A call goes through the PC under its holder and Block rules, as a desk call does, and is journaled there;
-  a server that forgot its MCP session is opened again once. A PC's `mcp: false` in settings opens none, and turned off
+  a server that forgot its MCP session is opened again once. A call the server fails, or does not answer, is refused with its own
+  error, and the page marks that server as not answering until a call succeeds. A PC's `mcp: false` in settings opens none, and turned off
   closes those open and tells the holder; the person at the PC has a switch of their own. A stock PC's bridge finds
   none by itself: it offers the servers its `stock.mcp_servers` name, each `{"url": "http://<host>[:port][/path]",
   "token_file": ...}` on the PC's own tailnet address (a phone's native tools, say), asked while an agent holds the PC
@@ -244,7 +245,7 @@ work), and while blocked it refuses every call.
 
 * `/x/rigdesk/all` (the **RigDesk** tab): each PC, up or down and why, who holds input, the owning agent, and its MCP
   servers open for that agent (`mcp` in `GET /x/rigdesk/pcs`: Rig's switch, the PC's, why none, and each server's key,
-  words and tools). Opening a
+  words, tools, and why its last call failed while it still fails). Opening a
   PC's row takes a screenshot when asked (`POST /x/rigdesk/screenshot {pc}`, through the PC's `/frame`; shown, kept
   nowhere, journaled on the PC; it works while the human has blocked the agent, since Block binds agents, not the operator) and, for a stock PC, assigns it to any agent or every agent in a graph, picked by title;
   each standing grant is listed by the agent's title with its unassign.
