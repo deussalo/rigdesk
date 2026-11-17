@@ -319,6 +319,7 @@ class AdHoc:
     process: asyncio.subprocess.Process | None = None
     files: tuple[Path, ...] = ()
     watch: asyncio.Task[None] | None = None
+    port: int | None = None
 
 
 def failure(failed: BaseException) -> str:
@@ -1648,8 +1649,10 @@ class Desks:
         bridge = str(Path(settings.bridge_bin).expanduser()) if "/" in settings.bridge_bin else settings.bridge_bin
         tried: list[str] = []
         for route in routes:
-            taken = {urlsplit(pc.url).port for pc in settings.pcs.values()} | {urlsplit(link.spec.url).port for link in self._pcs.values()}
-            port = await asyncio.to_thread(self._first_free, taken)
+            taken = ({urlsplit(pc.url).port for pc in settings.pcs.values()} | {urlsplit(link.spec.url).port for link in self._pcs.values()}
+                     | {each.port for each in self._adhoc.values()})
+            # Picked and kept with no await between, so a connect running beside this one cannot pick the same port.
+            port = kept.port = self._first_free(taken)
             log = await asyncio.to_thread(self._remote_log, name)
             try:
                 process = await asyncio.create_subprocess_exec(bridge, *route.argv, "--password-file", str(password_file), "--token-file", str(token_file),
