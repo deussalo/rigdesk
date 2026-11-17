@@ -15,6 +15,10 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -43,7 +47,10 @@ class Tools(private val ctx: Context) {
     private val files = Files(ctx)
 
     private val main = Handler(Looper.getMainLooper())
-    private val speaker = Speaker(ctx)
+    private val speaker = Speaker(ctx) { speaking -> main.post { this.speaking = speaking; drawBubble() } }
+    // Main thread only: whether the phone is speaking a reply now, and the reply's text on the bubble.
+    private var speaking = false
+    private var bubbleText = ""
 
     val version: String = try {
         ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
@@ -125,6 +132,13 @@ class Tools(private val ctx: Context) {
         try { tell(text, true) } catch (e: Exception) { Log.w(TAG, "say: $e") }
     }
 
+    /** Cuts what the phone is saying at once; the text stays on screen for its reading time. Main thread. */
+    fun hush() {
+        speaker.hush()
+        speaking = false
+        drawBubble()
+    }
+
     private fun tell(text: String, speak: Boolean): String {
         if (text.isEmpty()) throw Refusal("tell takes text")
         val shown = show(text)
@@ -151,7 +165,7 @@ class Tools(private val ctx: Context) {
                 val pad = dp(14f)
                 v.setPadding(pad, pad, pad, pad)
                 v.background = GradientDrawable().apply { cornerRadius = dp(14f).toFloat(); setColor(0xEE263238.toInt()) }
-                v.setOnClickListener { removeBubble() }
+                v.setOnClickListener { if (speaking) hush() else removeBubble() }
                 val lp = WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT,
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -162,6 +176,7 @@ class Tools(private val ctx: Context) {
                 try {
                     windows().addView(v, lp)
                     bubble = v
+                    Stop.raise()
                 } catch (e: Exception) {
                     Log.w(TAG, "bubble: $e")
                     notify(text)
@@ -169,8 +184,8 @@ class Tools(private val ctx: Context) {
                     return@post
                 }
             }
-            view.text = text
-            main.postDelayed(hide, (3_000L + 60L * text.length).coerceAtMost(15_000L))
+            bubbleText = text
+            drawBubble()
             shown = true
             done.countDown()
         }
@@ -181,6 +196,20 @@ class Tools(private val ctx: Context) {
     private fun windows() = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
     private fun dp(v: Float) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, ctx.resources.displayMetrics).toInt()
+
+    /** The reply, with a stop line while it is spoken; it hides its reading time after the speech ends or is cut. */
+    private fun drawBubble() {
+        val view = bubble ?: return
+        main.removeCallbacks(hide)
+        if (speaking) {
+            val shown = SpannableStringBuilder(bubbleText).append("\n\n")
+            shown.append("■  Tap to stop speaking", ForegroundColorSpan(0xFFB0BEC5.toInt()), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            view.text = shown
+        } else {
+            view.text = bubbleText
+            main.postDelayed(hide, (3_000L + 60L * bubbleText.length).coerceAtMost(15_000L))
+        }
+    }
 
     private fun removeBubble() {
         bubble?.let { try { windows().removeView(it) } catch (_: Exception) {} }
@@ -213,7 +242,7 @@ class Tools(private val ctx: Context) {
 }
 
 /** The phone's text-to-speech, bound on first use; a failed engine is let go so the next call binds again. */
-class Speaker(private val ctx: Context) {
+class Speaker(private val ctx: Context, private val speaking: (Boolean) -> Unit) {
     private val main = Handler(Looper.getMainLooper())
     private var voice: TextToSpeech? = null // main thread only
     private var ready = false
@@ -229,6 +258,12 @@ class Speaker(private val ctx: Context) {
                     val bound = voice
                     if (ready && bound != null) {
                         bound.setLanguage(Locale.getDefault())
+                        bound.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                            override fun onStart(id: String?) = speaking(true)
+                            override fun onDone(id: String?) = speaking(false)
+                            override fun onStop(id: String?, interrupted: Boolean) = speaking(false)
+                            @Deprecated("Deprecated in Java") override fun onError(id: String?) = speaking(false)
+                        })
                         waiting?.let { bound.speak(it, TextToSpeech.QUEUE_FLUSH, null, "rig") }
                     } else {
                         bound?.shutdown()
@@ -239,6 +274,12 @@ class Speaker(private val ctx: Context) {
             }
         } else if (ready) v.speak(text, TextToSpeech.QUEUE_FLUSH, null, "rig")
         else waiting = text
+    }
+
+    /** Stops speaking now, and drops a reply still waiting for the engine. Main thread, so it lands before the mic opens. */
+    fun hush() {
+        waiting = null
+        voice?.stop()
     }
 
     fun close() = main.post {

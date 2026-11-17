@@ -2,14 +2,18 @@
 
 The phone's assistant inside the RigDesk Android app, as a module of its own: it needs none of RigDesk's screen sharing.
 
-- **Hold Home** opens a sheet that records until **Send** or **Cancel**. When the phone's recogniser stops on silence or a
-  timeout it starts again and keeps what was heard. Nothing reaches Rig until Send; Cancel, Back or leaving the sheet drops it.
+- **Hold Home** opens a sheet that records until **Send** or **Cancel**. The recogniser keeps one session open across pauses
+  (a segmented session on Android 13+) and starts again if it ends, keeping what was heard. Nothing reaches Rig until Send; Cancel, Back or leaving the sheet drops it.
 - **Send** gives what was said (and typed) plus a screenshot to the agent resident on this phone, as one message that wakes it.
   Offline, it is kept and sent when the phone reconnects, once.
 - **Tools** for the resident, as `phone/*` through Rig's rig-assistant plugin: `apps`, `open`, `key`, `tell`, `notifications`,
   `notification_reply`, `notification_action`, `notification_dismiss`, `notify`, `sms_send`, `contacts`, `files`, `file_read`,
   `file_write`. `key` needs RigDesk's Input control on; the rest need only their own switch. With RigDesk enabled the same agent
   can hold the phone for `desk/*` too.
+- **Stop:** one red Stop pill shows while an agent is active on the phone, within 20 s of its last `phone/*` or `desk/*` call
+  (reads count), and hides when it goes idle, so it never covers an idle screen or a screenshot. Stop refuses every `phone/*`
+  call and blocks RigDesk's desk holder; a green Resume shows until pressed. The resident is told of both. Without "drawing
+  over apps", the phone asks for it once, the first time the pill should show.
 - **Link:** one socket the phone dials to `<Rig>/api/contributions/rig-assistant/sockets/phone`, with Rig's access token.
 
 ## Setting a phone up

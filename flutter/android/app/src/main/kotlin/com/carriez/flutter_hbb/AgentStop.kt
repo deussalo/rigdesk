@@ -2,19 +2,18 @@ package com.carriez.flutter_hbb
 
 import android.content.Context
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.TextView
+import dev.rig.assistant.Desk
+import dev.rig.assistant.Stop
 import ffi.FFI
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -25,7 +24,8 @@ import kotlin.math.min
  * The agent's Stop/Resume on the phone itself, and "your input goes first", for a phone that Rig drives as a stock PC
  * through a rigdesk-bridge. The phone tells that bridge's agent API (Share screen > Rig bridge, kept as the local
  * option [HOST_OPTION]) when its person presses Stop or Resume or touches the screen. The pill shows only while the
- * agent is active: blocked, or within [ACTIVE_MS] of its last tool call.
+ * agent is active: blocked, or within [Stop.ACTIVE_MS] of its last tool call. The pill itself is Rig Assistant's [Stop], shared with
+ * phone/<tool> calls, so the phone shows one Stop for both.
  */
 class AgentStop(private val ctx: Context) {
     private val main = Handler(Looper.getMainLooper())
@@ -37,14 +37,13 @@ class AgentStop(private val ctx: Context) {
     // Main thread only.
     private var holder = ""
     private var lastActionAtMs = 0L
-    private var pill: TextView? = null
     private var watcher: View? = null
     private var lastHumanSentMs = 0L
-    private val refreshLater = Runnable { refresh() }
 
     private data class Host(val url: String, val token: String)
 
     fun start() {
+        Stop.attach(ctx)
         worker = Thread(::follow, "rigdesk-agent-stop").apply { isDaemon = true; start() }
     }
 
@@ -138,17 +137,8 @@ class AgentStop(private val ctx: Context) {
     }
 
     private fun refresh() {
-        main.removeCallbacks(refreshLater)
-        val idleMs = System.currentTimeMillis() - lastActionAtMs
-        val label = when {
-            closed -> null
-            holder == "blocked" -> "Resume"
-            holder == "agent" && idleMs < ACTIVE_MS -> "Stop"
-            else -> null
-        }
-        if (label == null) removePill() else showPill(label)
+        Stop.desk(if (closed || holder.isEmpty()) null else Desk(holder, lastActionAtMs, ::pressed))
         if (!closed && holder == "agent") addWatcher() else removeWatcher()
-        if (label == "Stop") main.postDelayed(refreshLater, ACTIVE_MS - idleMs + 100)
     }
 
     private fun overlayAllowed() = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(ctx)
@@ -157,39 +147,12 @@ class AgentStop(private val ctx: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else WindowManager.LayoutParams.TYPE_PHONE
 
-    private fun dp(v: Float) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, ctx.resources.displayMetrics).toInt()
-
-    private fun showPill(label: String) {
-        if (!overlayAllowed()) return
-        val view = pill ?: TextView(ctx).also { v ->
-            v.setTextColor(0xFFFFFFFF.toInt())
-            v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            v.setPadding(dp(16f), dp(8f), dp(16f), dp(8f))
-            v.setOnClickListener { pressed(v.text.toString()) }
-            val lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, overlayType(),
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.END; y = ctx.resources.displayMetrics.heightPixels / 3 }
-            try { windows.addView(v, lp); pill = v } catch (e: Exception) { Log.w(TAG, "pill: $e"); return }
-        }
-        view.text = label
-        view.background = GradientDrawable().apply {
-            cornerRadius = dp(20f).toFloat()
-            setColor(if (label == "Stop") 0xFFC62828.toInt() else 0xFF2E7D32.toInt())
-        }
-    }
-
-    private fun removePill() {
-        pill?.let { try { windows.removeView(it) } catch (_: Exception) {} }
-        pill = null
-    }
-
-    private fun pressed(label: String) {
-        holder = if (label == "Stop") "blocked" else "agent"
-        if (label != "Stop") lastActionAtMs = System.currentTimeMillis()
+    /** The person pressed the shared pill: block or unblock the desk/<tool> holder at the bridge. */
+    private fun pressed(stop: Boolean) {
+        holder = if (stop) "blocked" else "agent"
+        if (!stop) lastActionAtMs = System.currentTimeMillis()
         refresh()
-        send(if (label == "Stop") "/viewer/stop" else "/viewer/unblock")
+        send(if (stop) "/viewer/stop" else "/viewer/unblock")
     }
 
     /** A touch anywhere: a 1 px window watching outside touches. The phone's own injected input is not the person's. */
@@ -241,7 +204,6 @@ class AgentStop(private val ctx: Context) {
     companion object {
         private const val TAG = "AgentStop"
         const val HOST_OPTION = "rigdesk-agent-host-self"
-        private const val ACTIVE_MS = 20_000L
         // A gesture the phone injects ends within this of its last event (long press and wheel swipes included).
         private const val OWN_INPUT_MS = 1_000L
         private const val HUMAN_EVERY_MS = 500L
