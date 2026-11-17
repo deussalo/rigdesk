@@ -47,7 +47,7 @@ use hbb_common::{
     bail,
     config::{
         self, use_ws, Config, LocalConfig, PeerConfig, PeerInfoSerde, Resolution,
-        CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT, RENDEZVOUS_PORT, RENDEZVOUS_SERVERS,
+        CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT, RENDEZVOUS_PORT,
     },
     futures::future::{select_ok, BoxFuture, FutureExt},
     get_version_number, log,
@@ -466,20 +466,23 @@ impl Client {
                 false,
             ));
         }
-        // RigDesk has no rendezvous server: every peer is a tailnet host, as a name or an address, on the direct port unless given.
-        return Ok((
-            (
-                connect_tcp_local(check_port(peer, RELAY_PORT + 1), None, CONNECT_TIMEOUT).await?,
-                true,
-                None,
-                None,
-                "TCP",
-            ),
-            (0, "".to_owned()),
-            false,
-        ));
+        // A RigDesk PC registers nowhere: every peer is a tailnet host, as a name or an address, on the direct port unless
+        // given; only a stock peer named by its RustDesk ID goes through an ID server (see viewer_dial).
+        let own_server = interface.get_lch().read().unwrap().other_server.is_some();
+        if !crate::viewer_dial::by_id(peer, own_server) {
+            return Ok((
+                (
+                    connect_tcp_local(check_port(peer, RELAY_PORT + 1), None, CONNECT_TIMEOUT).await?,
+                    true,
+                    None,
+                    None,
+                    "TCP",
+                ),
+                (0, "".to_owned()),
+                false,
+            ));
+        }
 
-        #[allow(unreachable_code)]
         let other_server = interface.get_lch().read().unwrap().other_server.clone();
         let (peer, other_server, key, token) = if let Some((a, b, c)) = other_server.as_ref() {
             (a.as_ref(), b.as_ref(), c.as_ref(), "")
@@ -487,21 +490,21 @@ impl Client {
             (peer, "", key, token)
         };
         let (rendezvous_server, servers, contained) = if other_server.is_empty() {
-            crate::get_rendezvous_server(1_000).await
+            let (server, servers, contained) = crate::get_rendezvous_server(1_000).await;
+            (crate::viewer_dial::id_server(server), servers, contained)
         } else {
             if other_server == PUBLIC_SERVER {
                 (
-                    check_port(RENDEZVOUS_SERVERS[0], RENDEZVOUS_PORT),
-                    RENDEZVOUS_SERVERS[1..]
-                        .iter()
-                        .map(|x| x.to_string())
-                        .collect(),
+                    check_port(crate::viewer_dial::PUBLIC_ID_SERVER, RENDEZVOUS_PORT),
+                    Vec::new(),
                     true,
                 )
             } else {
                 (check_port(other_server, RENDEZVOUS_PORT), Vec::new(), true)
             }
         };
+
+        let key = crate::viewer_dial::key(key, &rendezvous_server);
 
         // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
         // be used, so probing v6 reachability is wasted work on every such connection.
@@ -2939,7 +2942,7 @@ impl LoginConfigHandler {
             let server = server_key.next().unwrap_or_default();
             let args = server_key.next().unwrap_or_default();
             let key = if server == PUBLIC_SERVER {
-                config::RS_PUB_KEY.to_owned()
+                crate::viewer_dial::PUBLIC_KEY.to_owned()
             } else {
                 let mut args_map: HashMap<String, &str> = HashMap::new();
                 for arg in args.split('&') {
