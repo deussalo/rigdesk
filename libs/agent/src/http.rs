@@ -149,12 +149,12 @@ impl Api {
     }
 
     /// An API that serves the management lane alone, with its own bearer and journal: a Linux PC's root service, whose
-    /// lane the desktop user's processes must not reach.
-    pub fn lane_only(lane: Arc<Lane>, shared: Arc<Shared>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
+    /// lane the desktop user's processes must not reach. With a collector, it takes the PC's health samples too.
+    pub fn lane_only(lane: Arc<Lane>, collector: Option<Arc<Collector>>, shared: Arc<Shared>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk: Arc::new(NoDesk), journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
         let api = Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, lane_only: true, found: None, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() };
-        let _ = api.lane.set(lane);
+        api.manage(lane, collector);
         Arc::new(api)
     }
 
@@ -214,7 +214,7 @@ impl Api {
 
     /// Serve until the process ends on a unix socket at `path`, made anew and connectable by its owner alone: on a Linux
     /// PC, root's, so only tailscaled (root) reaches it, not the desktop user's processes. A lane-only API: no MCP
-    /// servers and no collector, so only the journal of holder changes and the lane's sweep run beside it.
+    /// servers, so only the journal of holder changes, the lane's sweep and any collector run beside it.
     #[cfg(unix)]
     pub async fn serve_unix(self: Arc<Self>, path: &std::path::Path) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
@@ -228,6 +228,9 @@ impl Api {
         tokio::spawn(journal_holder_changes(self.shared.events.subscribe(), self.journal.clone()));
         if let Some(lane) = self.lane.get() {
             tokio::spawn(crate::manage::sweep_forever(lane.clone()));
+        }
+        if let Some(collector) = self.collector.get() {
+            tokio::spawn(collector.clone().run_forever());
         }
         tokio::spawn(async move {
             loop {
@@ -251,8 +254,8 @@ impl Api {
             return text(StatusCode::UNAUTHORIZED, "bad bearer token");
         }
         let method = request.method().clone();
-        if self.lane_only && !matches!((method.as_str(), path.as_str()), ("GET", "/health" | "/log" | "/events") | ("POST", "/shell")) {
-            return text(StatusCode::NOT_FOUND, "this is the PC's management lane: /health, /log, /events and /shell; the desktop's routes are on its other API");
+        if self.lane_only && !matches!((method.as_str(), path.as_str()), ("GET", "/health" | "/log" | "/events" | "/samples") | ("POST", "/shell")) {
+            return text(StatusCode::NOT_FOUND, "this is the PC's management lane: /health, /log, /events, /samples and /shell; the desktop's routes are on its other API");
         }
         match (method.as_str(), path.as_str()) {
             ("GET", "/health") if self.lane_only => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "os": std::env::consts::OS, "lane": true,

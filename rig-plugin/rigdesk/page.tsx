@@ -383,9 +383,10 @@ function Health({ pc, now }: { readonly pc: PcRow; readonly now: number }): Reac
   const taken = `taken ${agoOf(sample.at_ms, now)} in ${durationOf(sample.took_ms, 100)}${sample.figures?.cpu_ms == null ? '' : `, ${durationOf(sample.figures.cpu_ms, 10)} of CPU`} · RigDesk ${sample.rigdesk}`
   const figures = sample.figures
   if (figures === null) return <BoardFacts label="health" facts={[['sample', taken], ['failed', inked('sample', sample.why ?? 'no reason given')]]} />
+  const linux = pc.os === 'linux'
   const facts: readonly Fact[] = [
     ['sample', taken],
-    ['Windows', `${figures.os.caption} ${figures.os.build} · up ${durationOf(figures.uptime_s * 1000, 60_000)}${figures.pending_reboot === true ? ` · reboot pending${figures.pending_reboot_why.length === 0 ? '' : ` (${figures.pending_reboot_why.join(', ')})`}` : ''}`],
+    [linux ? 'Linux' : 'Windows', `${figures.os.caption} ${linux ? `· kernel ${figures.os.build}` : figures.os.build} · up ${durationOf(figures.uptime_s * 1000, 60_000)}${figures.pending_reboot === true ? ` · reboot pending${figures.pending_reboot_why.length === 0 ? '' : ` (${figures.pending_reboot_why.join(', ')})`}` : ''}`],
     ['CPU', `${known(figures.cpu.load_pct, pct)} load · ${figures.cpu.name}`],
     ['RAM', `${bytesOf((figures.ram.total_mb - figures.ram.free_mb) * MB)} of ${bytesOf(figures.ram.total_mb * MB)} used`],
     ...figures.volumes.map((volume): Fact => [volume.name, (
@@ -396,14 +397,14 @@ function Health({ pc, now }: { readonly pc: PcRow; readonly now: number }): Reac
     )]),
     ['updates', figures.updates === null ? 'unknown' : figures.updates.error !== null ? `unknown: ${figures.updates.error}`
       : `${figures.updates.last_install_ms === null ? 'none installed' : `last installed ${agoOf(figures.updates.last_install_ms, now)}`} · ${known(figures.updates.pending, count => `${String(count)} pending`)}`],
-    ['Defender', figures.defender === null ? 'unknown' : (
+    ...(linux ? [] : [['Defender', figures.defender === null ? 'unknown' : (
       <span key="defender">{inked('defender', `real-time ${known(figures.defender.realtime_on, on => (on ? 'on' : 'off'))}`)} · {inked('signatures', `signatures ${known(figures.defender.signature_age_days, days => `${String(days)} days old`)}`)}</span>
     )],
-    ['BitLocker', figures.bitlocker.length === 0 ? 'none reported' : figures.bitlocker.map(each => `${each.volume} ${each.protection}`).join(', ')],
+    ['BitLocker', figures.bitlocker.length === 0 ? 'none reported' : figures.bitlocker.map(each => `${each.volume} ${each.protection}`).join(', ')]] as const),
     ...figures.disks.map((disk): Fact => [disk.name, inked(`drive ${disk.name}`, [disk.health, disk.wear_pct === null ? null : `${String(disk.wear_pct)}% worn`,
       disk.temperature_c === null ? null : `${String(disk.temperature_c)} °C`].filter(Boolean).join(' · '))]),
     ['stopped services', figures.stopped_services.length === 0 ? 'none' : inked('services', figures.stopped_services.map(each => `${each.display || each.name}${each.exit_code === null || each.exit_code === 0 ? '' : ` (${String(each.exit_code)})`}`).join(', '))],
-    ['System log', inked('system log', known(figures.system_errors_24h, count => `${String(count)} errors in 24 h`))],
+    ['system log', inked('system log', known(figures.system_errors_24h, count => `${String(count)} errors in 24 h`))],
     ...(figures.battery === null ? [] : [['battery', `${known(figures.battery.charge_pct, pct)} · ${figures.battery.status}`] as const]),
     ...(figures.errors.length === 0 ? [] : [['not read', figures.errors.join('; ')] as const]),
   ]

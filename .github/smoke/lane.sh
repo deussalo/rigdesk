@@ -3,9 +3,10 @@
 #   .github/smoke/lane.sh <lane_host binary>
 # It runs the lane as root on a root-only socket and proves: commands as root and as a user, a job that outlives the
 # lane's restart, the job cap, a time-out that ends the whole unit, the switch and the pause, and that nobody but root
-# reaches the lane or reads its journal.
+# reaches the lane or reads its journal, and that it takes this PC's health samples with the shipped script.
 set -euo pipefail
 BIN=$(realpath "$1")
+HEALTH=$(realpath "$(dirname "$0")/../../src/platform/linux/agent_health.sh")
 DIR=/var/lib/rigdesk-smoke
 SOCK=/run/rigdesk-smoke/lane.sock
 TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
@@ -31,8 +32,10 @@ sudo systemctl start "user@$LUID.service"
 for _ in $(seq 150); do sudo test -S "/run/user/$LUID/bus" && break; sleep 0.2; done
 sudo test -S "/run/user/$LUID/bus" || fail "lanetest's user manager has no bus (is dbus-user-session installed?): $(systemctl status "user@$LUID.service" --no-pager 2>&1 | tail -5)"
 
+# With `health`, the lane takes a health sample every 5 s; only the sample check wants that, as each runs a unit of its own.
 start_lane() {
-  sudo bash -c "LANE_HOST_USER=lanetest nohup '$BIN' '$SOCK' '$DIR/token' '$DIR' >> '$LOG' 2>&1 & echo \$! > '$DIR/pid'"
+  local health=""; [ "${1:-}" = health ] && health="LANE_HOST_HEALTH='$HEALTH'"
+  sudo bash -c "LANE_HOST_USER=lanetest $health nohup '$BIN' '$SOCK' '$DIR/token' '$DIR' >> '$LOG' 2>&1 & echo \$! > '$DIR/pid'"
   for _ in $(seq 100); do sudo grep -q listening "$LOG" 2>/dev/null && sudo test -S "$SOCK" && return; sleep 0.1; done
   fail "the lane did not start"
 }
@@ -41,8 +44,18 @@ lane() { sudo curl -sS --unix-socket "$SOCK" -H "Authorization: Bearer $TOKEN" "
 shell() { lane -H 'content-type: application/json' -d "$1" http://lane/shell; }
 AGENT='"agent":{"id":"agent_smoke","title":"Smoke","graph":"ci"}'
 
-start_lane
+start_lane health
 lane http://lane/health | jq -e '.os == "linux" and .lane == true and .shell.open == true' > /dev/null || fail "health: $(lane http://lane/health)"
+
+# The first sample comes 5 s after the start; the script runs as root in a unit of its own.
+for _ in $(seq 60); do [ "$(lane 'http://lane/samples?after=0' | jq '.samples | length')" -gt 0 ] && break; sleep 0.5; done
+sample=$(lane 'http://lane/samples?after=0' | jq -c '.samples[0]')
+echo "$sample" | jq -e --arg k "$(uname -r)" '.taken == "ok" and .figures.schema == 1 and .figures.os.build == $k and .figures.ram.total_mb > 0
+  and (.figures.volumes | map(select(.name == "/")) | length) == 1 and (.figures.updates.pending | type) == "number"' > /dev/null || fail "health sample: $sample"
+ok "a health sample: $(echo "$sample" | jq -c '{took_ms, errors: .figures.errors, cpu_ms: .figures.cpu_ms}')"
+stop_lane
+for _ in $(seq 50); do [ -z "$(systemctl list-units --no-legend 'rigdesk-run-*')" ] && break; sleep 0.2; done
+start_lane
 ok "health says linux, lane, open"
 
 # a. As root, and as the user.

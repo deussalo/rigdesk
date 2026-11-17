@@ -4,7 +4,8 @@
 //!
 //!   /var/lib/rigdesk/enroll.json       the installer's `lane_token` and `agent_shell`, applied at start and deleted
 //!   /var/lib/rigdesk/agent/            root's alone (0700): `lane.token`, the switch `agent-shell`, the journal
-//!                                      `actions.jsonl` and the jobs under `shell/`
+//!                                      `actions.jsonl`, the jobs under `shell/`, and the health samples
+//!                                      `health.jsonl`, taken every 10 minutes in `health/` (see `rigdesk_agent::health`)
 //!   /run/rigdesk/lane.sock             the lane, connectable by root alone; `tailscale serve --set-path=/lane` puts it on
 //!                                      the tailnet, since tailscaled is root
 //!   /var/log/rigdesk/managed-by-rig.txt  what ran, which every user may read and the tray opens
@@ -18,13 +19,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hbb_common::{config::Config, log, tokio};
-use rigdesk_agent::{digest, manage::Lane, systemd::{self, SystemdRunner}, Api, Events, Journal, Shared};
+use rigdesk_agent::{
+    digest,
+    health::{Collector, Samples, INTERVAL},
+    manage::Lane,
+    systemd::{self, SystemdRunner},
+    Api, Events, Journal, Shared,
+};
 use serde_derive::Deserialize;
 
 pub const ROOT_DIR: &str = "/var/lib/rigdesk";
 const SOCKET_DIR: &str = "/run/rigdesk";
 const DIGEST_DIR: &str = "/var/log/rigdesk";
 const JOURNAL_BYTES: u64 = 8 << 20;
+const HEALTH_SCRIPT: &str = include_str!("agent_health.sh");
 
 pub fn agent_dir() -> PathBuf {
     Path::new(ROOT_DIR).join("agent")
@@ -70,6 +78,15 @@ pub fn serve() {
         let journal = Arc::new(Journal::open(agent_dir().join("actions.jsonl"), JOURNAL_BYTES));
         let lane = Lane::new(runner, agent_dir().join("shell"), shared.clone(), journal.clone());
         lane.blocks_from(blocked_in_session);
+        let collector = Arc::new(Collector {
+            lane: lane.clone(),
+            shared: shared.clone(),
+            samples: Arc::new(Samples::open(Some(agent_dir().join("health.jsonl")))),
+            script: HEALTH_SCRIPT,
+            dir: agent_dir().join("health"),
+            rigdesk: crate::VERSION.to_string(),
+            interval: INTERVAL,
+        });
         let on = lane.switch().get("open").and_then(|v| v.as_bool()).unwrap_or(false);
         keep_digest(on, &shared, &journal);
         if let Err(why) = private_dir(Path::new(SOCKET_DIR)) {
@@ -77,7 +94,7 @@ pub fn serve() {
             return;
         }
         let socket = Path::new(SOCKET_DIR).join("lane.sock");
-        match Api::lane_only(lane, shared, journal, &token).serve_unix(&socket).await {
+        match Api::lane_only(lane, Some(collector), shared, journal, &token).serve_unix(&socket).await {
             Ok(()) => log::info!("agent shell: management lane on {}; the agent shell is {}", socket.display(), if on { "open" } else { "closed" }),
             Err(e) => {
                 log::error!("agent shell: cannot serve {}: {e}", socket.display());

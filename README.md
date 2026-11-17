@@ -77,7 +77,7 @@ RigDesk's PIN-locked security settings. Have the client sign the text below befo
 > edition, build and uptime; processor name and load; memory in use; size and free space of each local drive;
 > whether a restart is pending; Windows Update's last install and pending count (checked hourly); Defender's
 > real-time protection and signature age; BitLocker status per drive; each physical disk's health, wear and
-> temperature; automatic services that are stopped; the count of System-log errors in the last 24 hours; the
+> temperature; automatic services that are stopped; the count of errors in the System event log in the last 24 hours; the
 > battery where there is one; and RigDesk's own version. It reads no files, documents, browsing or keystrokes. The
 > computer keeps the last 24 hours of these readings; Rig fetches them over the same private network and keeps 7 days
 > of them on its host, where they are shown to **<operator>** and their agents and checked for faults.
@@ -165,8 +165,17 @@ Have the client sign this text before you run the line with the agent shell on:
 > behind the admin PIN, stops new commands and ends running ones until it is unticked. Blocking an agent in RigDesk
 > refuses its commands too. You see what ran after it ran, not as it runs.
 >
+> **What is collected.** Within a minute of start-up and every 10 minutes after, RigDesk reads, as root: the
+> distribution's name and version, the kernel and uptime; processor name and load; memory in use; size and free space
+> of each local file system; whether a restart is pending; the packages apt would upgrade, as of the last package-list
+> refresh, and when a package was last installed; each physical disk's health, wear and temperature where smartctl is
+> installed; services that failed; the count of errors in the system journal in the last 24 hours; the battery where
+> there is one; and RigDesk's own version. It reads no files, documents, browsing or keystrokes. The computer keeps
+> the last 24 hours of these readings; Rig fetches them over the same private network and keeps 7 days of them on its
+> host, where they are shown to **<operator>** and their agents and checked for faults.
+>
 > Turning the agent shell off (rerunning the install line with `--agent-shell off`) stops remote commands;
-> uninstalling RigDesk removes it.
+> uninstalling RigDesk stops the readings too.
 
 ### Tailnet policy
 

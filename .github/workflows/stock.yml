@@ -7,7 +7,7 @@ on:
   push:
     branches: [main, "s*"]
     tags: ["v*"]
-    paths: [libs/bridge/**, libs/agent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/smoke/lane.sh, .github/workflows/stock.yml]
+    paths: [libs/bridge/**, libs/agent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/smoke/lane.sh, src/platform/linux/agent_health.sh, .github/workflows/stock.yml]
   pull_request:
   workflow_dispatch:
 
