@@ -14,6 +14,8 @@ pub mod operator;
 pub mod relay;
 pub mod session;
 pub mod shell;
+#[cfg(target_os = "linux")]
+pub mod systemd;
 pub mod wrap;
 
 pub use desk::{Called, Content, Desk, ToolSpec};

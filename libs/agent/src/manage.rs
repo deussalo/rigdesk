@@ -546,7 +546,8 @@ impl Runner for ShRunner {
     }
 
     fn alive(&self, handle: &JobHandle) -> bool {
-        std::fs::read_to_string(format!("/proc/{handle}/stat")).map_or(false, |stat| stat.rsplit(')').next().map_or(false, |rest| !rest.trim_start().starts_with('Z')))
+        let Ok(pid) = handle.0.parse::<u32>() else { return false };
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(false, |stat| stat.rsplit(')').next().map_or(false, |rest| !rest.trim_start().starts_with('Z')))
     }
 
     fn end(&self, handle: &JobHandle) {
