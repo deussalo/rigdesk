@@ -107,6 +107,8 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
+        // A press cuts the spoken reply before the microphone opens, so the recogniser never hears the phone itself.
+        Link.hush()
         main.removeCallbacks(hideLater)
         main.removeCallbacks(deliverLate)
         said.setLength(0)

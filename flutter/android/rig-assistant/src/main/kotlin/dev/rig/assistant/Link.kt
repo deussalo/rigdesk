@@ -55,6 +55,11 @@ object Link {
 
     fun connected() = ws != null
 
+    /** Cuts the phone's spoken reply now; nothing if the link never started. Main thread. */
+    fun hush() {
+        if (::tools.isInitialized) tools.hush()
+    }
+
     /** Drop the connection so the loop dials again with the settings as they are now. */
     fun redial() {
         out.execute { ws?.close() }
