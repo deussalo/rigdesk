@@ -123,13 +123,13 @@ class SetupActivity : Activity() {
         }
         val origin = "${target.scheme}://$host" + if (target.port != -1) ":${target.port}" else ""
         val before = Config.load(this).first?.origin
-        val replaces = if (before != null && before != url) "\n\nThis replaces the Rig at $before." else ""
+        val replaces = if (before != null && before != origin) "\n\nThis replaces the Rig at $before." else ""
         AlertDialog.Builder(this)
             .setTitle("Pair with Rig?")
             .setMessage("Connect this phone to the Rig at $origin as \"$phone\". Its agent can then use the phone's tools you allow.$replaces")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Pair") { _, _ ->
-                Config.prefs(this).edit().putString("url", url).putString("token", token).putString("phone", phone).apply()
+                Config.prefs(this).edit().putString("url", origin).putString("token", token).putString("phone", phone).apply()
                 Link.redial()
                 recreate()
                 if (!isAssistant()) startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
