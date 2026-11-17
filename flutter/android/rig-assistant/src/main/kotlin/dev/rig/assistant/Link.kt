@@ -48,6 +48,7 @@ object Link {
         if (loop?.isAlive == true) return
         ctx = context.applicationContext
         tools = Tools(ctx)
+        Stop.attach(ctx)
         watchNetwork()
         loop = Thread(::run, "rig-link").apply { isDaemon = true; start() }
     }
@@ -156,7 +157,11 @@ object Link {
                 val id = frame.getLong("id")
                 val tool = frame.getString("tool")
                 val args = frame.optJSONObject("args") ?: JSONObject()
-                calls.execute { send(result(id, tools.call(tool, args))) }
+                calls.execute {
+                    val refused = Stop.called()
+                    send(if (refused != null) JSONObject().put("type", "result").put("id", id).put("ok", false).put("refused", refused)
+                        else result(id, tools.call(tool, args)))
+                }
             }
             "ack" -> {
                 val upto = frame.getLong("seq")
