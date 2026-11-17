@@ -266,6 +266,10 @@ impl Api {
                 drain(&mut request).await;
                 self.leave(&request)
             }
+            ("GET", "/blocked") if !self.lane_only => {
+                let agent = request.uri().query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("agent=")).unwrap_or("").to_string();
+                json_response(StatusCode::OK, &json!({"agent": agent, "since_ms": self.shared.blocked_since(&agent)}))
+            }
             ("GET", "/log") => {
                 let n = query_number(request.uri().query(), "n").unwrap_or(200).min(5000);
                 json_response(StatusCode::OK, &json!({"entries": self.journal.tail(n)}))

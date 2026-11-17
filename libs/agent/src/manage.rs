@@ -204,11 +204,19 @@ pub struct Lane {
     starting: Mutex<()>,
     /// Why the PC refused commands at the last sweep (None while it let them run), so each change is journaled once.
     was_open: Mutex<Option<Option<&'static str>>>,
+    /// Where the human's blocks are kept, when not in this process's `shared`: on Linux, the desktop user's server.
+    blocks: std::sync::OnceLock<Box<dyn Fn(&str) -> Option<u64> + Send + Sync>>,
 }
 
 impl Lane {
     pub fn new(runner: Arc<dyn Runner>, dir: PathBuf, shared: Arc<Shared>, journal: Arc<Journal>) -> Arc<Self> {
-        Arc::new(Lane { runner, dir, shared, journal, starting: Mutex::new(()), was_open: Mutex::new(None) })
+        Arc::new(Lane { runner, dir, shared, journal, starting: Mutex::new(()), was_open: Mutex::new(None), blocks: Default::default() })
+    }
+
+    /// Reads the human's blocks from `blocked_since` (an agent's id to when the human blocked it) instead of this
+    /// process's own share state. Once, before serving.
+    pub fn blocks_from(&self, blocked_since: impl Fn(&str) -> Option<u64> + Send + Sync + 'static) {
+        let _ = self.blocks.set(Box::new(blocked_since));
     }
 
     pub fn runner(&self) -> &Arc<dyn Runner> {
@@ -217,7 +225,11 @@ impl Lane {
 
     fn admit(&self, owner: &Owner) -> Result<(), Refused> {
         self.runner.allowed()?;
-        match self.shared.blocked_since(&owner.agent_id) {
+        let blocked = match self.blocks.get() {
+            Some(blocked_since) => blocked_since(&owner.agent_id),
+            None => self.shared.blocked_since(&owner.agent_id),
+        };
+        match blocked {
             Some(since_ms) => Err(Refused::Blocked { since_ms }),
             None => Ok(()),
         }
@@ -605,6 +617,17 @@ mod tests {
         assert_eq!(shells[0].detail["as"], json!("system"));
         assert_eq!(shells[0].detail["command"], json!("echo hi; exit 3"));
         assert!(shells[0].detail["took_ms"].is_u64());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn blocks_kept_elsewhere_refuse_the_blocked_agent_alone() {
+        let (lane, _runner, _shared, dir) = lane();
+        lane.blocks_from(|agent| (agent == "a1").then_some(42));
+        let (blocked, run) = asked(json!({"agent": {"id": "a1"}, "command": "echo hi"}));
+        assert_eq!(lane.serve(&blocked, run).unwrap_err(), Refused::Blocked { since_ms: 42 });
+        let (other, run) = asked(json!({"agent": {"id": "a2"}, "command": "echo hi"}));
+        assert!(lane.serve(&other, run).unwrap().ok);
         let _ = std::fs::remove_dir_all(dir);
     }
 

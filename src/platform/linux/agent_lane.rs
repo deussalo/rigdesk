@@ -7,20 +7,23 @@
 //!                                      `actions.jsonl` and the jobs under `shell/`
 //!   /run/rigdesk/lane.sock             the lane, connectable by root alone; `tailscale serve --set-path=/lane` puts it on
 //!                                      the tailnet, since tailscaled is root
+//!   /var/log/rigdesk/managed-by-rig.txt  what ran, which every user may read and the tray opens
 //!
 //! The person's pause is the `agent-shell-paused` option, which the PIN-locked settings set and the desktop user's
-//! process syncs to root's config.
+//! process syncs to root's config. The human's blocks live in the desktop user's server, which the lane asks.
 
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::io::{Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hbb_common::{config::Config, log, tokio};
-use rigdesk_agent::{manage::Lane, systemd::SystemdRunner, Api, Events, Journal, Shared};
+use rigdesk_agent::{digest, manage::Lane, systemd::{self, SystemdRunner}, Api, Events, Journal, Shared};
 use serde_derive::Deserialize;
 
 pub const ROOT_DIR: &str = "/var/lib/rigdesk";
 const SOCKET_DIR: &str = "/run/rigdesk";
+const DIGEST_DIR: &str = "/var/log/rigdesk";
 const JOURNAL_BYTES: u64 = 8 << 20;
 
 pub fn agent_dir() -> PathBuf {
@@ -61,12 +64,14 @@ pub fn serve() {
         let runner = Arc::new(SystemdRunner {
             switch: switch_file(),
             paused: Box::new(|| Config::get_option(base::config::keys::OPTION_AGENT_SHELL_PAUSED) == "Y"),
-            user: Box::new(rigdesk_agent::systemd::signed_in),
+            user: Box::new(systemd::signed_in),
         });
         let shared = Arc::new(Shared::new(Events::new(512)));
         let journal = Arc::new(Journal::open(agent_dir().join("actions.jsonl"), JOURNAL_BYTES));
         let lane = Lane::new(runner, agent_dir().join("shell"), shared.clone(), journal.clone());
+        lane.blocks_from(blocked_in_session);
         let on = lane.switch().get("open").and_then(|v| v.as_bool()).unwrap_or(false);
+        keep_digest(on, &shared, &journal);
         if let Err(why) = private_dir(Path::new(SOCKET_DIR)) {
             log::error!("agent shell: {why}; no management lane");
             return;
@@ -81,6 +86,76 @@ pub fn serve() {
         }
         std::future::pending::<()>().await;
     });
+}
+
+/// The tray's list of what ran.
+pub fn digest_file() -> PathBuf {
+    Path::new(DIGEST_DIR).join("managed-by-rig.txt")
+}
+
+/// Opens the tray's list for the person at the PC; false when the agent shell is off here.
+pub fn open_digest() -> bool {
+    let path = digest_file();
+    path.exists() && std::process::Command::new("xdg-open").arg(path).spawn().is_ok()
+}
+
+/// While the agent shell is on, keeps the tray's list; while it is off, there is none, and the tray offers none.
+fn keep_digest(on: bool, shared: &Arc<Shared>, journal: &Arc<Journal>) {
+    if !on {
+        let _ = std::fs::remove_file(digest_file());
+        return;
+    }
+    write_digest(journal);
+    let journal = journal.clone();
+    tokio::spawn(digest::keep(shared.clone(), move || write_digest(&journal)));
+}
+
+fn write_digest(journal: &Journal) {
+    let written = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(DIGEST_DIR)
+        .and_then(|_| write_private(&digest_file(), &digest::text(journal, "root", "\n"), 0o644));
+    if let Err(e) = written {
+        log::warn!("agent shell: the tray's list of commands is not written: {e}");
+    }
+}
+
+/// When the desktop user's server says the human blocked `agent`: it keeps the blocks, as the PC's share state. None
+/// when nobody is signed in or their server does not answer, as after its restart, when it has no blocks either. Root
+/// reads the user's own token for that server, and only a file the user owns and no link to one, so a link planted
+/// there cannot make root read and send another file.
+fn blocked_in_session(agent: &str) -> Option<u64> {
+    if agent.is_empty() || !agent.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return None;
+    }
+    let user = systemd::signed_in().ok()?;
+    let path = Path::new(&user.home).join(".config").join(crate::get_app_name().to_lowercase()).join("agent").join("api.token");
+    let mut file = std::fs::OpenOptions::new().read(true).custom_flags(hbb_common::libc::O_NOFOLLOW | hbb_common::libc::O_NONBLOCK).open(&path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != user.uid {
+        hbb_common::throttled_log!(std::time::Duration::from_secs(60), warn, "agent shell: {} is not {}'s own file; blocks are not read", path.display(), user.name);
+        return None;
+    }
+    let mut token = String::new();
+    (&mut file).take(256).read_to_string(&mut token).ok()?;
+    let token = token.trim();
+    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return None;
+    }
+    let timeout = std::time::Duration::from_secs(2);
+    let mut stream = std::net::TcpStream::connect_timeout(&(std::net::Ipv4Addr::LOCALHOST, crate::agent::API_PORT).into(), timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    write!(stream, "GET /blocked?agent={agent} HTTP/1.0\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n").ok()?;
+    let mut said = Vec::new();
+    stream.take(64 << 10).read_to_end(&mut said).ok()?;
+    let said = String::from_utf8_lossy(&said);
+    let (head, body) = said.split_once("\r\n\r\n")?;
+    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(body).ok()?.get("since_ms")?.as_u64()
 }
 
 /// Made if missing, then root's alone.

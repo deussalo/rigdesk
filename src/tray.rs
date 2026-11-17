@@ -82,7 +82,11 @@ fn make_tray() -> hbb_common::ResultType<()> {
     }
     // While the agent shell is on, the PC says it is managed by Rig, lists what ran, and opens the PIN-locked pause.
     #[cfg(windows)]
-    let managed_i = crate::platform::windows::agent_lane::digest_file()
+    let managed_list = crate::platform::windows::agent_lane::digest_file();
+    #[cfg(target_os = "linux")]
+    let managed_list = Some(crate::platform::linux::agent_lane::digest_file());
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let managed_i = managed_list
         .filter(|path| path.exists())
         .map(|_| {
             let list = MenuItem::new(translate("Managed by Rig: commands run here".to_owned()), true, None);
@@ -208,10 +212,13 @@ fn make_tray() -> hbb_common::ResultType<()> {
             if operator_notice.clicked(&event) {
                 return;
             }
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             if let Some((list, pause)) = &managed_i {
                 if event.id == list.id() {
+                    #[cfg(windows)]
                     crate::platform::windows::agent_lane::open_digest();
+                    #[cfg(target_os = "linux")]
+                    crate::platform::linux::agent_lane::open_digest();
                     return;
                 }
                 if event.id == pause.id() {
