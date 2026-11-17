@@ -16,6 +16,9 @@ import android.speech.RecognitionListener
 import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.util.Base64
 import android.view.Gravity
 import android.view.View
@@ -202,8 +205,14 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
         render()
     }
 
+    /** What was said shows white and never changes; the recogniser's open guess follows it dimmed, since it may still be revised. */
     private fun render() {
-        heard.text = if (hearing.isEmpty()) said.toString() else if (said.isEmpty()) hearing else "$said $hearing"
+        val shown = SpannableStringBuilder(said)
+        if (hearing.isNotEmpty()) {
+            if (shown.isNotEmpty()) shown.append(' ')
+            shown.append(hearing, ForegroundColorSpan(OPEN_COLOR), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        heard.text = shown
     }
 
     /** The recogniser ended a segment: send if Send is waiting for it, else listen again. A recogniser that ends at once
@@ -321,6 +330,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
         private const val LAST_WORDS_MS = 2_000L
         /** Silence that ends a recogniser session; the sheet then starts another, so this only bounds an idle microphone. */
         private const val SILENCE_MS = 30_000
+        private const val OPEN_COLOR = 0xFF9E9E8E.toInt()
 
         private fun jpeg(screenshot: Bitmap): JSONObject {
             val scale = minOf(1f, 1280f / maxOf(screenshot.width, screenshot.height))
