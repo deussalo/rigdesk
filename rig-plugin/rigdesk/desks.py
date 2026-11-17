@@ -30,6 +30,7 @@ from core.node_data import Shape
 from core.plugin_host import LiveEnding, PluginHost, PluginWords
 from core.tasks import TASKS
 
+from . import adhoc
 from .health import STATES, History, Health, Thresholds, health, samples_of
 
 ID = "rigdesk"
@@ -52,6 +53,8 @@ SETTINGS_EVERY_S = 5.0
 IDLE_LEAVE_MS = 5 * 60_000
 CALL_LIMIT_S = 120.0
 EVENTS_SILENT_S = 45.0
+# How long a desk/connect to a PC not ours waits for the operator's approval before its password is dropped.
+CONNECT_ASK_S = 15 * 60
 SHELL_LIMIT_S = 600
 
 
@@ -148,6 +151,12 @@ class IdServer(Shape):
         return (("hbbs", name, port), ("hbbr", name, port + 1))
 
 
+class ConnectServer(Shape):
+    model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "The RustDesk ID server desk/connect sends a bare ID to; unset, RustDesk's public server."})
+    host: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$"), Field(description="Where its hbbs listens, as host or host:port (21116 by default); its relay is the one hbbs names.")]
+    key: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9+/=]{43,44}$"), Field(description="Its public key (the id_ed25519.pub its PCs were given), base64.")]
+
+
 class DeskPc(Shape):
     model_config = ConfigDict(defer_build=True, json_schema_extra={"description": "A PC running RigDesk: where its agent API is and the file holding its bearer token."})
     url: Annotated[WebAddress, Field(description="Its agent API, published by tailscale serve: https://<pc>.<tailnet>.ts.net; for a stock PC, http://127.0.0.1:<port> where Rig runs rigdesk-bridge.")]
@@ -176,6 +185,8 @@ class RigdeskSettings(Shape):
     bridge_bin: Annotated[str, Field(description="The rigdesk-bridge program run for each stock PC: a path, or a name on PATH.")] = "rigdesk-bridge"
     id_server: Annotated[IdServer | None, Field(description="Our RustDesk ID server (hbbs, with hbbr beside it), through which stock PCs named by id are reached.")] = None
     health: Annotated[Thresholds, Field(description="Where a RigDesk PC's health figures warn or fault; the PC reports figures and Rig judges them.")] = Thresholds()
+    connect_server: Annotated[ConnectServer | None, Field(description="Where desk/connect sends a bare RustDesk ID that is none of our PCs: an ID server's host and key. "
+                                                                      "Unset, RustDesk's public server; an ID given as ID@host?key=<key> goes to that server instead.")] = None
 
     @model_validator(mode="after")
     def _ids_have_a_server(self) -> RigdeskSettings:
@@ -195,7 +206,7 @@ class Held:
     title: str
     session: str
     since_ms: int
-    via: Literal["link", "assigned"] = "link"
+    via: Literal["link", "assigned", "adhoc"] = "link"
     used_ms: int = 0
 
 
@@ -299,6 +310,34 @@ class PcEntry(TypedDict):
     os: str | None
     health: Health | None
     join: dict[str, Any] | None
+    adhoc: dict[str, str] | None
+
+
+@dataclass
+class AdHoc:
+    """A PC joined by ID and password, held while its bridge's one session lives: the bridge, the files it reads, and how it was reached."""
+    id: str
+    words: str = "connecting"
+    process: asyncio.subprocess.Process | None = None
+    files: tuple[Path, ...] = ()
+    watch: asyncio.Task[None] | None = None
+    port: int | None = None
+
+
+@dataclass
+class AskedConnect:
+    """A desk/connect waiting on the operator's approval to dial out: its password is held here, in memory alone, until they accept or it lapses."""
+    target: str
+    password: str
+    agent: str
+    expiry: asyncio.Task[None] | None = None
+
+
+class ConnectAsk(Exception):
+    """desk/connect found none of our PCs under that ID: dialing out, to where, waits for the operator's approval."""
+    def __init__(self, target: str, where: str, tried: tuple[str, ...]) -> None:
+        super().__init__(f"{target} through {where}")
+        self.target, self.where, self.tried = target, where, tried
 
 
 def failure(failed: BaseException) -> str:
@@ -317,7 +356,8 @@ def pc_of_link(link: str, pcs: dict[str, DeskPc]) -> tuple[str, str, str] | str:
     """The PC a share link names, and its grant and secret; or why it names none. The host is the PC's name, its URL's host, or that host's first label."""
     matched = LINK.match(link.strip())
     if matched is None:
-        return "that is not a RigDesk share link: one reads rigdesk://<pc>/<grant>#<secret>, copied with Share with agent in the viewer"
+        return ("that is not a RigDesk share link: one reads rigdesk://<pc>/<grant>#<secret>, copied with Share with agent in the viewer. "
+                "Given a PC's RustDesk ID and password instead, desk/connect(id, password) joins it")
     host = matched["host"].lower()
     for name, spec in pcs.items():
         url_host = (urlsplit(spec.url).hostname or "").lower()
@@ -407,6 +447,9 @@ class Desks:
         self._granting = asyncio.Lock()
         self._thresholds = Thresholds()
         self._history = History(self._dir / "health")
+        self._adhoc: dict[str, AdHoc] = {}
+        self._asked: dict[str, AskedConnect] = {}
+        self._adhoc_lost: list[Held] = []
         self._read_state()
 
     # --- state kept across restarts ---
@@ -421,6 +464,7 @@ class Desks:
         except (OSError, ValueError):
             kept = {}
         self._sessions = {pc: Held(**held) for pc, held in kept.get("sessions", {}).items()}
+        self._adhoc_lost = [self._sessions.pop(pc) for pc in [pc for pc, held in self._sessions.items() if held.via == "adhoc"]]
         self._boots = dict(kept.get("boots", {}))
         self._last = {pc: int(last) for pc, last in kept.get("last", {}).items()}
         self._catalog = {tool["name"]: tool for tool in kept.get("catalog", []) if isinstance(tool, dict) and "name" in tool}
@@ -437,12 +481,18 @@ class Desks:
         self._http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10))
         self._watch = TASKS.spawn("rigdesk-settings", self._watching())
         self._probe = TASKS.spawn("rigdesk-id-server", self._probing())
+        TASKS.spawn("rigdesk-adhoc-lost", self._adhoc_restarted())
 
     async def end(self, _ending: LiveEnding) -> None:
         tasks = [task for task in (self._watch, self._probe, *(task for link in self._pcs.values() for task in (link.task, link.remote, link.lane))) if task is not None]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self._adhoc_end_all()
+        for asked in self._asked.values():
+            if asked.expiry is not None:
+                asked.expiry.cancel()
+        self._asked.clear()
         if self._http is not None:
             await self._http.close()
 
@@ -453,6 +503,7 @@ class Desks:
                 self._reconcile(settings)
                 await self._prune_grants()
                 await self._idle_leaves()
+                await self._adhoc_idle()
                 await self._resend()
                 await self._judge()
             except Exception as failed:  # noqa: BLE001
@@ -469,13 +520,13 @@ class Desks:
             self.host.forget(RENDEZVOUS, {listener.role for listener in self._listeners})
             self._probe_now.set()
         self._id_server = settings.id_server
-        for pc in [pc for pc in self._sessions if pc not in settings.pcs]:
+        for pc in [pc for pc in self._sessions if pc not in settings.pcs and pc not in self._adhoc]:
             held = self._sessions.pop(pc)
             self._unsent.pop(pc, None)
             _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: the PC left Rig's settings, so {held.title}'s session there ended", pc=pc)
             TASKS.spawn(f"rigdesk-gone-{pc}", self._ended(held, f"RigDesk {pc}: the operator removed {pc} from Rig, so your session there ended."))
         carried: dict[str, dict[str, PcServer]] = {}
-        for name in [name for name, link in self._pcs.items() if settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None)]:
+        for name in [name for name, link in self._pcs.items() if name not in self._adhoc and (settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None))]:
             link = self._pcs.pop(name)
             for task in (link.task, link.remote, link.lane):
                 if task is not None:
@@ -1448,6 +1499,9 @@ class Desks:
                                     "so other agents assigned to it can use it.")
 
     async def leave(self, held: Held) -> bool:
+        if held.pc in self._adhoc:
+            await self._adhoc_closed(held.pc, None)
+            return True
         if self._sessions.get(held.pc) is held:
             self._sessions.pop(held.pc)
             self._unsent.pop(held.pc, None)
@@ -1517,7 +1571,7 @@ class Desks:
                          "owner": None if owner is None else {"id": owner.get("agent_id"), "title": owner.get("title"), "graph": owner.get("graph")},
                          "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id"), "assigned": self.granted(name),
                          "shell": None if link.spec.stock is not None else {"switch": link.shell, "granted": self.shell_granted(name)},
-                         "health": self._health_row(name, link),
+                         "health": self._health_row(name, link), "adhoc": self._adhoc_row(name),
                          "mcp": {"allowed": link.spec.mcp, "on": link.mcp_on, "why": link.mcp_why,
                                  "servers": [{"name": server.name, "key": server.key, "says": server.says, "tools": [tool["name"] for tool in server.tools],
                                               "since_ms": server.since_ms} for server in link.servers.values()]}})
@@ -1547,7 +1601,7 @@ class Desks:
             held = self._sessions.get(name)
             rows.append(PcEntry(name=name, client=link.spec.client, stock=link.spec.stock is not None, state=link.state, why=link.remote_why or link.why,
                                 assigned=self.granted(name), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph),
-                                shell=link.shell, os=link.os, health=self.judged(name), join=link.join))
+                                shell=link.shell, os=link.os, health=self.judged(name), join=link.join, adhoc=self._adhoc_row(name)))
         return tuple(rows)
 
     def session_of(self, graph: str, agent: str) -> dict[str, Any] | None:
@@ -1560,4 +1614,205 @@ class Desks:
                 "since_ms": standing.get("since_ms"), "joined_ms": held.since_ms}
 
 
-NATIVE = frozenset({"join", "leave", "attachment", "request", "pcs", "shell"})
+    # --- ad-hoc joins: a PC by its RustDesk ID and the password the operator handed the agent (see adhoc) ---
+
+    def _adhoc_row(self, name: str) -> dict[str, str] | None:
+        kept = self._adhoc.get(name)
+        return None if kept is None else {"id": kept.id, "via": kept.words}
+
+    @staticmethod
+    async def _adhoc_routes(target: adhoc.Target, settings: RigdeskSettings, key_file: Path, busy: set[str]) -> list[adhoc.Route]:
+        """The ID server the ID names; or, for a bare ID, each PC of ours on the tailnet that answers and no other agent holds (a RigDesk PC, or
+        one reached by peer, such as RigDesk on a phone), then RustDesk's public server."""
+        if target.host is not None:
+            return [adhoc.Route(("--id", target.id, "--id-server", target.host, "--key-file", str(key_file)), f"the ID server {target.host}")]
+        ours = {name: (pc.stock.peer if pc.stock is not None else urlsplit(pc.url).hostname) for name, pc in settings.pcs.items()
+                if name not in busy and (pc.stock is None or pc.stock.peer is not None)}
+        peers = {name: peer for name, peer in ours.items() if peer}
+        up = await asyncio.gather(*(adhoc.answers(*adhoc.host_port(peer)) for peer in peers.values()))
+        return [*(adhoc.Route(("--peer", peer, "--login-id", target.id), f"{name} over the tailnet", name) for (name, peer), reached in zip(peers.items(), up, strict=True) if reached),
+                adhoc.Route(("--id", target.id, "--id-server", adhoc.PUBLIC_HOST, "--key-file", str(key_file)), f"RustDesk's public server {adhoc.PUBLIC_HOST}")
+                if settings.connect_server is None else
+                adhoc.Route(("--id", target.id, "--id-server", settings.connect_server.host, "--key-file", str(key_file)), f"the ID server {settings.connect_server.host}")]
+
+    async def connect(self, given_id: str, password: str, agent: str, graph: str, node: str, title: str, approved: bool = False) -> tuple[Held, str]:
+        """Joins a PC by its RustDesk ID and a password, with no settings entry: our RigDesk PCs that answer are tried first over the tailnet
+        under that ID (one that is not it says so before it looks at the password), then the public ID server, or the server the ID names.
+        The session is this agent's until it leaves or the PC ends it."""
+        target = adhoc.target_of(given_id)
+        if isinstance(target, str):
+            raise DeskRefused(target)
+        mine = self.held_by(agent, graph)
+        if mine is not None:
+            raise DeskRefused(f"you already own the session on {mine.pc}; desk/leave it before connecting to another")
+        name = f"id-{target.id}"
+        settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
+        if name in self._pcs or name in self._adhoc or name in settings.pcs:
+            other = self._sessions.get(name)
+            raise DeskRefused(f"{other.title if other is not None else 'another agent'} holds {target.id} now" if name not in settings.pcs
+                              else f"{name} is set up in Rig's settings: desk/request or desk/join reaches it")
+        kept = self._adhoc[name] = AdHoc(target.id)
+        try:
+            return await self._adhoc_joined(name, kept, target, password, settings, agent, graph, node, title, approved)
+        except BaseException:
+            await self._adhoc_closed(name, None)
+            raise
+
+    def connect_asked(self, ask: str, given_id: str, password: str, agent: str, seat: SeatId) -> None:
+        """Holds a desk/connect's password, in memory only, while the operator decides; it lapses unanswered after CONNECT_ASK_S."""
+        asked = self._asked[ask] = AskedConnect(given_id, password, agent)
+        asked.expiry = TASKS.spawn(f"rigdesk-connect-ask-{ask}", self._connect_lapsed(ask, seat))
+
+    def connect_dropped(self, ask: str) -> None:
+        asked = self._asked.pop(ask, None)
+        if asked is not None and asked.expiry is not None:
+            asked.expiry.cancel()
+
+    async def connect_approved(self, ask: str, agent: str, graph: str, node: str, title: str) -> tuple[Held, str]:
+        """The operator's Accept: the asked desk/connect dials out now, with the password held for it."""
+        asked = self._asked.pop(ask, None)
+        if asked is None:
+            raise DeskRefused(f"its password was dropped, as the request went unanswered for {CONNECT_ASK_S // 60} minutes or Rig restarted, so nothing was dialed; "
+                              "the agent can desk/connect again")
+        if asked.expiry is not None:
+            asked.expiry.cancel()
+        return await self.connect(asked.target, asked.password, agent, graph, node, title, approved=True)
+
+    async def _connect_lapsed(self, ask: str, seat: SeatId) -> None:
+        await asyncio.sleep(CONNECT_ASK_S)
+        asked = self._asked.pop(ask, None)
+        if asked is None or await self.host.confirming(seat, ask) is None:
+            return
+        words = (f"RigDesk: your desk/connect to {asked.target} lapsed: the operator did not approve it within {CONNECT_ASK_S // 60} minutes, so nothing was dialed "
+                 "and its password is gone. Accepting the request later does nothing; desk/connect again if you still need it.")
+        lapsed = Held(f"id-{asked.target}", asked.agent, seat.graph, seat.node, "", f"lapsed-{ask}", now_ms(), "adhoc")
+        await self._tell(lapsed, words, f"lapsed:{ask}", "queue")
+
+    async def _adhoc_joined(self, name: str, kept: AdHoc, target: adhoc.Target, password: str, settings: RigdeskSettings,
+                            agent: str, graph: str, node: str, title: str, approved: bool) -> tuple[Held, str]:
+        secret = f"adhoc-{target.id}"
+        password_file = Path(await asyncio.to_thread(self._keep_secret, secret, "password", password)).expanduser()
+        token_file = Path(await asyncio.to_thread(self._keep_secret, secret, "token", secrets.token_urlsafe(32))).expanduser()
+        server = settings.connect_server
+        key_file = Path(await asyncio.to_thread(self._keep_secret, secret, "key", target.key or (server.key if server is not None else adhoc.PUBLIC_KEY))).expanduser()
+        kept.files = (password_file, token_file, key_file)
+        busy = {pc: held.title for pc, held in self._sessions.items() if pc in settings.pcs and held.agent != agent}
+        routes = await self._adhoc_routes(target, settings, key_file, set(busy))
+        # Only our own PCs are dialed unasked; any other waits for the operator's approval, and once given, ours are not tried again.
+        outside = [] if approved else [route for route in routes if route.rigdesk is None]
+        routes = [route for route in routes if (route.rigdesk is None) == approved]
+        unasked = "".join(f"; {pc} was not tried, as {holder} holds it" for pc, holder in sorted(busy.items()))
+        bridge = str(Path(settings.bridge_bin).expanduser()) if "/" in settings.bridge_bin else settings.bridge_bin
+        tried: list[str] = []
+        for route in routes:
+            taken = ({urlsplit(pc.url).port for pc in settings.pcs.values()} | {urlsplit(link.spec.url).port for link in self._pcs.values()}
+                     | {each.port for each in self._adhoc.values()})
+            # Picked and kept with no await between, so a connect running beside this one cannot pick the same port.
+            port = kept.port = self._first_free(taken)
+            log = await asyncio.to_thread(self._remote_log, name)
+            try:
+                process = await asyncio.create_subprocess_exec(bridge, *route.argv, "--password-file", str(password_file), "--token-file", str(token_file),
+                                                               "--port", str(port), "--once", "--journal", str(self._dir / f"bridge-{name}.journal"),
+                                                               stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=log, start_new_session=True)
+            except OSError as failed:
+                raise DeskRefused(f"rigdesk-bridge could not start ({bridge}): {failed}") from failed
+            finally:
+                log.close()
+            kept.process = process
+            said = await adhoc.outcome(process)
+            if said[0] == "logged in":
+                kept.words = route.words
+                break
+            await self._stopped(process)
+            kept.process = None
+            if route.rigdesk is not None and (said[0] == "failed" or said[1] == adhoc.NOT_THIS_PC):
+                tried.append(route.rigdesk)
+                continue
+            raise DeskRefused(adhoc.refusal(target, route, said) + (f" (it is not {', '.join(tried)} either)" if tried else "") + unasked)
+        else:
+            if outside:
+                raise ConnectAsk(target.id, outside[0].words, tuple(tried))
+            raise DeskRefused(f"{target.id} could not be reached")
+        assert kept.process is not None
+        stock = StockRemote(peer=route.argv[1], password_file=str(password_file)) if route.rigdesk is not None else StockRemote(id=target.id, password_file=str(password_file))
+        link = self._pcs[name] = PcLink(name, DeskPc(url=f"http://127.0.0.1:{port}", token_file=str(token_file), stock=stock, mcp=False))
+        link.task = TASKS.spawn(f"rigdesk-{name}", self._held(link))
+        kept.watch = TASKS.spawn(f"rigdesk-adhoc-{name}", self._adhoc_watch(name, kept.process))
+        self._linked(link)
+        for _ in range(50):
+            if link.state == "up":
+                break
+            await asyncio.sleep(0.2)
+        minted = await self.viewer(name, "mint")
+        grant = LINK.match(minted["link"])
+        assert grant is not None, "a minted link is a share link"
+        body = {"grant": grant["grant"], "secret": grant["secret"], "agent": {"id": agent, "title": title, "graph": graph}}
+        async with self._client().post(f"{link.spec.url}/claim", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
+            claimed = _object(await answer.json(content_type=None))
+            if answer.status != 200 or not isinstance(claimed.get("session"), str):
+                raise DeskRefused(f"{name}'s rigdesk-bridge refused the session: {claimed.get('error') or f'HTTP {answer.status}'}")
+        other = self.held_by(agent, graph)
+        if other is not None:
+            raise DeskRefused(f"you came to own the session on {other.pc} while this connect ran; desk/leave it before connecting to another")
+        held = self._sessions[name] = Held(name, agent, graph, node, title, claimed["session"], now_ms(), "adhoc")
+        link.standing = claimed.get("standing")
+        await asyncio.to_thread(self._write_state)
+        _LOG.info("rigdesk_adhoc_joined", f"RigDesk {name}: {title} joined RustDesk ID {target.id} through {kept.words}", pc=name)
+        return held, kept.words
+
+    async def _adhoc_watch(self, name: str, process: asyncio.subprocess.Process) -> None:
+        try:
+            why = await adhoc.ended(process)
+        except asyncio.CancelledError:
+            await self._stopped(process)
+            raise
+        await self._adhoc_closed(name, why)
+
+    async def _adhoc_closed(self, name: str, why: str | None) -> None:
+        """An ad-hoc PC gone: its bridge stopped, its files deleted, and with why, its agent told; without why, its agent left or never joined."""
+        kept = self._adhoc.pop(name, None)
+        if kept is None:
+            return
+        if kept.watch is not None and kept.watch is not asyncio.current_task():
+            kept.watch.cancel()
+        if kept.process is not None:
+            await self._stopped(kept.process)
+        link = self._pcs.pop(name, None)
+        if link is not None and link.task is not None:
+            link.task.cancel()
+        held = self._sessions.pop(name, None)
+        self._unsent.pop(name, None)
+        for path in kept.files:
+            path.unlink(missing_ok=True)
+        await asyncio.to_thread(self._write_state)
+        self.host.forget(PC, self._pcs.keys())
+        if held is not None and why is not None:
+            _LOG.info("rigdesk_session_ended", f"RigDesk {name}: {held.title}'s ad-hoc session ended: {why}", pc=name)
+            await self._ended(held, f"RigDesk {name}: your session on RustDesk ID {kept.id} ended: {why}. desk/connect with its ID and a password joins it "
+                                    "again; a one-time password works for one session only.")
+
+    async def _adhoc_idle(self) -> None:
+        cutoff = now_ms() - adhoc.IDLE_MS
+        for held in [held for name, held in self._sessions.items() if name in self._adhoc and max(held.used_ms, held.since_ms) < cutoff]:
+            await self._adhoc_closed(held.pc, f"{adhoc.IDLE_MS // 60_000} minutes went by without a desk call")
+
+    async def _adhoc_end_all(self) -> None:
+        for name in list(self._adhoc):
+            kept = self._adhoc.pop(name)
+            if kept.process is not None:
+                await self._stopped(kept.process)
+            for path in kept.files:
+                path.unlink(missing_ok=True)
+
+    async def _adhoc_restarted(self) -> None:
+        """Ad-hoc sessions do not outlive Rig: the bridges stopped with it, and their files are deleted here."""
+        for path in await asyncio.to_thread(lambda: list(SECRETS.expanduser().glob("adhoc-*"))):
+            path.unlink(missing_ok=True)
+        if self._adhoc_lost:
+            await asyncio.to_thread(self._write_state)
+        for held in self._adhoc_lost:
+            await self._ended(held, f"RigDesk {held.pc}: Rig restarted, so your ad-hoc session there ended. desk/connect with its ID and a password joins it again.")
+        self._adhoc_lost = []
+
+
+NATIVE = frozenset({"join", "leave", "attachment", "request", "pcs", "shell", "connect"})

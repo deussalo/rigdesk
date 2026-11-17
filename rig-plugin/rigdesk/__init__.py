@@ -28,7 +28,8 @@ from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from .desks import CALL_LIMIT_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
+from . import adhoc
+from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
 from .health import figures_json, series
 from .shots import inline
 from .desks import PcName as DeskName
@@ -45,11 +46,13 @@ PC_SHELL_CODES: dict[str, HTTPStatus] = {"shell_off": HTTPStatus.FORBIDDEN, "she
                                          "jobs_full": HTTPStatus.TOO_MANY_REQUESTS, "no_job": HTTPStatus.NOT_FOUND}
 
 
-NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); for another, "
+NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); given a PC's "
+              "RustDesk ID and its password (permanent or one-time), desk/connect(id, password) joins it yourself; for another, "
               "ask the operator with desk/request(pc, why), or call desk/join with a share link the human at the PC gives you. A desk call never joins one by itself")
 
 
 REQUEST_CONFIRMED = Provision("rigdesk.request_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
+CONNECT_CONFIRMED = Provision("rigdesk.connect_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
 # A RigDesk PC's ask: "always" joins and grants that agent the PC, so its later desk/request or desk/join(pc) joins with no ask.
 RIGDESK_CHOICES = Choices(choices=(Choice(id="accept", label="Join once", tone="allow"), Choice(id="always", label="Always allow", tone="allow"),
                                    Choice(id="deny", label="Deny", tone="deny")), safe_choice="deny")
@@ -69,6 +72,16 @@ class Requested(TypedDict):
 REQUESTED: TypeAdapter[Requested] = TypeAdapter(Requested)
 
 
+class ConnectAsked(TypedDict):
+    agent: str
+    graph: str
+    id: str
+    ask: str
+
+
+CONNECT_ASKED: TypeAdapter[ConnectAsked] = TypeAdapter(ConnectAsked)
+
+
 class JoinInput(ToolInput):
     link: str | None = Field(default=None, description="The share link the human gave you: rigdesk://<pc>/<grant>#<secret>. It works once.")
     pc: str | None = Field(default=None, description="Instead of a link: a PC assigned to you, by name.")
@@ -76,6 +89,15 @@ class JoinInput(ToolInput):
 
 class LeaveInput(ToolInput):
     pass
+
+
+class ConnectInput(ToolInput):
+    id: str = Field(min_length=6, max_length=400, description="The PC's RustDesk ID as the operator gave it: the digits it shows (spaces allowed); "
+                                                              "ID@host?key=<key> for a PC on a self-hosted ID server; or the ID one of our RigDesk PCs shows.")
+    password: str = Field(min_length=1, max_length=128, description="The PC's permanent password, or the one-time password it shows now, as the operator gave it. "
+                                                                    "Rig keeps it in a file only Rig's user reads while the session lives, and never repeats it.")
+    why: str = Field(min_length=1, max_length=1000, description="What you need the PC for, in a sentence or two: unless it is one of our RigDesk PCs, the operator "
+                                                                "reads it before deciding whether Rig dials it.")
 
 
 class RequestInput(ToolInput):
@@ -141,6 +163,61 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
                                                     "for 3 s. If they press Stop you are told, and every call is refused until they resume you.")}
 
 
+async def _connect(desks: Desks, call: Call, given: ConnectInput) -> Answer:
+    agent, graph, node = _who(call)
+    title = await call.kernel.caller_title()
+    try:
+        held, reached = await desks.connect(given.id, given.password, agent, graph, node, title)
+    except ConnectAsk as outside:
+        return await _ask_connect(desks, call, given, outside, title)
+    except Exception as failed:  # noqa: BLE001
+        return _refused(call, failed)
+    return {"pc": held.pc, "joined": True, "reached": reached, "said": _connected_words(held.pc)}
+
+
+def _connected_words(pc: str) -> str:
+    return (f"You own the session on {pc} and hold its input; desk/<tool> acts there. It lasts until you desk/leave, the PC ends it, or "
+            f"{adhoc.IDLE_MS // 60_000} minutes pass without a desk call; a one-time password then works no more.")
+
+
+async def _ask_connect(desks: Desks, call: Call, given: ConnectInput, outside: ConnectAsk, title: str) -> Answer:
+    """A PC that is none of ours is dialed only once the operator accepts; its password waits in memory, never on disk, and nothing is dialed meanwhile."""
+    agent, graph, _ = _who(call)
+    seat, asked = call.contract.place.seat, new_id("desk")
+    not_ours = f" (it is not {', '.join(outside.tried)})" if outside.tried else ""
+    reason = (f"{title} ({agent}, in {graph}) asks to connect to RustDesk ID {outside.target} through {outside.where}: a PC that is none of our RigDesk PCs"
+              f"{not_ours}.\n\n{given.why.strip()}\n\nAccept dials it now with the password the agent was given, for one session: until the agent leaves, the PC "
+              f"ends it, or {adhoc.IDLE_MS // 60_000} idle minutes pass; what the PC shows then reaches the agent. Deny dials nothing.")[:2000]
+    desks.connect_asked(asked, given.id, given.password, agent, seat)
+    try:
+        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
+                                         Then(provision=CONNECT_CONFIRMED.name, given={"agent": agent, "graph": graph, "id": outside.target, "ask": asked}))
+    except BaseException:
+        desks.connect_dropped(asked)
+        raise
+    return {"id": outside.target, "joined": False, "ask": asked, "state": state,
+            "said": (f"Nothing is dialed yet: {outside.target} is none of our PCs, so the operator is asked to approve connecting to it through {outside.where}, "
+                     f"and the decision arrives as your next input. Unanswered for {CONNECT_ASK_S // 60} minutes, it lapses and nothing is dialed.")}
+
+
+async def _connect_confirmed(host: PluginHost, asked: Confirmed) -> str:
+    """The operator's Accept of a desk/connect: the agent that asked connects now, if it still stands at its seat."""
+    given = CONNECT_ASKED.validate_python(asked["given"])
+    desks = host.live(Desks)
+    seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
+    identity = await host.roster.identity(seat)
+    if identity is None or identity.agent != given["agent"] or seat in await host.roster.closed((seat,)):
+        desks.connect_dropped(given["ask"])
+        raise Refused(REFUSED, f"{given['agent']} no longer stands at {seat.graph}/{seat.node}, so {given['id']} was not dialed")
+    try:
+        held, reached = await desks.connect_approved(given["ask"], given["agent"], given["graph"], seat.node, identity.label)
+    except DeskRefused as refused:
+        raise Refused(REFUSED, f"{refused}") from refused
+    except (aiohttp.ClientError, TimeoutError, OSError) as failed:
+        raise Refused(DOWN, f"{given['id']} could not be joined: {failure(failed)}") from failed
+    return f"The operator approved it, and you joined {held.pc} through {reached}. {_connected_words(held.pc)}"
+
+
 async def _leave(desks: Desks, call: Call, _given: LeaveInput) -> Answer:
     agent, graph, _ = _who(call)
     held = desks.held_by(agent, graph)
@@ -183,6 +260,8 @@ def _shell_words(desks: Desks, entry: PcEntry, agent: str, graph: str) -> str:
 
 
 def _reached_by(entry: PcEntry) -> str:
+    if (joined := entry.get("adhoc")) is not None:
+        return f"desk/connect(id, password) only: joined by its RustDesk ID through {joined['via']}, and gone when that session ends"
     if entry["stock"]:
         return "desk/request (join or assign), or a share link"
     switch = entry["join"]
@@ -215,7 +294,7 @@ async def _pcs(desks: Desks, call: Call, given: PcsInput) -> Answer:
         history = desks.history(given.pc)
         return {"pc": _pc_entry(desks, entry, agent, graph, mine), "sample": figures_json(history[-1]) if history else None}
     return {"pcs": [_pc_entry(desks, entry, agent, graph, mine) for entry in entries],
-            "said": "desk/join(pc) joins a PC assigned to you; desk/request(pc, why, kind) asks the operator to let you join one now or assign it to you. "
+            "said": "desk/join(pc) joins a PC assigned to you; desk/connect(id, password) joins any PC whose RustDesk ID and password you were given; desk/request(pc, why, kind) asks the operator to let you join one now or assign it to you. "
                     "desk/shell(pc, command) runs a command on a PC whose shell you are allowed, with no session; desk/pcs(pc) gives its newest health sample."}
 
 
@@ -464,9 +543,15 @@ def _native[I: ToolInput](desks: Desks, tool: str, words: str, shape: type[I], h
 
 
 def _built(desks: Desks) -> tuple[ToolDef, ...]:
-    return (_native(desks, "join", "Join a RigDesk PC with the share link its human gave you (it works once), or a stock PC assigned to you by name; you then own its session alone.",
+    return (_native(desks, "join", "Join a RigDesk PC with the share link its human gave you (it works once), or a stock PC assigned to you by name; you then own its session alone. "
+                                  "Given a RustDesk ID and password instead, call desk/connect.",
                     JoinInput, _join),
             _native(desks, "leave", "Leave the RigDesk PC you joined; its session ends.", LeaveInput, _leave),
+            _native(desks, "connect", "Join a PC by the RustDesk ID and password you were given (its permanent or one-time password): a stock RustDesk "
+                                      "PC on RustDesk's public server, one on a self-hosted server as ID@host?key=<key>, or one of our RigDesk PCs by the ID it "
+                                      "shows. Nothing needs setting up in Rig or on the RigDesk page. One of our RigDesk PCs joins at once; any other PC is dialed only "
+                                      "once the operator approves, with why, and that decision arrives as your next input. You then own its session alone; desk/screenshot, click, type and the rest act there; desk/leave ends it.", ConnectInput, _connect,
+                    limit_s=CALL_LIMIT_S + 4 * adhoc.LOGIN_LIMIT_S),
             _native(desks, "pcs", "Every RigDesk PC in Rig: its client, whether it is up, whether it is assigned to you, who holds it now, whether you may run "
                                   "commands there, and its health; with pc, that PC's newest health sample in full.", PcsInput, _pcs, read_only=True),
             _native(desks, "shell", "Run a command on a RigDesk PC: named by pc, with no session and nothing on its screen, as SYSTEM (Windows) or root (Linux), "
@@ -624,6 +709,7 @@ class PcRow(View):
     mcp: PcMcpRow = Field(description="The MCP servers running on the PC, as they reach the agent holding it.")
     shell: PcShellRow | None = Field(description="A RigDesk PC's agent shell: its switch and who may use it; null for a stock PC.")
     health: PcHealthRow | None = Field(description="A RigDesk PC's health; null for a stock PC.")
+    adhoc: dict[str, str] | None = Field(default=None, description="A PC an agent joined by RustDesk ID and password: id, and via, how it was reached; null otherwise.")
 
 
 class ListenerRow(View):
@@ -928,7 +1014,7 @@ CONTRIBUTION = ContributionDescriptor(
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN, SHELL_NOT_ALLOWED: HTTPStatus.FORBIDDEN,
                    SYSTEM_NOT_GRANTED: HTTPStatus.FORBIDDEN, **{f"{ID}.{code}": status for code, status in PC_SHELL_CODES.items()}},
-    provisions=(provider(REQUEST_CONFIRMED, _request_confirmed),),
+    provisions=(provider(REQUEST_CONFIRMED, _request_confirmed), provider(CONNECT_CONFIRMED, _connect_confirmed)),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
             RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "screenshot", post_screenshot),

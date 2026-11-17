@@ -54,6 +54,7 @@ type PcRow = {
   readonly mcp?: Mcp | undefined
   readonly shell?: PcShell | null | undefined
   readonly health?: PcHealth | null | undefined
+  readonly adhoc?: { readonly id: string; readonly via: string } | null | undefined
 }
 type Listener = {
   readonly role: 'hbbs' | 'hbbr'
@@ -459,14 +460,14 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
   const servers = pc.mcp?.servers.length ?? 0
   const mcpKnown = pc.state === 'up' && pc.mcp !== undefined && pc.mcp.on !== null
   const facts: readonly Fact[] = [
-    ['client', pc.client || 'none'], ['kind', pc.stock ? 'stock RustDesk' : 'RigDesk'], ['address', pc.url], ['input', pc.holder === null ? 'no agent' : HOLDER[pc.holder]],
+    ['client', pc.client || 'none'], ['kind', pc.adhoc != null ? `ad hoc: ID ${pc.adhoc.id} through ${pc.adhoc.via}` : pc.stock ? 'stock RustDesk' : 'RigDesk'], ['address', pc.url], ['input', pc.holder === null ? 'no agent' : HOLDER[pc.holder]],
     ...(held === null ? [] : [['agent', held] as const]),
   ]
   const problems = [...(pc.state === 'down' && pc.why !== null ? [pc.why] : []), ...(health?.why == null ? [] : [health.why]),
     ...(health?.failing ?? []).filter(check => check.state === 'fault').map(check => check.words)]
   return (
     <BoardRow label={pc.name} open={open} onOpen={setOpen} mark={<Mark kind="status" shape="square" label={standing} ink={ink} fill={pc.state === 'up' && standing !== 'blocked' ? 'solid' : 'open'} />}
-      name={pc.name} under={[pc.client, pc.stock ? 'stock RustDesk' : `RigDesk${health?.rigdesk == null ? '' : ` ${health.rigdesk}`}`].filter(Boolean).join(' · ')}
+      name={pc.name} under={[pc.client, pc.adhoc != null ? 'ad hoc, by ID and password' : pc.stock ? 'stock RustDesk' : `RigDesk${health?.rigdesk == null ? '' : ` ${health.rigdesk}`}`].filter(Boolean).join(' · ')}
       state={{ word: standing, ink: standing === 'up' ? 'idle' : ink }}
       why={pc.down_since_ms !== null ? agoOf(pc.down_since_ms, now) : verdictWhy ?? (pc.holder !== null ? HOLDER[pc.holder] : pc.state === 'connecting' ? pc.url : undefined)}
       telling={pc.state === 'down' ? 'no answer' : held ?? 'no agent on it'} tellingDim={held === null}
@@ -490,7 +491,7 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
       {health === null ? null : <BoardPart name="health"><Health pc={pc} now={now} /></BoardPart>}
       {pc.shell == null ? null : <BoardPart name="agent shell"><Shell pc={pc} shell={pc.shell} now={now} forFleet={forFleet} /></BoardPart>}
       <BoardPart name="screen"><Screenshot pc={pc} now={now} /></BoardPart>
-      {pc.stock ? <Assign pc={pc} forFleet={forFleet} /> : null}
+      {pc.stock && pc.adhoc == null ? <Assign pc={pc} forFleet={forFleet} /> : null}
       {pc.stock || pc.mcp === undefined ? null : <McpSwitch pc={pc} mcp={pc.mcp} />}
       {pc.stock ? <StockButtons pc={pc} minted={setLink} /> : <Quiet>shared from the RigDesk viewer</Quiet>}
     </BoardRow>
