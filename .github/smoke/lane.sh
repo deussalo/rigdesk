@@ -49,6 +49,12 @@ ok "health says linux, lane, open"
 out=$(shell "{$AGENT,\"command\":\"id -u; echo \$HOME; echo \$DISPLAY.\",\"as\":\"system\"}")
 echo "$out" | jq -e '.ok == true and (.text | fromjson | .exit_code == 0 and (.output | rtrimstr("\n")) == "0\n/root\n.")' > /dev/null || fail "as root: $out"
 ok "as root: uid 0, home /root, no DISPLAY"
+# systemd expands ${NAME} and turns $$ into $ in a unit's command line: the command must reach the shell as written.
+out=$(shell "{$AGENT,\"command\":\"X=ab; echo \\\"\${X}c \$(( \$\$ > 1 )) %h\\\"\",\"as\":\"system\"}")
+echo "$out" | jq -e '.ok == true and (.text | fromjson | .output | rtrimstr("\n")) == "abc 1 %h"' > /dev/null || fail "a command with \${X} and \$\$ was changed on its way: $out"
+out=$(shell "{$AGENT,\"command\":\"X=ab; echo \\\"\${X}c\\\"\",\"as\":\"user\"}")
+echo "$out" | jq -e '.ok == true and (.text | fromjson | .output | rtrimstr("\n")) == "abc"' > /dev/null || fail "a user's command with \${X} was changed on its way: $out"
+ok "commands reach the shell as written: \${X}, \$\$ and % untouched"
 out=$(shell "{$AGENT,\"command\":\"id -un; pwd\",\"as\":\"user\"}")
 echo "$out" | jq -e '.ok == true and (.text | test("lanetest\\\\n/home/lanetest"))' > /dev/null || fail "as the user: $out"
 ok "as the user: lanetest in its home"
