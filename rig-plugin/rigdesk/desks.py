@@ -330,6 +330,7 @@ class AskedConnect:
     target: str
     password: str
     agent: str
+    route: tuple[str, dict[str, str]]
     expiry: asyncio.Task[None] | None = None
 
 
@@ -1658,9 +1659,10 @@ class Desks:
             await self._adhoc_closed(name, None)
             raise
 
-    def connect_asked(self, ask: str, given_id: str, password: str, agent: str, seat: SeatId) -> None:
-        """Holds a desk/connect's password, in memory only, while the operator decides; it lapses unanswered after CONNECT_ASK_S."""
-        asked = self._asked[ask] = AskedConnect(given_id, password, agent)
+    def connect_asked(self, ask: str, given_id: str, password: str, agent: str, seat: SeatId, route: tuple[str, dict[str, str]]) -> None:
+        """Holds a desk/connect's password, in memory only, while the operator decides; it lapses unanswered after CONNECT_ASK_S, and the
+        operator's request, whose Accept goes to route, is withdrawn."""
+        asked = self._asked[ask] = AskedConnect(given_id, password, agent, route)
         asked.expiry = TASKS.spawn(f"rigdesk-connect-ask-{ask}", self._connect_lapsed(ask, seat))
 
     def connect_dropped(self, ask: str) -> None:
@@ -1681,10 +1683,10 @@ class Desks:
     async def _connect_lapsed(self, ask: str, seat: SeatId) -> None:
         await asyncio.sleep(CONNECT_ASK_S)
         asked = self._asked.pop(ask, None)
-        if asked is None or await self.host.confirming(seat, ask) is None:
+        if asked is None or not await self.host.route_ended(seat, *asked.route):
             return
-        words = (f"RigDesk: your desk/connect to {asked.target} lapsed: the operator did not approve it within {CONNECT_ASK_S // 60} minutes, so nothing was dialed "
-                 "and its password is gone. Accepting the request later does nothing; desk/connect again if you still need it.")
+        words = (f"RigDesk: your desk/connect to {asked.target} lapsed: the operator did not approve it within {CONNECT_ASK_S // 60} minutes, so nothing was dialed, "
+                 "its password is gone and the operator's request is withdrawn. desk/connect again if you still need it.")
         lapsed = Held(f"id-{asked.target}", asked.agent, seat.graph, seat.node, "", f"lapsed-{ask}", now_ms(), "adhoc")
         await self._tell(lapsed, words, f"lapsed:{ask}", "queue")
 

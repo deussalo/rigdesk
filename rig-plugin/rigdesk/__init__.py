@@ -188,10 +188,10 @@ async def _ask_connect(desks: Desks, call: Call, given: ConnectInput, outside: C
     reason = (f"{title} ({agent}, in {graph}) asks to connect to RustDesk ID {outside.target} through {outside.where}: a PC that is none of our RigDesk PCs"
               f"{not_ours}.\n\n{given.why.strip()}\n\nAccept dials it now with the password the agent was given, for one session: until the agent leaves, the PC "
               f"ends it, or {adhoc.IDLE_MS // 60_000} idle minutes pass; what the PC shows then reaches the agent. Deny dials nothing.")[:2000]
-    desks.connect_asked(asked, given.id, given.password, agent, seat)
+    then = {"agent": agent, "graph": graph, "id": outside.target, "ask": asked}
+    desks.connect_asked(asked, given.id, given.password, agent, seat, (CONNECT_CONFIRMED.name, then))
     try:
-        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                         Then(provision=CONNECT_CONFIRMED.name, given={"agent": agent, "graph": graph, "id": outside.target, "ask": asked}))
+        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id, Then(provision=CONNECT_CONFIRMED.name, given=then))
     except BaseException:
         desks.connect_dropped(asked)
         raise

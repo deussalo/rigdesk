@@ -174,6 +174,13 @@ Known limits against a RigDesk PC:
   and dropped when the address stops answering. The bridge sends the server its token; a client's never passes.
   A phone's native tools are not RigDesk's: Rig Assistant, a module in the same Android app, serves them to the agent
   resident on the phone through Rig's rig-assistant plugin, with its own setup and no screen sharing needed.
+* `desk/connect(id, password, why)` — joins a PC by its RustDesk ID and password. One of our RigDesk PCs that answers
+  under that ID joins at once; any other PC is dialed only once the operator accepts, and its password waits in memory
+  alone. Unanswered for 15 minutes, the request lapses: it is withdrawn and the agent is told. Known limits:
+  * a request open when Rig restarts stays open, as nothing that would withdraw it outlives the restart; its password
+    is gone, so a later Accept refuses and dials nothing;
+  * Accept dials through the ID server RigDesk's settings name at that moment: if `connect_server` changed after the
+    request was filed, that is not the server the request named.
 * `desk/leave` — ends the session.
 
 ## Agent shell and health (RigDesk PCs)
