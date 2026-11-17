@@ -834,7 +834,7 @@ class Desks:
             self._reached(link, down if isinstance(down, str) else None)
             self._linked(link)
             self._resync(link)
-            if link.spec.stock is None:
+            if link.spec.stock is None and link.spec.lane_token_file is None:
                 TASKS.spawn(f"rigdesk-samples-{link.name}", self._catch_up(link, None))
             data: list[str] = []
             async for raw in stream.content:
@@ -852,7 +852,8 @@ class Desks:
 
     async def _lane_held(self, link: PcLink) -> None:
         """A Linux PC's agent shell is root's management lane, apart from the desktop user's agent API: its switch is read from the lane's
-        /health and kept by the lane's switch events; while the lane does not answer, the shell reads as closed and says why."""
+        /health and kept by the lane's switch events, and its health samples are read there; while the lane does not answer, the shell
+        reads as closed and says why."""
         tries = 0
         while True:
             try:
@@ -867,6 +868,7 @@ class Desks:
                                               timeout=aiohttp.ClientTimeout(total=None, sock_read=EVENTS_SILENT_S)) as stream:
                     if stream.status != 200:
                         raise DeskRefused(f"/lane/events answered HTTP {stream.status}")
+                    TASKS.spawn(f"rigdesk-samples-{link.name}", self._catch_up(link, None))
                     async for raw in stream.content:
                         line = raw.decode("utf-8", "replace").rstrip("\r\n")
                         if not line.startswith("data:"):
@@ -877,6 +879,8 @@ class Desks:
                             continue
                         if event.get("type") == "shell_switch":
                             link.shell = {"open": event.get("open") is True, "code": event.get("code"), "words": event.get("words")}
+                        elif event.get("type") == "health":
+                            TASKS.spawn(f"rigdesk-samples-{link.name}", self._catch_up(link, int(event.get("sample") or 0)))
                 why = "its event stream ended"
             except asyncio.CancelledError:
                 raise
@@ -978,15 +982,17 @@ class Desks:
 
     async def _catch_up(self, link: PcLink, told: int | None) -> None:
         """Reads the PC's samples after the newest held: on each reconnect, and on each health event. A sample id at or under the newest
-        held means the PC's ids began again (a reinstall), so its whole day is read and kept by its clock."""
+        held means the PC's ids began again (a reinstall), so its whole day is read and kept by its clock. A Linux PC takes them on its
+        management lane, as root."""
         async with link.sampling:
             newest = self._history.newest(link.name)
             after = 0 if newest is None or (told is not None and told <= newest.id) else newest.id
             try:
-                async with self._client().get(f"{link.spec.url}/samples?after={after}", headers=self._headers(link),
+                url, headers = self._shell_at(link)
+                async with self._client().get(f"{url}/samples?after={after}", headers=headers,
                                               timeout=aiohttp.ClientTimeout(total=SAMPLES_LIMIT_S)) as answer:
                     if answer.status == 404:
-                        link.samples_why = "this PC's RigDesk takes no health samples" + (" (RigDesk takes them on Windows only)" if link.os == "linux" else "")
+                        link.samples_why = "this PC's RigDesk takes no health samples: update RigDesk there"
                         return
                     if answer.status != 200:
                         raise DeskRefused(f"/samples answered HTTP {answer.status}")

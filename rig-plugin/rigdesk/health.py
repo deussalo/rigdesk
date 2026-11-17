@@ -149,7 +149,7 @@ class Thresholds(Shape):
     disk_wear_warn_pct: Annotated[int, Field(ge=0, le=100, description="A physical disk worn this far, in percent, warns.")] = 80
     signature_warn_days: Annotated[int, Field(ge=0, description="Defender signatures older than this, in days, warn.")] = 3
     signature_fault_days: Annotated[int, Field(ge=0, description="Defender signatures older than this, in days, are a fault.")] = 7
-    system_errors_warn: Annotated[int, Field(ge=0, description="More System-log errors than this in the last 24 h warn.")] = 25
+    system_errors_warn: Annotated[int, Field(ge=0, description="More errors than this in the system log (the System event log on Windows, the system journal on Linux) in the last 24 h warn.")] = 25
     stale_after_min: Annotated[int, Field(ge=11, description="A PC up with no sample for this many minutes reads stale; it samples every 10.")] = 25
 
 
@@ -203,7 +203,7 @@ def health(sample: Sample, thresholds: Thresholds, now_ms: int, up: bool) -> Hea
         failing.append(Check("signatures", "warn", f"Defender signatures {age} days old"))
     errors = figures.system_errors_24h
     if errors is not None and errors > thresholds.system_errors_warn:
-        failing.append(Check("system log", "warn", f"{errors} System-log errors in 24 h"))
+        failing.append(Check("system log", "warn", f"{errors} errors in the system log in 24 h"))
     crashed = [service for service in figures.stopped_services if service.exit_code not in (None, 0, 1077)]
     if crashed:
         failing.append(Check("services", "warn", "stopped with an error: " + ", ".join(service.display or service.name for service in crashed)))

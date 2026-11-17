@@ -6,14 +6,16 @@
 //! the token file. Commands run through systemd units, as root or as the user signed in at seat0. `<dir>` holds the switch
 //! (`agent-shell`, root's, `on` or `off`), the journal (`actions.jsonl`) and the jobs (`shell/`); the person's pause is the
 //! file `<dir>/paused`. With `LANE_HOST_USER` set, a command as the user runs as that user (who needs a systemd user
-//! manager: `loginctl enable-linger`) instead of whoever is signed in at seat0. It prints `listening` once it serves.
+//! manager: `loginctl enable-linger`) instead of whoever is signed in at seat0. With `LANE_HOST_HEALTH` naming a health
+//! script, it takes a sample with it every 5 s into `<dir>/health.jsonl` and serves them at `/samples`. It prints
+//! `listening` once it serves.
 
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
     use std::sync::Arc;
 
-    use rigdesk_agent::{manage::Lane, systemd::{self, SystemdRunner}, Api, Events, Journal, Shared};
+    use rigdesk_agent::{health::{Collector, Samples}, manage::Lane, systemd::{self, SystemdRunner}, Api, Events, Journal, Shared};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [socket, token, dir] = args.as_slice() else {
@@ -31,7 +33,19 @@ async fn main() {
     let shared = Arc::new(Shared::new(Events::new(256)));
     let journal = Arc::new(Journal::open(dir.join("actions.jsonl"), 1 << 20));
     let lane = Lane::new(runner, dir.join("shell"), shared.clone(), journal.clone());
-    Api::lane_only(lane, shared, journal, &bearer).serve_unix(std::path::Path::new(socket)).await.expect("the socket");
+    let collector = std::env::var("LANE_HOST_HEALTH").ok().map(|script| {
+        let script: &'static str = Box::leak(std::fs::read_to_string(script).expect("the health script").into_boxed_str());
+        Arc::new(Collector {
+            lane: lane.clone(),
+            shared: shared.clone(),
+            samples: Arc::new(Samples::open(Some(dir.join("health.jsonl")))),
+            script,
+            dir: dir.join("health"),
+            rigdesk: "lane_host".into(),
+            interval: std::time::Duration::from_secs(5),
+        })
+    });
+    Api::lane_only(lane, collector, shared, journal, &bearer).serve_unix(std::path::Path::new(socket)).await.expect("the socket");
     println!("listening");
     std::future::pending::<()>().await;
 }
