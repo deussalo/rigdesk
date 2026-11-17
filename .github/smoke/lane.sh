@@ -44,6 +44,13 @@ lane() { sudo curl -sS --unix-socket "$SOCK" -H "Authorization: Bearer $TOKEN" "
 shell() { lane -H 'content-type: application/json' -d "$1" http://lane/shell; }
 AGENT='"agent":{"id":"agent_smoke","title":"Smoke","graph":"ci"}'
 
+# One failed unit of each kind: a transient one, which the sample leaves out, and an installed service, which it names.
+sudo systemd-run --quiet --unit=rdsmoke-transient.service /bin/false
+printf '[Service]\nType=oneshot\nExecStart=/bin/sh -c "exit 3"\n' | sudo tee /etc/systemd/system/rdsmoke-installed.service > /dev/null
+sudo systemctl daemon-reload
+sudo systemctl start rdsmoke-installed.service 2> /dev/null && fail "rdsmoke-installed.service did not fail"
+for _ in $(seq 50); do systemctl is-failed --quiet rdsmoke-transient.service && break; sleep 0.1; done
+systemctl is-failed --quiet rdsmoke-transient.service || fail "rdsmoke-transient.service did not fail"
 start_lane health
 lane http://lane/health | jq -e '.os == "linux" and .lane == true and .shell.open == true' > /dev/null || fail "health: $(lane http://lane/health)"
 
@@ -53,6 +60,13 @@ sample=$(lane 'http://lane/samples?after=0' | jq -c '.samples[0]')
 echo "$sample" | jq -e --arg k "$(uname -r)" '.taken == "ok" and .figures.schema == 1 and .figures.os.build == $k and .figures.ram.total_mb > 0
   and (.figures.volumes | map(select(.name == "/")) | length) == 1 and (.figures.updates.pending | type) == "number"' > /dev/null || fail "health sample: $sample"
 ok "a health sample: $(echo "$sample" | jq -c '{took_ms, errors: .figures.errors, cpu_ms: .figures.cpu_ms}')"
+echo "$sample" | jq -e '(.figures.stopped_services | map(.name)) as $n | ($n | index("rdsmoke-installed.service")) != null
+  and ($n | index("rdsmoke-transient.service")) == null and ($n | map(select(endswith(".scope"))) | length) == 0' > /dev/null \
+  || fail "stopped services: $(echo "$sample" | jq -c .figures.stopped_services)"
+ok "a failed installed service is named, a failed transient unit is not"
+sudo systemctl reset-failed rdsmoke-transient.service rdsmoke-installed.service
+sudo rm -f /etc/systemd/system/rdsmoke-installed.service
+sudo systemctl daemon-reload
 stop_lane
 for _ in $(seq 50); do [ -z "$(systemctl list-units --no-legend 'rigdesk-run-*')" ] && break; sleep 0.2; done
 start_lane
