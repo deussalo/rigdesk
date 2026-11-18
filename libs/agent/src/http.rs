@@ -16,7 +16,8 @@
 //!        sent again with a key already sent to the same owning agent is answered with the first one's event, not told twice
 //!   GET  /frame?display=N  - a PNG of the PC's screen now, for the bearer's holder: the human to clip and draw on, or the operator's
 //!        screenshot on demand; journaled
-//!   GET  /health           - liveness, this process's boot id, the current standing, and whether the agent shell is open
+//!   GET  /health           - liveness, this process's boot id, the current standing, whether the agent shell is open, and whether an invite is
+//!        open
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 //!   GET  /servers          - the MCP servers found on the PC while an agent is connected, and whether MCP is on
 //!   POST /servers/<name>/mcp - MCP to that server, forwarded to its loopback port (on a bridge, to the address it was
@@ -291,7 +292,8 @@ impl Api {
                                                                   "shell": self.lane.get().map(|lane| lane.switch())})),
             ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "os": std::env::consts::OS, "host": self.host.get(), "standing": self.shared.standing(), "down": self.shared.down(),
                                                                   "shell": self.lane.get().map(|lane| lane.switch()),
-                                                                  "join": self.operator.get().map(|switch| crate::operator::said(switch.as_ref()))})),
+                                                                  "join": self.operator.get().map(|switch| crate::operator::said(switch.as_ref())),
+                                                                  "invite_open": self.shared.invite_until().is_some()})),
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
             ("POST", "/leave") => {
@@ -828,6 +830,15 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
+    async fn health(port: u16) -> Value {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nauthorization: Bearer b\r\nconnection: close\r\n\r\n").await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        let (_, json) = answer.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(json).unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_block_from_the_viewer_is_readable_in_the_log() {
         let dir = std::env::temp_dir().join(format!("rigdesk-http-{}", rand::random::<u32>()));
@@ -974,12 +985,15 @@ mod tests {
             stream.read_to_string(&mut answer).await.unwrap();
             assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
         }
+        assert_eq!(health(port).await["invite_open"], json!(false));
         let (invite, _) = shared.invite(None).unwrap();
+        assert_eq!(health(port).await["invite_open"], json!(true), "Rig asks its operator before claiming an invite on a PC an agent may run commands on");
         let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
         let claim = json!({"grant": invite.grant, "secret": invite.secret, "agent": agent});
         assert!(post(port, "/claim", "", &claim).await["error"].as_str().unwrap().contains("paused"));
         *switch.0.lock().unwrap() = Ok(());
         assert!(post(port, "/claim", "", &claim).await["session"].is_string());
+        assert_eq!(health(port).await["invite_open"], json!(false));
 
         let claims: Vec<(String, Value)> = journal.tail(20).into_iter().filter(|e| e.what == "claim").map(|e| (e.outcome, e.detail)).collect();
         assert_eq!(claims[0], ("refused: bad bearer token".to_string(), json!({"also_refused_since_last": 0})));
