@@ -301,6 +301,8 @@ impl Link {
     }
 
     async fn session(&self) -> ResultType<()> {
+        // A hang-up that arrived as the last session ended on its own is not for this one.
+        self.hang.store(false, Ordering::SeqCst);
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let adopted = self.adopted.lock().unwrap().take();
         self.carried.store(adopted.is_some(), Ordering::SeqCst);
@@ -681,6 +683,22 @@ mod tests {
         assert!(!link.wanted(), "nothing dials a PC with no password");
         let Err(refused) = link.ensure(Duration::from_secs(5)) else { panic!("a session with no password and no Allow") };
         assert!(refused.contains("only the person at the PC lets an agent in"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_hang_up_left_by_a_session_that_ended_alone_does_not_end_the_next_one() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+        let _peer = accepted.unwrap();
+        let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
+        let link = Link::new(Route::direct("100.64.0.9"), String::new(), "Rig agent".into(), shared);
+        link.carried.store(true, Ordering::SeqCst);
+        link.hang_up();
+        link.carried.store(false, Ordering::SeqCst);
+
+        link.adopt(crate::knock::Allowed { stream: FramedStream::from(client.unwrap(), addr), peer_info: Message::new() });
+        assert!(tokio::time::timeout(Duration::from_millis(300), link.session()).await.is_err(), "the new session ended at once");
     }
 
     #[test]
