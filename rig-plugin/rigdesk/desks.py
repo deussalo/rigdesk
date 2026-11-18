@@ -458,6 +458,7 @@ class Desks:
         self._asked: dict[str, AskedConnect] = {}
         self._adhoc_lost: list[Held] = []
         self.prompts: dict[str, prompts.Prompt] = {}
+        self.person_answered: set[str] = set()
         self._read_state()
 
     # --- state kept across restarts ---
@@ -1479,6 +1480,9 @@ class Desks:
         """Rig's bearer asks a RigDesk PC for its session for this agent, with no share link; the PC's own switch admits it."""
         link = self._link(pc)
         body = {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ask}
+        if ask in self.person_answered:
+            self.person_answered.discard(ask)
+            body["answered_by"] = "person"
         async with self._client().post(f"{link.spec.url}/join", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             said = _object(await answer.json(content_type=None)) if answer.content_type == "application/json" else {}
             if answer.status == 404 and said.get("code") != "no_join":

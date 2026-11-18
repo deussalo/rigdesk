@@ -171,8 +171,14 @@ async def _settled(desks: Desks, prompt: Prompt, said: str) -> None:
         _LOG.warning("rigdesk_prompt_held", f"RigDesk {prompt.pc}: the answer to {prompt.ask} on the PC was ignored, as an agent holds the PC", pc=prompt.pc)
         return
     choice = "accept" if said == "allow" else "deny"
-    done = await desks.host.confirm_answered(prompt.seat, prompt.ask, choice, f"rigdesk:{prompt.pc}")  # type: ignore[attr-defined]
+    desks.person_answered.add(prompt.ask)
+    try:
+        done = await desks.host.confirm_answered(prompt.seat, prompt.ask, choice, f"rigdesk:{prompt.pc}")  # type: ignore[attr-defined]
+    except BaseException:
+        desks.person_answered.discard(prompt.ask)
+        raise
     if done != "answered":
+        desks.person_answered.discard(prompt.ask)
         return
     words = (f"RigDesk: the person at {prompt.pc} {'allowed' if said == 'allow' else 'refused'} your desk/request on the PC itself, "
              "so they answered it rather than the operator.")

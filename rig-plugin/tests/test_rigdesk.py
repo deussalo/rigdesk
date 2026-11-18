@@ -604,6 +604,11 @@ async def _offering_pc(desks: Desks, posted: list[tuple[str, dict]]):
     app = web.Application()
     app.router.add_post("/offer", took)
     app.router.add_post("/offer/end", took)
+
+    async def joined(request: web.Request) -> web.Response:
+        posted.append((request.path, await request.json()))
+        return web.json_response({"session": "s", "standing": {}})
+    app.router.add_post("/join", joined)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -660,6 +665,42 @@ def test_allow_on_a_rigdesk_pc_answers_the_operators_ask_and_an_answer_for_anoth
             assert asks.answered == [(seat, "desk_1", "accept", "rigdesk:front")]
             assert told == [("a1", told[0][1], "prompt:desk_1")] and "person at front allowed" in told[0][1], told
             assert desks.prompts == {} and [path for path, _ in posted] == ["/offer"], posted
+
+    asyncio.run(run())
+
+
+def test_the_pcs_journal_is_told_a_join_was_the_persons_and_not_the_operators() -> None:
+    from rigdesk import prompts
+    seat, posted = SeatId(GraphName("g"), NodeId("n")), []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks = _Asks("desk_1")
+
+            async def then(_seat: SeatId, ask: str, _choice: str, _by: str) -> str:
+                await desks.join_approved("front", "a1", "g", "n", "Builder", ask)
+                return "answered"
+            desks = Desks(SimpleNamespace(state_dir=Path(state), confirming=asks.confirming, confirm_answered=then))  # type: ignore[arg-type]
+
+            async def tell(*_args: object, **_kw: object) -> bool:
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
+            runner = await _offering_pc(desks, posted)
+            try:
+                link = desks._pcs["front"]
+                prompts.start(desks, "front", "desk_1", seat, "a1", "g", "Builder")
+                await _until(lambda: posted)
+                await desks._event(link, {"type": "offer", "ask": "desk_1", "nonce": posted[0][1]["nonce"], "answer": "allow"})
+                await _until(lambda: "front" in desks._sessions)
+                del desks._sessions["front"]
+                await desks.join_approved("front", "a1", "g", "n", "Builder", "desk_2")
+            finally:
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            joins = [body for path, body in posted if path == "/join"]
+            assert [join.get("answered_by") for join in joins] == ["person", None], joins
+            assert desks.person_answered == set()
 
     asyncio.run(run())
 
