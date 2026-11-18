@@ -1510,12 +1510,15 @@ fn answer_screenshot_from_last_frame(c: &mut CapturerInfo, key: (VideoSource, us
     if !SCREENSHOTS.lock().unwrap().contains_key(&key) {
         return;
     }
-    let Some(scrap::Frame::PixelBuffer(f)) = c.last_frame() else {
+    if scrap::is_start() != Some(true) {
         if scrap::is_capture_allowed() == Some(false) {
             if let Some(screenshot) = SCREENSHOTS.lock().unwrap().remove(&key) {
                 std::thread::spawn(move || handle_screenshot(screenshot, NO_CAPTURE.to_owned(), 0, 0, vec![]));
             }
         }
+        return;
+    }
+    let Some(scrap::Frame::PixelBuffer(f)) = c.last_frame() else {
         return;
     };
     let Some(screenshot) = SCREENSHOTS.lock().unwrap().remove(&key) else {

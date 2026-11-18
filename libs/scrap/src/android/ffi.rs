@@ -111,6 +111,10 @@ pub fn get_last_video_raw(dst: &mut Vec<u8>) -> Option<()> {
     VIDEO_RAW.lock().ok()?.last(dst)
 }
 
+pub fn is_video_raw_enabled() -> bool {
+    VIDEO_RAW.lock().map(|v| v.enable).unwrap_or(false)
+}
+
 pub fn get_audio_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
     AUDIO_RAW.lock().ok()?.take(dst, last)
 }

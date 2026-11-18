@@ -43,6 +43,10 @@ impl crate::TraitCapturer for Capturer {
                 self.height(),
             )))
         } else {
+            // A restarted capture may lose its first frame, so what was kept must not outlive the stop.
+            if !is_video_raw_enabled() {
+                self.rgba.clear();
+            }
             return Err(io::ErrorKind::WouldBlock.into());
         }
     }
