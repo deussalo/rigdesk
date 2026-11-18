@@ -75,7 +75,7 @@ the owning agent and its actions, and sends a note (text plus an annotated still
 Every click, wheel turn and key from a GUI passes the bridge: while the agent holds input, the first one takes it
 back before it reaches the PC, and the pointer merely crossing the picture is kept from the PC, so watching never
 disturbs the agent. **Stop** (the panel's button, or Ctrl+Alt+Esc in the GUI) takes input back at once and interrupts
-the owning agent's current Rig turn, as the operator's interrupt does; the agent is then told why. While a GUI watches,
+the owning agent's current Rig turn, as the operator's interrupt does; its next desk call's refusal says why. While a GUI watches,
 the bridge asks the PC for a watchable picture (balanced quality, 30 fps), and for a lean one (5 fps) otherwise.
 
 ### By RustDesk ID, through our own ID server (no Tailscale on the PC)
@@ -139,8 +139,9 @@ Known limits against a RigDesk PC:
   it. A PC removed from settings loses its grants. A session held through the grant ends after
   5 minutes without a desk call, so other assigned agents can take the PC.
 * **A session that ends** without the agent's own `desk/leave` (RigDesk restarts, the human ends the share or shares with
-  another agent, an idle leave, the PC leaves Rig's settings) is told to the agent, queued for its next turn rather
-  than waking it; Rig's log has it too. While the PC is down, its MCP servers close for the holder and reopen when it is back.
+  another agent, an idle leave, the PC leaves Rig's settings, the operator unassigns it) sends the agent nothing: its next
+  desk call is refused with why, until it joins again; Rig's log has it too. The human taking input, Stop and Block
+  likewise send nothing: the PC's refusal of the next call says so. While the PC is down, its MCP servers close for the holder and reopen when it is back.
 * `desk/pcs` — every PC in Rig, with its client, whether it is up, whether it is assigned to the caller, and who holds
   it now.
 * `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins
@@ -154,7 +155,7 @@ Known limits against a RigDesk PC:
   the Accept above. Always allow also gives the caller a standing grant to that PC, so its later `desk/request` or
   `desk/join(pc)` joins with no ask, through `POST /join` with the ask `standing grant` in the PC's journal. The PC's
   switch and another holder still refuse it. The RigDesk page lists the grant under the PC, and unassigning it there
-  ends a session held through it; the agent is told, and its next `desk/request` asks again.
+  ends a session held through it; the agent's next desk call says so, and its next `desk/request` asks again.
   **The PC asks too.** While a join request waits for the operator, the PC itself shows "<agent> (Rig agent)" in its own
   accept prompt, where Rig is new enough to have plugins answer their own asks (`PluginHost.confirm_answered`). Its
   Accept answers the request as the operator's Accept (Join once) would, and its Dismiss as Deny; the agent is told the
@@ -165,8 +166,8 @@ Known limits against a RigDesk PC:
   them, as a notification with Allow) logs in to it with no password, so the PC shows RustDesk's own prompt, and on
   Allow that very connection carries the agent's session: no password is used, and a stock PC needs none kept in Rig
   (leave out `password_file`, and only the person's Allow lets an agent in). An allowed connection no agent claims within
-  30 s, as when the operator answered first, is hung up. With no password kept, the agent is told when the allowed
-  connection ends (the person disconnects, or ten idle minutes), and its next `desk/request` asks again; with one kept,
+  30 s, as when the operator answered first, is hung up. With no password kept, the agent's next desk call says the allowed
+  connection ended (the person disconnects, or ten idle minutes), and its next `desk/request` asks again; with one kept,
   the agent keeps its hold and its next action dials in with the password, as unattended access. How the answer is bound: it counts only when it comes on that PC's own `/events` stream under Rig's bearer,
   names that request and carries the 128-bit nonce Rig made for it, which goes to the PC alone and never to the agent;
   and only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
@@ -289,8 +290,8 @@ work), and while blocked it refuses every call.
   each standing grant is listed by the agent's title with its unassign.
 * A stock PC's row names the file its saved password is kept in, never the password, and a field replaces it
   (`POST /x/rigdesk/password {pc, password}`): the new one goes into that same file (0600), settings are unchanged, and
-  its rigdesk-bridge restarts at once to log in with it. An agent holding the PC loses its session with the restart and is
-  told, queued for its next turn. Use it when the row is down with "Wrong Password" because the
+  its rigdesk-bridge restarts at once to log in with it. An agent holding the PC loses its session with the restart, and its
+  next desk call says so. Use it when the row is down with "Wrong Password" because the
   PC's permanent RustDesk password changed. A RigDesk PC keeps no password: Rig reaches it with its token.
 * A row among each owning agent's holds, beside its shell and sub-agents: its PC, the PC's state or who holds input, and how long it has been joined; the row opens RigDesk.
 * An up PC's row shows its health verdict, free space per volume, RAM, CPU, Windows build and uptime; opened, the newest

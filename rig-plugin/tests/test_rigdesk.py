@@ -22,14 +22,10 @@ def test_a_link_names_its_pc_by_name_or_tailnet_host() -> None:
     assert "not a RigDesk share link" in str(pc_of_link("https://example.com", PCS))
 
 
-def test_the_agent_hears_of_stop_and_block_but_not_of_the_humans_passing_input_or_its_own_join_or_leave() -> None:
-    assert words_of("deus", {"type": "holder", "holder": "human", "by": "viewer input", "at_ms": 0}) is None
-    assert words_of("deus", {"type": "holder", "holder": "agent", "by": "quiet", "at_ms": 0}) is None
-    assert "resumed you" in str(words_of("deus", {"type": "holder", "holder": "agent", "by": "unblock", "at_ms": 0}))
-    assert "blocked you" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "block", "at_ms": 0}))
-    assert words_of("deus", {"type": "holder", "holder": "agent", "by": "share", "at_ms": 0}) is None
-    assert words_of("deus", {"type": "holder", "holder": "agent", "by": "operator", "at_ms": 0}) is None
-    assert "pressed Stop" in str(words_of("deus", {"type": "holder", "holder": "blocked", "by": "stop", "at_ms": 0}))
+def test_the_agent_hears_of_no_holder_change_and_not_of_its_own_leave() -> None:
+    for holder, by in (("human", "viewer input"), ("agent", "quiet"), ("agent", "unblock"), ("blocked", "block"), ("agent", "share"), ("agent", "operator"),
+                       ("blocked", "stop"), ("agent", "hand")):
+        assert words_of("deus", {"type": "holder", "holder": holder, "by": by, "at_ms": 0}) is None, by
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
     assert "session there ended" in str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the human ended the share", "at_ms": 0}))
 
@@ -106,7 +102,7 @@ def test_a_stock_pc_is_served_on_loopback() -> None:
         raise AssertionError("a stock PC with a tailnet url was accepted")
 
 
-def test_stop_interrupts_the_owning_agents_turn_but_a_replayed_stop_only_tells_it() -> None:
+def test_stop_interrupts_the_owning_agents_turn_and_tells_it_nothing_and_a_replayed_stop_does_neither() -> None:
     seat, done = SeatId(GraphName("g"), NodeId("n")), []
 
     async def inject(*args: object) -> object:
@@ -130,7 +126,59 @@ def test_stop_interrupts_the_owning_agents_turn_but_a_replayed_stop_only_tells_i
             await desks._event(link, {"type": "holder", "holder": "blocked", "by": "stop", "id": 2, "at_ms": now_ms() - 3_600_000})
 
     asyncio.run(run())
-    assert done == [("interrupt", "interrupt"), ("told", True), ("told", True)]
+    assert done == [("interrupt", "interrupt")]
+
+
+async def _next_call(desks: Desks, agent: str = "a1", graph: str = "g") -> str:
+    """The words of the agent's next desk/click, which it holds no session to make."""
+    from rigdesk import PassInput, _passed
+    call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent=agent)), graph=graph, node="n", refused=lambda _code, words, *_: words)
+    return await _passed(desks, "click", {}).run(call, PassInput())  # type: ignore[arg-type]
+
+
+def test_a_session_that_ends_by_itself_sends_the_agent_nothing_and_its_next_desk_call_says_why() -> None:
+    admitted: list[object] = []
+
+    async def admit(_seat: SeatId, said: object) -> object:
+        admitted.append(said)
+        return object()
+
+    async def seat_of(*_args: object) -> SeatId:
+        return SeatId(GraphName("g"), NodeId("n"))
+
+    async def leave(held: Held) -> bool:
+        desks._sessions.pop(held.pc)
+        return True
+
+    async def ended_by(cause: str) -> None:
+        held = desks._sessions["deus"] = Held("deus", "a1", "g", "n", "A", "s", now_ms() - 6 * 60_000, "assigned")
+        if cause == "person":
+            await desks._event(PcLink("deus", PCS["deus"]), {"type": "revoked", "agent_id": "a1", "reason": "the person at the PC ended the session", "at_ms": now_ms()})
+        elif cause == "restart":
+            desks._boots["deus"] = "boot-1"
+            await desks._rebooted("deus", "boot-2")
+        elif cause == "idle":
+            await desks._idle_leaves()
+        elif cause == "unassigned":
+            await desks._ungranted(held)
+
+    async def run() -> None:
+        nonlocal desks
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state), admit=admit, seat_of=seat_of, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            desks.leave = leave  # type: ignore[method-assign]
+            assert (await _next_call(desks)).startswith("you hold no RigDesk session")
+            for cause, why in (("person", "the person at the PC ended the session"), ("restart", "RigDesk restarted there"),
+                               ("idle", "you left deus after 5 minutes without a desk call"), ("unassigned", "took away your standing access to deus")):
+                await ended_by(cause)
+                said = await _next_call(desks)
+                assert "deus" not in desks._sessions and why in said and "You hold no RigDesk session" in said, (cause, said)
+                assert await _next_call(desks) == said, "it says why until the agent joins again"
+            assert (await _next_call(desks, "a2")).startswith("you hold no RigDesk session"), "another agent is not told of a1's session"
+
+    desks: Desks
+    asyncio.run(run())
+    assert admitted == []
 
 
 class _Docs:
@@ -249,7 +297,7 @@ def test_taking_the_grant_away_ends_the_assigned_session_at_once() -> None:
     assert ended == ["deus"]
 
 
-def test_always_allow_on_a_rigdesk_pc_grants_and_joins_through_join_and_unassign_ends_that_session_and_tells_the_agent() -> None:
+def test_always_allow_on_a_rigdesk_pc_grants_and_joins_through_join_and_unassign_ends_that_session_and_the_next_call_says_so() -> None:
     from rigdesk import _always_allowed
     from rigdesk.desks import DeskRefused
     joined: list[tuple[str, str, str]] = []
@@ -283,6 +331,7 @@ def test_always_allow_on_a_rigdesk_pc_grants_and_joins_through_join_and_unassign
             assert joined == [("front", "desk_1", "assigned"), ("front", "standing grant", "assigned")]
             assert await desks.unassign("front", "agent:a1")
             assert "front" not in desks._sessions and desks.assigned_pcs("a1", "g") == ()
+            assert "took away your standing access to front" in await _next_call(desks)
             desks._pcs["busy"] = PcLink("busy", DeskPc(url="https://busy.tail1234.ts.net", token_file="/dev/null"))
             try:
                 await _always_allowed(desks, {"pc": "busy", "agent": "a1", "graph": "g", "kind": "join", "ask": "desk_2"}, "n", "A")
@@ -293,7 +342,7 @@ def test_always_allow_on_a_rigdesk_pc_grants_and_joins_through_join_and_unassign
             assert desks.granted("busy") == (), "a grant whose join failed is taken back"
 
     asyncio.run(run())
-    assert len(told) == 1 and "took away your standing access to front" in told[0], told
+    assert told == [], told
 
 
 def test_a_pc_gone_from_settings_or_no_longer_stock_loses_its_grants() -> None:
@@ -333,10 +382,11 @@ def test_an_assigned_session_idle_five_minutes_leaves_the_pc_but_a_link_session_
             desks.leave = leave  # type: ignore[method-assign]
             desks._tell = tell  # type: ignore[method-assign]
             await desks._idle_leaves()
+            assert "RigDesk deus: you left deus after 5 minutes" in await _next_call(desks)
 
     asyncio.run(run())
     assert left == ["deus"]
-    assert len(told) == 1 and told[0].startswith("queue: RigDesk deus: you left deus after 5 minutes"), told
+    assert told == [], told
 
 
 FIGURES = Path(__file__).resolve().parents[2] / "libs/agent/tests/fixtures/figures-windows.json"
@@ -897,7 +947,8 @@ def test_the_operator_replaces_a_stock_pcs_saved_password_and_its_bridge_logs_in
                 await _until(lambda: started.read_text() == "old-password\nnew-password\n")
                 await asyncio.sleep(0.2)
                 assert started.read_text() == "old-password\nnew-password\n", "two calls at once started two bridges"
-                assert "moto-g57" not in desks._sessions and len(told) == 1 and "session there ended" in told[0], told
+                assert "moto-g57" not in desks._sessions and told == [], told
+                assert "replaced its saved password" in await _next_call(desks, "agent_a")
                 assert "moto-g57" not in desks._unsent, "a message for the ended session would go to the PC's next agent"
                 assert password.read_text() == "new-password" and password.stat().st_mode & 0o777 == 0o600
                 rows = {row["name"]: row for row in desks.pcs()}
