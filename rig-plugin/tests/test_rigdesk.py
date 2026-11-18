@@ -580,6 +580,157 @@ def test_a_pc_server_that_fails_a_call_shows_as_not_answering_with_its_own_error
     asyncio.run(run())
 
 
+
+class _Asks:
+    """Rig's side of the operator's asks: the asks still open, and each answer a plugin gave for the person at a PC."""
+    def __init__(self, *open_asks: str) -> None:
+        self.open, self.answered = set(open_asks), []
+
+    async def confirming(self, _seat: SeatId, ask: str) -> str | None:
+        return f"attention:{ask}" if ask in self.open else None
+
+    async def confirm_answered(self, seat: SeatId, ask: str, choice: str, by: str) -> str:
+        self.answered.append((seat, ask, choice, by))
+        return "answered" if self.open and ask in self.open and not self.open.discard(ask) else "settled"
+
+
+async def _offering_pc(desks: Desks, posted: list[tuple[str, dict]]):
+    """A RigDesk PC's agent API taking /offer and /offer/end, on loopback."""
+    from aiohttp import ClientSession, web
+
+    async def took(request: web.Request) -> web.Response:
+        posted.append((request.path, await request.json()))
+        return web.json_response({"shown": True} if request.path == "/offer" else {"ended": True})
+    app = web.Application()
+    app.router.add_post("/offer", took)
+    app.router.add_post("/offer/end", took)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+    desks._http = ClientSession()
+    token = desks._dir / "token"
+    token.write_text("rig-bearer")
+    desks._pcs["front"] = PcLink("front", DeskPc(url=f"http://127.0.0.1:{port}", token_file=str(token)))
+    return runner
+
+
+async def _until(check, limit_s: float = 5.0) -> None:
+    for _ in range(int(limit_s / 0.01)):
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("never happened")
+
+
+def test_allow_on_a_rigdesk_pc_answers_the_operators_ask_and_an_answer_for_another_ask_nonce_or_pc_settles_nothing() -> None:
+    from rigdesk import prompts
+    seat, posted, told = SeatId(GraphName("g"), NodeId("n")), [], []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks = _Asks("desk_1")
+            desks = Desks(SimpleNamespace(state_dir=Path(state), confirming=asks.confirming, confirm_answered=asks.confirm_answered))  # type: ignore[arg-type]
+
+            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
+                told.append((held.agent, words, key))
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
+            runner = await _offering_pc(desks, posted)
+            try:
+                link = desks._pcs["front"]
+                prompts.start(desks, "front", "desk_1", seat, "a1", "g", "Builder")
+                await _until(lambda: posted)
+                path, body = posted[0]
+                assert path == "/offer" and body["ask"] == "desk_1" and body["agent"] == {"id": "a1", "title": "Builder", "graph": "g"}
+                nonce = body["nonce"]
+                assert len(nonce) >= 16
+                await desks._event(link, {"type": "offer", "ask": "desk_1", "nonce": "f" * 32, "answer": "allow"})
+                await desks._event(link, {"type": "offer", "ask": "desk_2", "nonce": nonce, "answer": "allow"})
+                await desks._event(PcLink("deus", PCS["deus"]), {"type": "offer", "ask": "desk_1", "nonce": nonce, "answer": "allow"})
+                await asyncio.sleep(0.05)
+                assert asks.answered == [], "an answer not bound to the shown prompt was taken"
+                await desks._event(link, {"type": "offer", "ask": "desk_1", "nonce": nonce, "answer": "allow"})
+                await _until(lambda: told)
+            finally:
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            assert asks.answered == [(seat, "desk_1", "accept", "rigdesk:front")]
+            assert told == [("a1", told[0][1], "prompt:desk_1")] and "person at front allowed" in told[0][1], told
+            assert desks.prompts == {} and [path for path, _ in posted] == ["/offer"], posted
+
+    asyncio.run(run())
+
+
+def test_rigs_answer_first_takes_the_prompt_off_a_rigdesk_pc_and_its_late_allow_settles_nothing() -> None:
+    from rigdesk import prompts
+    seat, posted = SeatId(GraphName("g"), NodeId("n")), []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks = _Asks("desk_1", "desk_2")
+            desks = Desks(SimpleNamespace(state_dir=Path(state), confirming=asks.confirming, confirm_answered=asks.confirm_answered))  # type: ignore[arg-type]
+            runner = await _offering_pc(desks, posted)
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                link = desks._pcs["front"]
+                prompts.start(desks, "front", "desk_1", seat, "a1", "g", "Builder")
+                prompts.start(desks, "front", "desk_2", seat, "a2", "g", "Tester")
+                await _until(lambda: len(posted) == 2)
+                nonces = {body["ask"]: body["nonce"] for _, body in posted}
+                prompts.end(desks, "desk_1")
+                asks.open.discard("desk_2")
+                await _until(lambda: len(posted) == 4)
+                for ask, nonce in nonces.items():
+                    await desks._event(link, {"type": "offer", "ask": ask, "nonce": nonce, "answer": "allow"})
+                await asyncio.sleep(0.05)
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            assert sorted(body["ask"] for path, body in posted if path == "/offer/end") == ["desk_1", "desk_2"], posted
+            assert asks.answered == [] and desks.prompts == {}
+
+    asyncio.run(run())
+
+
+def test_a_stock_pcs_own_accept_answers_the_ask_and_a_knock_rig_answered_first_is_hung_up() -> None:
+    from rigdesk import prompts
+    from rigdesk.desks import StockRemote
+    seat = SeatId(GraphName("g"), NodeId("n"))
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks = _Asks("desk_1", "desk_2")
+            desks = Desks(SimpleNamespace(state_dir=Path(state), confirming=asks.confirming, confirm_answered=asks.confirm_answered))  # type: ignore[arg-type]
+
+            async def tell(*_args: object, **_kw: object) -> bool:
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
+            bridge, hung = Path(state) / "bridge", Path(state) / "hung"
+            bridge.write_text(f"#!/bin/sh\ntrap 'touch {hung}; exit 1' TERM\necho waiting\n"
+                              "case \"$*\" in *Builder*) echo allowed; exit 0;; esac\nwhile :; do sleep 0.05; done\n")
+            bridge.chmod(0o700)
+            desks._bridge_bin = str(bridge)
+            stock = StockRemote(peer="deus.tail1234.ts.net", password_file="/dev/null")
+            desks._pcs["deus"] = PcLink("deus", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.05
+            try:
+                prompts.start(desks, "deus", "desk_1", seat, "a1", "g", "Builder")
+                prompts.start(desks, "deus", "desk_2", seat, "a2", "g", "Tester")
+                await _until(lambda: asks.answered)
+                asks.open.discard("desk_2")
+                await _until(hung.exists)
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+            assert asks.answered == [(seat, "desk_1", "accept", "rigdesk:deus")] and desks.prompts == {}
+
+    asyncio.run(run())
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
