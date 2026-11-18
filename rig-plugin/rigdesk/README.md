@@ -215,7 +215,7 @@ Known limits against a RigDesk PC:
   first login that passes and confirms it with a second tag, without which Rig does not count the login as joined. So the first agent owns the session; the device shows that agent and can end it. The invite lapses
   after 15 minutes unclaimed. The person can instead make it for one agent, by its id on the device or from the agents
   that last used the PC in its tray; the device then refuses any other agent and the invite stays open. Known limits: a device requiring 2FA refuses invites, the session is the desktop only (no
-  terminal), an invite spent on a login that then fails needs a new one, any tailnet peer that connects can see that an invite is open (not what it is), and a wrong
+  terminal), an invite spent on a login that then fails needs a new one, any tailnet peer that connects can see that an invite is open (not what it is), a join of the entry already waiting on the device's `/claim` when an invite starts is not refused, so both can then hold the device, and a wrong
   `stock.login_id` is the operator's to catch: Rig has no record of its own that ties an ID to a device, and whoever holds the link and controls the address in that entry can make both tags.
   A device's invite asks no Accept in Rig and goes past Rig's PC assignment: any agent given the link may join, as a device has no agent shell to guard. The
   device keeps the first pairing key it fetches. If Rig later answers with a different one, the kept key stays until the person at the device accepts the new one, which
