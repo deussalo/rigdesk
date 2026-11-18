@@ -860,7 +860,7 @@ class ConnectionManager extends StatelessWidget {
           onPressed: () {
             serverModel.sendLoginResponse(client, false);
           }).marginOnly(right: 15),
-      if (serverModel.approveMode != 'password')
+      if (serverModel.approveMode != 'password' || client.isRigKnock)
         ElevatedButton.icon(
             icon: const Icon(Icons.check),
             label: Text(translate("Accept")),

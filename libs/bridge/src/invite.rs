@@ -23,7 +23,7 @@ pub struct Invite {
     key: sign::SecretKey,
 }
 
-fn read_key(path: &Path) -> Result<(sign::PublicKey, sign::SecretKey), String> {
+pub(crate) fn read_key(path: &Path) -> Result<(sign::PublicKey, sign::SecretKey), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read the pairing key file {}: {e}", path.display()))?;
     let seed = STANDARD.decode(text.trim()).ok().and_then(|raw| sign::Seed::from_slice(&raw));
     let seed = seed.ok_or_else(|| format!("the pairing key file {} holds no key", path.display()))?;

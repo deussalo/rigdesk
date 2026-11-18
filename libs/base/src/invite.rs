@@ -283,7 +283,7 @@ fn parse_key(text: &str) -> Option<sign::PublicKey> {
     sign::PublicKey::from_slice(&STANDARD.decode(text.trim()).ok()?)
 }
 
-fn paired_key() -> Option<sign::PublicKey> {
+pub(crate) fn paired_key() -> Option<sign::PublicKey> {
     parse_key(&LocalConfig::get_option(OPTION_RIG_INVITE_KEY))
 }
 

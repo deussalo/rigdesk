@@ -552,6 +552,10 @@ impl Link {
         &self.addr
     }
 
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
     /// The connection the person at the PC allowed carries the session from now: any session running is closed for it.
     pub fn adopt(&self, allowed: crate::knock::Allowed) {
         *self.adopted.lock().unwrap() = Some(allowed);

@@ -87,6 +87,7 @@ message LoginRequest {
   bytes trusted_device_v2_token = 18;
   bool trusted_device_v2_supported = 19;
   RigInvite rig_invite = 100;
+  RigKnock rig_knock = 101;
 }
 
 // RigDesk: an invite the person at the device made, redeemed with Rig's paired key in place of a password.
@@ -95,6 +96,14 @@ message RigInvite {
   bytes signature = 2;
   string agent_id = 3;
   string agent_title = 4;
+}
+
+// RigDesk: a Rig agent's passwordless knock, proved with Rig's paired key for this one connection (see base::rig_knock).
+message RigKnock {
+  bytes signature = 1;
+  string agent_id = 2;
+  string agent_title = 3;
+  string dialer = 4;  // The address Rig signed this for, its own on this connection.
 }
 
 message Terminal {
@@ -344,6 +353,8 @@ message Hash {
   string challenge = 2;
   // RigDesk: shows the dialer this device holds the open invite (see base::invite).
   bytes rig_invite_device = 100;
+  // RigDesk Android: new for every connection; a knock's proof must cover it (see base::rig_knock).
+  bytes rig_knock_nonce = 101;
 }
 
 enum ClipboardFormat {

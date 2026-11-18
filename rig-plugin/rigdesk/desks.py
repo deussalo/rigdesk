@@ -10,6 +10,7 @@ import base64
 import itertools
 import binascii
 import json
+import os
 import re
 import secrets
 import socket
@@ -81,6 +82,7 @@ LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9._-]{1,253})/(?P<grant>[0-9a-f
 # A device's own invite names it by RustDesk ID, as id.<id>; no PC's name or tailnet host reads so, as an ID holds no dot.
 INVITE_HOST = re.compile(r"^id\.(?P<id>[A-Za-z0-9_-]{6,32})$")
 PAIR_KEY = "invite-pair.key"
+PAIR_KEY_ENV = "RIGDESK_PAIR_KEY_FILE"
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
 type Grantee = Annotated[str, StringConstraints(pattern=r"^(agent|graph):[A-Za-z0-9_.:-]{1,128}$")]
@@ -878,6 +880,8 @@ class Desks:
                 *self._route(stock), *([] if stock.password_file is None else ["--password-file", str(Path(stock.password_file).expanduser())]),
                 "--token-file", str(Path(link.spec.token_file).expanduser()), "--port", str(urlsplit(link.spec.url).port),
                 "--journal", str(self._dir / f"bridge-{link.name}.journal")]
+        # In the environment, as a bridge older than this plugin refuses the flag and ignores the variable.
+        env = {**os.environ, PAIR_KEY_ENV: str((SECRETS / PAIR_KEY).expanduser())}
         if stock.viewer_port is not None and stock.viewer_password_file is not None:
             argv += ["--viewer-port", str(stock.viewer_port), "--viewer-password-file", str(Path(stock.viewer_password_file).expanduser())]
         for server in stock.mcp_servers:
@@ -887,7 +891,7 @@ class Desks:
             started = time.monotonic()
             log = await asyncio.to_thread(self._remote_log, link.name)
             try:
-                process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, env=env)
             except OSError as failed:
                 log.close()
                 link.remote_why = f"rigdesk-bridge could not start ({argv[0]}): {failed}"
