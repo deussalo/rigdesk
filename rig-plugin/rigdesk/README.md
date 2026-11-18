@@ -172,6 +172,8 @@ Known limits against a RigDesk PC:
   and only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
   Known limits:
   * a stock PC whose RustDesk approves by password only shows no Accept, so only the operator can answer;
+  * on a stock PC, Accept fully authorizes the login that asked, so the person may briefly see it connected before it closes;
+  * an agent picks its own title, and the prompt shows it, marked "(Rig agent)": the name says who asks only as far as the title does;
   * a PC that hides its connection manager (`allow-hide-cm`) shows nothing;
   * a request open when Rig restarts is not shown on the PC again;
   * agents' shells run as Rig's own user, so an agent that can run commands on Rig's host can do what Rig can.

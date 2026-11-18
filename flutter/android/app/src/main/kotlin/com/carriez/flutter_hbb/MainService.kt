@@ -961,6 +961,8 @@ class MainService : Service() {
             .setContentTitle("$username is trying to join this device")
             .setContentText("Allow it here, or the operator answers in Rig.")
             .setColor(ContextCompat.getColor(this, R.color.primary))
+            // With the activity gone nothing cancels it when the request ends.
+            .setTimeoutAfter(10 * 60 * 1000L)
         if (FFI.clickApproves()) {
             builder.addAction(0, "Allow", rigRequestIntent(clientID, true))
         }
