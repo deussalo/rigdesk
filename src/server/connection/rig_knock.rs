@@ -48,6 +48,21 @@ impl Connection {
                 if refusal.counts_as_failure() {
                     self.update_failure_with_scope(failure, false, 0, FailureScope::Default);
                 }
+                match refusal {
+                    rig_knock::Refusal::OtherDialer => hbb_common::throttled_log!(
+                        Duration::from_secs(60),
+                        warn,
+                        "Rig knock: good signature for {}, but the connection comes from {}",
+                        lr.rig_knock.dialer,
+                        self.ip
+                    ),
+                    rig_knock::Refusal::BadProof => hbb_common::throttled_log!(
+                        Duration::from_secs(60),
+                        warn,
+                        "Rig knock: the proof does not verify with the paired key for this connection"
+                    ),
+                    _ => {}
+                }
                 return self.refuse_rig_knock(refusal.words()).await;
             }
         };

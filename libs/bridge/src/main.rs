@@ -11,13 +11,13 @@
 //!                  [--port 21120] [--journal <file>] [--name "Rig agent"] [--once] [--login-id <ID, with --peer>]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
 //!                  [--mcp-server http://<host>[:port][/path] [--mcp-token-file <file>]]...
-//!                  [--pair-key-file <file>]
-//!                  [--invite-file <file>, with --pair-key-file, --once, --peer and --login-id]
+//!                  [--invite-file <file> --pair-key-file <file>, with --once, --peer and --login-id]
 //!   rigdesk-bridge --pair-key <file>
 //!
 //! `--invite-file` redeems an invite the device made, with Rig's pairing key, in place of a password (see `invite`);
 //! `--pair-key` makes that key if the file has none and prints its public half, which the device keeps.
-//! `--pair-key-file` alone proves a knock with that key to a device that asks for the proof (see `knock`).
+//! The environment's `RIGDESK_PAIR_KEY_FILE` names that key for proving a knock to a device that asks for it (see `knock`).
+//! It is not an argument so that a Rig newer than this binary can set it for an older one, which ignores it.
 //! With no `--password-file`, only a connection the person at the PC allows on Rig's `POST /offer` carries a session (see
 //! `knock`); with one, such a connection carries the session the same way, and the password serves unattended access.
 //! Each `--mcp-server` names an MCP server on the PC's own address (a phone's native tools, say), offered to the holding
@@ -42,6 +42,7 @@ use rigdesk_agent::{Api, Events, Found, Journal, Shared};
 
 const JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 const EVENT_RING: usize = 512;
+const PAIR_KEY_ENV: &str = "RIGDESK_PAIR_KEY_FILE";
 
 struct Args {
     route: (link::Route, String),
@@ -54,7 +55,6 @@ struct Args {
     servers: Vec<Remote>,
     once: bool,
     invite: Option<(PathBuf, PathBuf)>,
-    pair_key: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -106,11 +106,10 @@ fn parse_args() -> Result<Args, String> {
         (None, None) => None,
         _ => return Err("--viewer-port and --viewer-password-file go together".into()),
     };
-    let pair_key = pair_key_file.clone();
     let invite = match (invite_file, pair_key_file) {
         (Some(file), Some(key)) if once && password_file.is_none() && peer.is_some() && login_id.is_some() => Some((file, key)),
-        (None, _) => None,
-        _ => return Err("--invite-file goes with --pair-key-file, --once, --peer and --login-id and no --password-file".into()),
+        (None, None) => None,
+        _ => return Err("--invite-file and --pair-key-file go together, with --once, --peer and --login-id and no --password-file".into()),
     };
     if login_id.is_some() && peer.is_none() {
         return Err("--login-id goes with --peer".into());
@@ -144,8 +143,11 @@ fn parse_args() -> Result<Args, String> {
         servers,
         once,
         invite,
-        pair_key,
     })
+}
+
+fn knock_key_file(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|file| !file.is_empty()).map(PathBuf::from)
 }
 
 fn read_secret(path: &PathBuf, what: &str) -> Result<String, String> {
@@ -242,7 +244,7 @@ fn main() {
             }
         }
         let found = (!args.servers.is_empty()).then(|| Found::remote(args.servers));
-        let knocker = knock::Knocker::new(link.clone(), shared.clone(), tokio::runtime::Handle::current(), args.pair_key);
+        let knocker = knock::Knocker::new(link.clone(), shared.clone(), tokio::runtime::Handle::current(), knock_key_file(std::env::var_os(PAIR_KEY_ENV)));
         let api = Api::hosted(shared, Arc::new(desk::RemoteDesk::new(link)), Arc::new(journal), &bearer, found);
         api.operator_joins(knocker);
         match api.serve(args.port).await {
@@ -257,4 +259,16 @@ fn main() {
         }
         std::future::pending::<()>().await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_knock_key_comes_from_a_set_variable_only() {
+        assert_eq!(knock_key_file(None), None);
+        assert_eq!(knock_key_file(Some("".into())), None);
+        assert_eq!(knock_key_file(Some("/keys/pair.key".into())), Some(PathBuf::from("/keys/pair.key")));
+    }
 }

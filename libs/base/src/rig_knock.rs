@@ -4,7 +4,8 @@
 //! device was paired with (`invite::pair`). The signature covers this connection's greeting, whose nonce is new for every
 //! connection, so a proof seen once opens nothing later. It also covers the address the knock comes from: Rig signs any
 //! greeting a PC it dials shows it, and without the address another PC could show Rig this device's greeting and bring
-//! the proof here itself.
+//! the proof here itself. The knock says which address Rig signed, so a good signature from an unexpected address can be
+//! told apart from a bad one.
 //!
 //! Anything else that calls itself Rig gets no prompt, no Allow and keeps no name of its own on this device.
 
@@ -35,15 +36,18 @@ pub struct Login<'a> {
     pub dialer: IpAddr,
 }
 
+/// A dual-stack socket reports an IPv4 peer in its mapped form, and the other end knows the plain one.
+fn plain(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    }
+}
+
 impl Login<'_> {
     /// What Rig signs for this connection and this agent.
     pub fn message(&self, agent_id: &str, agent_title: &str) -> Vec<u8> {
-        // A dual-stack socket reports an IPv4 peer in its mapped form, and the other end knows the plain one.
-        let dialer = match self.dialer {
-            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(self.dialer, IpAddr::V4),
-            v4 => v4,
-        };
-        let dialer = dialer.to_string();
+        let dialer = plain(self.dialer).to_string();
         let fields: [&[u8]; 8] = [
             DOMAIN.as_bytes(),
             self.device.as_bytes(),
@@ -68,6 +72,8 @@ pub enum Refusal {
     NotPaired,
     NoProof,
     BadProof,
+    /// Rig's signature is good, but for another address than this connection comes from.
+    OtherDialer,
 }
 
 impl Refusal {
@@ -75,11 +81,12 @@ impl Refusal {
         match self {
             Refusal::NotPaired => invite::Refusal::NotPaired.words(),
             Refusal::NoProof | Refusal::BadProof => "This login did not prove it comes from Rig",
+            Refusal::OtherDialer => "This login comes from another address than the one Rig signed",
         }
     }
 
     /// Only a signature that fails is an attempt on the device. Rig itself knocks unproved at a device it is not paired
-    /// with, and must not lock its own address out of password logins.
+    /// with, or from an address the device sees differently, and must not lock itself out of password logins.
     pub fn counts_as_failure(self) -> bool {
         self == Refusal::BadProof
     }
@@ -117,8 +124,13 @@ fn check(key: Option<&sign::PublicKey>, knock: Option<&RigKnock>, login: &Login)
         return Err(Refusal::BadProof);
     }
     let signature = sign::Signature::from_bytes(&knock.signature).map_err(|_| Refusal::BadProof)?;
-    if !sign::verify_detached(&signature, &login.message(&knock.agent_id, &knock.agent_title), key) {
+    let dialer: IpAddr = knock.dialer.parse().map_err(|_| Refusal::BadProof)?;
+    let signed = Login { dialer, ..*login };
+    if !sign::verify_detached(&signature, &signed.message(&knock.agent_id, &knock.agent_title), key) {
         return Err(Refusal::BadProof);
+    }
+    if plain(dialer) != plain(login.dialer) {
+        return Err(Refusal::OtherDialer);
     }
     Ok(Proved { agent_id: knock.agent_id.clone(), name: format!("{} (Rig agent)", knock.agent_title) })
 }
@@ -174,6 +186,7 @@ mod tests {
             signature: sign::sign_detached(&login.message("agent_a", "Builder"), key).to_bytes().to_vec().into(),
             agent_id: "agent_a".into(),
             agent_title: "Builder".into(),
+            dialer: login.dialer.to_string(),
             ..Default::default()
         }
     }
@@ -205,7 +218,14 @@ mod tests {
         let earlier = knock(&secret, &login(b"another connection's nonce", RIG));
         assert_eq!(check(Some(&public), Some(&earlier), &here), Err(Refusal::BadProof), "replayed from another connection");
         assert_eq!(check(Some(&public), Some(&good), &login(b"", RIG)), Err(Refusal::BadProof), "a nonce already spent");
-        assert_eq!(check(Some(&public), Some(&good), &login(NONCE, "100.64.0.2")), Err(Refusal::BadProof), "brought here by another PC");
+
+        let elsewhere = login(NONCE, "100.64.0.2");
+        let relayed = check(Some(&public), Some(&good), &elsewhere).unwrap_err();
+        assert_eq!(relayed, Refusal::OtherDialer, "brought here by another PC");
+        assert_ne!(relayed.words(), Refusal::BadProof.words(), "Rig and the log can tell this from a wrong key");
+        assert!(!relayed.counts_as_failure());
+        let readdressed = RigKnock { dialer: "100.64.0.2".into(), ..good.clone() };
+        assert_eq!(check(Some(&public), Some(&readdressed), &elsewhere), Err(Refusal::BadProof), "an address Rig did not sign");
 
         let renamed = RigKnock { agent_title: "Mallory".into(), ..good };
         assert_eq!(check(Some(&public), Some(&renamed), &here), Err(Refusal::BadProof), "a name Rig did not sign");

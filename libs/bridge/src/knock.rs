@@ -80,11 +80,13 @@ impl Proof {
             signature: sign::sign_detached(&login.message(&self.agent_id, &self.agent_title), key).to_bytes().to_vec().into(),
             agent_id: self.agent_id.clone(),
             agent_title: self.agent_title.clone(),
+            dialer: dialer.to_string(),
             ..Default::default()
         }
     }
 
-    /// The login with the proof in it. Without a usable key it goes unproved, and the device refuses it in its own words.
+    /// The login with the proof in it. The key is read for each knock, so one made after the bridge started counts.
+    /// Without a usable key the login goes unproved, and the device refuses it in its own words.
     async fn added_to(&self, mut login: Message, device: &str, hash: &Hash, dialer: IpAddr) -> Message {
         let file = self.key_file.clone();
         match tokio::task::spawn_blocking(move || crate::invite::read_key(&file)).await {
@@ -333,15 +335,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let key_file = dir.join("pair.key");
-        let public = STANDARD.decode(crate::invite::pair_key(&key_file).unwrap()).unwrap();
-        let public = sign::PublicKey::from_slice(&public).unwrap();
         let proof = Proof { key_file: key_file.clone(), agent_id: "agent_a".into(), agent_title: "Builder".into() };
         let greeting = Hash { salt: "s".into(), challenge: "c".into(), rig_knock_nonce: b"nonce".to_vec().into(), ..Default::default() };
+        assert!(login_after_greeting(greeting.clone(), Some(&proof)).await.0.rig_knock.is_none(), "the key file is not there yet");
 
+        let public = STANDARD.decode(crate::invite::pair_key(&key_file).unwrap()).unwrap();
+        let public = sign::PublicKey::from_slice(&public).unwrap();
         let (login, dialer) = login_after_greeting(greeting.clone(), Some(&proof)).await;
         assert!(login.password.is_empty());
-        let knocked = login.rig_knock.clone().into_option().expect("the device asked for the proof");
-        assert_eq!((knocked.agent_id.as_str(), knocked.agent_title.as_str()), ("agent_a", "Builder"));
+        let knocked = login.rig_knock.clone().into_option().expect("a key made after the bridge started proves the next knock");
+        assert_eq!((knocked.agent_id.as_str(), knocked.agent_title.as_str(), knocked.dialer.as_str()), ("agent_a", "Builder", dialer.to_string().as_str()));
         let signature = sign::Signature::from_bytes(&knocked.signature).unwrap();
         let mut signed = rig_knock::Login { device: &login.username, salt: "s", challenge: "c", nonce: b"nonce", dialer };
         assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder"), &public));
@@ -350,9 +353,7 @@ mod tests {
 
         let stock = Hash { rig_knock_nonce: Default::default(), ..greeting.clone() };
         assert!(login_after_greeting(stock, Some(&proof)).await.0.rig_knock.is_none(), "a stock PC asks for no proof");
-        assert!(login_after_greeting(greeting.clone(), None).await.0.rig_knock.is_none(), "no key configured");
-        let keyless = Proof { key_file: dir.join("none"), agent_id: "agent_a".into(), agent_title: "Builder".into() };
-        assert!(login_after_greeting(greeting, Some(&keyless)).await.0.rig_knock.is_none(), "the key file is not there yet");
+        assert!(login_after_greeting(greeting, None).await.0.rig_knock.is_none(), "no key configured");
         std::fs::remove_dir_all(&dir).ok();
     }
 

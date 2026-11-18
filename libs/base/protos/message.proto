@@ -103,6 +103,7 @@ message RigKnock {
   bytes signature = 1;
   string agent_id = 2;
   string agent_title = 3;
+  string dialer = 4;  // The address Rig signed this for, its own on this connection.
 }
 
 message Terminal {
