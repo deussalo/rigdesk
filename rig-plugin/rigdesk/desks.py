@@ -1840,6 +1840,11 @@ class Desks:
 
     # --- the PC's own prompt for an agent's desk/request (prompts.py) ---
 
+    def invited(self, pc: str) -> bool:
+        """Whether the session on this PC came by its person's invite, redeemed inside RustDesk's login: the desktop alone."""
+        kept = self._adhoc.get(pc)
+        return kept is not None and kept.invited
+
     def held_on(self, pc: str) -> Held | None:
         return self._sessions.get(pc)
 

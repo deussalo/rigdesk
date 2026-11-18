@@ -46,6 +46,8 @@ impl Connection {
         };
         self.update_failure_with_scope(failure, true, 0, FailureScope::Default);
         hbb_common::log::info!("Rig agent {} joined by invite", holder.agent);
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        crate::agent::invite::relay::joined(self.inner.id, &holder, self.tx_from_cm.clone());
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.try_start_cm_ipc();

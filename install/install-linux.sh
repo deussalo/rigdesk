@@ -17,11 +17,15 @@
 # agent token and --agent-join on|off to the desktop user's server through their own enroll.json, each 0600 and deleted
 # once applied; lets the direct port 21118 in from the tailnet only; and publishes the agent API at / and the lane at
 # /lane with `tailscale serve`. Rerunning it with new secrets rotates them. It never prints a secret.
+#
+# A PC Rig does not reach over Tailscale takes --rig-pair-key <key> (Rig's public pairing key, from Rig's pair_key route)
+# and no tailscale_auth_key, agent_token or lane_token: the person there invites an agent from the tray, and Rig redeems
+# the invite through the relay. Given with the tokens, the key is kept, and invites still go over the tailnet.
 set -euo pipefail
 
 DEB_URL='https://github.com/deussalo/rigdesk/releases/download/__TAG__/rigdesk-linux-x64.deb'
 DEB_SHA256='__SHA256__'
-CLIENT='' USER_NAME='' AGENT_SHELL=on AGENT_JOIN=on DEB='' SKIP_TAILSCALE=0
+CLIENT='' USER_NAME='' AGENT_SHELL=on AGENT_JOIN=on DEB='' SKIP_TAILSCALE=0 RIG_PAIR_KEY=''
 
 say() { echo "==> $*"; }
 die() { echo "install-linux: $*" >&2; exit 1; }
@@ -32,6 +36,7 @@ while [ $# -gt 0 ]; do
         --user) USER_NAME=$2; shift 2 ;;
         --agent-shell) AGENT_SHELL=$2; shift 2 ;;
         --agent-join) AGENT_JOIN=$2; shift 2 ;;
+        --rig-pair-key) RIG_PAIR_KEY=$2; shift 2 ;;
         # For CI and for testing a build: a local package instead of the release's, and no Tailscale.
         --deb) DEB=$2; shift 2 ;;
         --skip-tailscale) SKIP_TAILSCALE=1; shift ;;
@@ -43,6 +48,7 @@ done
 [[ "$CLIENT" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "--client is a slug: a-z, 0-9 and -, up to 63"
 [[ "$AGENT_SHELL" =~ ^(on|off)$ ]] || die "--agent-shell is on or off"
 [[ "$AGENT_JOIN" =~ ^(on|off)$ ]] || die "--agent-join is on or off"
+[ -z "$RIG_PAIR_KEY" ] || [[ "$RIG_PAIR_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] || die "--rig-pair-key is Rig's public pairing key: 44 characters of base64"
 [ -d /run/systemd/system ] || die "this PC does not run systemd, which RigDesk's service and agent shell need"
 USER_LINE=$(getent passwd "$USER_NAME") || die "--user names the PC's desktop user, and $USER_NAME is not one"
 USER_UID=$(echo "$USER_LINE" | cut -d: -f3); USER_GID=$(echo "$USER_LINE" | cut -d: -f4); USER_HOME=$(echo "$USER_LINE" | cut -d: -f6)
@@ -54,11 +60,19 @@ while IFS= read -r line || [ -n "$line" ]; do
     key=${line%%=*}; value=${line#*=}
     case "$key" in tailscale_auth_key|password|pin|agent_token|lane_token) SECRET[$key]=$value ;; *) die "unknown secret $key" ;; esac
 done
-for key in password pin agent_token lane_token; do [ -n "${SECRET[$key]:-}" ] || die "no $key on stdin"; done
+# Paired by key alone: no tokens, no lane and no Tailscale.
+KEY_ONLY=0
+if [ -n "$RIG_PAIR_KEY" ] && [ -z "${SECRET[agent_token]:-}${SECRET[lane_token]:-}" ]; then
+    KEY_ONLY=1 SKIP_TAILSCALE=1 SECRET[agent_token]='' SECRET[lane_token]=''
+fi
+for key in password pin; do [ -n "${SECRET[$key]:-}" ] || die "no $key on stdin"; done
 len=${#SECRET[password]}; [ "$len" -ge 8 ] && [ "$len" -le 64 ] || die "the password is 8-64 characters"
 len=${#SECRET[pin]}; [ "$len" -ge 4 ] && [ "$len" -le 32 ] || die "the PIN is 4-32 characters"
-for key in agent_token lane_token; do [[ "${SECRET[$key]}" =~ ^[A-Za-z0-9_-]{32,128}$ ]] || die "$key is 32-128 of A-Za-z0-9_-"; done
-[ "${SECRET[agent_token]}" != "${SECRET[lane_token]}" ] || die "the lane token must differ from the agent token: the desktop user can read the agent token"
+if [ "$KEY_ONLY" = 0 ]; then
+    for key in agent_token lane_token; do [ -n "${SECRET[$key]:-}" ] || die "no $key on stdin (or give --rig-pair-key alone, for invites through the relay)"; done
+    for key in agent_token lane_token; do [[ "${SECRET[$key]}" =~ ^[A-Za-z0-9_-]{32,128}$ ]] || die "$key is 32-128 of A-Za-z0-9_-"; done
+    [ "${SECRET[agent_token]}" != "${SECRET[lane_token]}" ] || die "the lane token must differ from the agent token: the desktop user can read the agent token"
+fi
 for key in password pin; do [[ "${SECRET[$key]}" != *[[:cntrl:]]* ]] || die "the $key holds a control character"; done
 
 # A JSON string, for values checked above.
@@ -101,7 +115,7 @@ runuser -u "$USER_NAME" -- install -d -m 700 "$USER_HOME/.config/rigdesk" "$USER
 # Written as the user, so a link they planted on the way cannot make root write elsewhere. The user reads the inherited stdin, not
 # /dev/stdin, which they may not open; the mode is set outright and checked, since the file holds the PC's password and agent token.
 runuser -u "$USER_NAME" -- bash -c 'umask 077; cat > "$1"; chmod 600 "$1"' _ "$USER_AGENT_DIR/enroll.json" <<JSON
-{"password":$(json "${SECRET[password]}"),"pin":$(json "${SECRET[pin]}"),"agent_token":$(json "${SECRET[agent_token]}"),"agent_join":$(json "$AGENT_JOIN")}
+{"password":$(json "${SECRET[password]}"),"pin":$(json "${SECRET[pin]}"),"agent_token":$(json "${SECRET[agent_token]}"),"agent_join":$(json "$AGENT_JOIN"),"rig_pair_key":$(json "$RIG_PAIR_KEY")}
 JSON
 [ "$(stat -c '%a %u' "$USER_AGENT_DIR/enroll.json")" = "600 $USER_UID" ] || die "$USER_AGENT_DIR/enroll.json is not $USER_NAME's alone (0600)"
 
@@ -111,9 +125,9 @@ systemctl restart rigdesk.service
 # The desktop user's server applies its enroll.json when it starts; restart it if they are signed in.
 pkill -u "$USER_UID" -f '^/usr/(bin|share/rigdesk)/rigdesk --server' || true
 
-for _ in $(seq 100); do [ -S /run/rigdesk/lane.sock ] && [ ! -e /var/lib/rigdesk/enroll.json ] && break; sleep 0.2; done
+for _ in $(seq 100); do { [ -S /run/rigdesk/lane.sock ] || [ "$KEY_ONLY" = 1 ]; } && [ ! -e /var/lib/rigdesk/enroll.json ] && break; sleep 0.2; done
 [ ! -e /var/lib/rigdesk/enroll.json ] || die "RigDesk's service did not take its enrollment: journalctl -u rigdesk"
-[ -S /run/rigdesk/lane.sock ] || die "RigDesk's service serves no lane: journalctl -u rigdesk"
+[ -S /run/rigdesk/lane.sock ] || [ "$KEY_ONLY" = 1 ] || die "RigDesk's service serves no lane: journalctl -u rigdesk"
 
 if command -v nft > /dev/null; then
     say "letting the direct port 21118 in from the tailnet only"

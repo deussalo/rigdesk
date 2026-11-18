@@ -15,6 +15,10 @@
   (on by default: the operator may start an agent's desktop session from Rig with no share link); lets the
   direct port 21118 in from the tailnet only; and publishes the agent API with `tailscale serve`. Rerunning it with
   new secrets rotates them.
+
+  A PC Rig does not reach over Tailscale takes -RigPairKey (Rig's public pairing key, from Rig's pair_key route) in
+  place of -AgentToken and -TailscaleAuthKey: the person there invites an agent from the tray, and Rig redeems the
+  invite through the relay. Given with -AgentToken, the key is kept, and invites still go over the tailnet.
 #>
 [CmdletBinding()]
 param(
@@ -22,7 +26,9 @@ param(
     [string] $TailscaleAuthKey = '',
     [Parameter(Mandatory)] [ValidateLength(8, 64)] [string] $Password,
     [Parameter(Mandatory)] [ValidateLength(4, 32)] [string] $Pin,
-    [Parameter(Mandatory)] [ValidatePattern('^[A-Za-z0-9_-]{32,128}$')] [string] $AgentToken,
+    [ValidatePattern('^[A-Za-z0-9_-]{32,128}$')] [string] $AgentToken = '',
+    # Rig's public pairing key: invites made on this PC are redeemed with it, through the relay when there is no -AgentToken.
+    [ValidatePattern('^[A-Za-z0-9+/]{43}=$')] [string] $RigPairKey = '',
     # Whether Rig's agents may run commands on this PC as SYSTEM without a session (the client's written consent, README).
     [ValidateSet('on', 'off')] [string] $AgentShell = 'on',
     # Whether the operator may start an agent's desktop session from Rig, with no share link (the client's written consent, README).
@@ -31,7 +37,7 @@ param(
     [string] $PackageUrl = 'https://github.com/deussalo/rigdesk/releases/download/__TAG__/rigdesk-windows-x64.zip',
     [string] $PackageSha256 = '__SHA256__',
     [string] $Hostname = $env:COMPUTERNAME.ToLowerInvariant(),
-    # For CI: install and enroll without touching Tailscale.
+    # For CI: install and enroll without touching Tailscale. Implied without -AgentToken.
     [switch] $SkipTailscale
 )
 
@@ -65,6 +71,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'Run this from an administrator PowerShell.'
 }
 
+if (-not $AgentToken -and -not $RigPairKey) { throw 'Give -AgentToken (Rig reaches this PC over Tailscale) or -RigPairKey (invites only, through the relay).' }
+if (-not $AgentToken) { $SkipTailscale = [switch]$true }
 if (-not $SkipTailscale -and -not $TailscaleAuthKey) { throw 'Give -TailscaleAuthKey (a tagged auth key from the operator).' }
 
 try {
@@ -121,7 +129,7 @@ try {
     # 3. The PC's secrets, applied by the service at startup and deleted.
     Step "Setting the permanent password, admin PIN and agent API token; agent shell $AgentShell; sessions from Rig $AgentJoin"
     $enroll = Join-Path $installDir 'enroll.json'
-    $json = @{ password = $Password; pin = $Pin; agent_token = $AgentToken; agent_shell = $AgentShell; agent_join = $AgentJoin } | ConvertTo-Json -Compress
+    $json = @{ password = $Password; pin = $Pin; agent_token = $AgentToken; agent_shell = $AgentShell; agent_join = $AgentJoin; rig_pair_key = $RigPairKey } | ConvertTo-Json -Compress
     [IO.File]::WriteAllText($enroll, $json, (New-Object Text.UTF8Encoding($false)))
     $acl = New-Object Security.AccessControl.FileSecurity
     $acl.SetAccessRuleProtection($true, $false)
@@ -149,7 +157,9 @@ try {
         -Program (Join-Path $installDir "$AppName.exe") | Out-Null
 
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
-    if ($SkipTailscale) {
+    if (-not $AgentToken) {
+        Step 'Done (no Tailscale). Rig reaches this PC only by an invite made from the tray, through the relay.'
+    } elseif ($SkipTailscale) {
         Step "Done (no Tailscale). The agent API is on 127.0.0.1:$AgentPort only."
     } else {
         Step 'Publishing the agent API with tailscale serve'

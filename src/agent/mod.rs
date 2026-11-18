@@ -82,6 +82,11 @@ pub(crate) const API_PORT: u16 = 21119;
 pub fn start() {
     let Some(bearer) = bearer() else {
         log::info!("agent: no api.token; the agent API is off on this PC");
+        // A PC paired with Rig by its key alone still invites agents from the tray.
+        #[cfg(windows)]
+        if base::invite::paired() {
+            crate::platform::windows::agent_tray::ensure();
+        }
         return;
     };
     let host = &*HOST;

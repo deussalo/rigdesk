@@ -245,6 +245,11 @@ pub fn mint(agent: Option<&str>) -> Result<Minted, &'static str> {
     INVITES.lock().unwrap().mint(&Config::get_id(), agent, get_time())
 }
 
+/// Whether this device keeps Rig's public key, so an invite made here can be redeemed.
+pub fn paired() -> bool {
+    paired_key().is_some()
+}
+
 pub fn revoke() -> bool {
     INVITES.lock().unwrap().open.take().is_some()
 }

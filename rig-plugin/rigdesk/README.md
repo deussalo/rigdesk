@@ -206,7 +206,9 @@ Known limits against a RigDesk PC:
   * Accept dials through the ID server RigDesk's settings name at that moment: if `connect_server` changed after the
     request was filed, that is not the server the request named.
 * `desk/join(link)` with a device's invite, `rigdesk://id.<RustDesk ID>/<grant>#<secret>` — the person at RigDesk on
-  Android made it, and it needs no password and no setup entry. Rig dials the device over the tailnet or through its ID
+  Android made it, or at a Windows or Linux RigDesk PC paired with Rig by its key alone (`-RigPairKey`, with no
+  Tailscale), and it needs no password and no setup entry. The session is the desktop alone, and the join's answer and
+  desk/pcs tell the agent so: no desk/shell, no MCP servers from the PC, no journal there. Rig dials the device over the tailnet or through its ID
   server, and the login carries a signature by Rig's pairing key over the invite, that login's challenge and the agent
   Rig names. The device, which fetched the public half from the `pair_key` route, checks it and spends the invite on the
   first login that passes, so the first agent owns the session; it shows that agent and can end it. The invite lapses

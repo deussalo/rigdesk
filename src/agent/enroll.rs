@@ -32,6 +32,9 @@ struct Enrollment {
     /// `on` or `off`: whether the operator may start agent sessions on this PC from Rig, with no share link, from `-AgentJoin`.
     #[serde(default)]
     agent_join: String,
+    /// Rig's public pairing key, base64, from `-RigPairKey`: invites made here are redeemed with it, through the relay.
+    #[serde(default)]
+    rig_pair_key: String,
 }
 
 /// The enrollment file of the installed binary, if this process is that binary.
@@ -110,6 +113,13 @@ pub fn apply() {
             None => log::error!("enroll: no config dir for the switch for sessions started from Rig"),
         },
         other => log::error!("enroll: agent_join is on or off, not {other}; the switch is left as it was"),
+    }
+    if !enrollment.rig_pair_key.is_empty() {
+        if base::invite::pair(&enrollment.rig_pair_key) {
+            log::info!("enroll: paired with Rig's key for invites");
+        } else {
+            log::error!("enroll: rig_pair_key is not Rig's public pairing key; the pairing is left as it was");
+        }
     }
 }
 

@@ -147,6 +147,11 @@ class DeskAnswer(ToolAnswer):
     model_config = ConfigDict(extra="allow", frozen=True, defer_build=True)
 
 
+INVITED_ONLY = ("This session came by the device's own invite, redeemed inside RustDesk's login (through the relay when the device is off the tailnet), "
+                "so it carries the desktop alone: the screen, mouse, keyboard and clipboard desk tools. It has no desk/shell, none of the PC's MCP servers "
+                "and no journal on the PC, so do not try those.")
+
+
 def _who(call: Call) -> tuple[str, str, str]:
     return str(call.contract.place.agent), str(call.graph), str(call.node)
 
@@ -171,6 +176,8 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
         return await _ask_invite(desks, call, invite.pc, str(given.link), title)
     except Exception as failed:  # noqa: BLE001
         return _refused(call, failed)
+    if desks.invited(held.pc):
+        return {"pc": held.pc, "joined": True, "said": f"You own {held.pc}'s session and hold its input; desk/<tool> acts there. {INVITED_ONLY}"}
     return {"pc": held.pc, "joined": True, "said": (f"You own {held.pc}'s session and hold its input. desk/<tool> acts there; the human sees each call live. "
                                                     "Their own input goes first: while they use the PC your actions are refused, and work again once they pause "
                                                     "for 3 s. If they press Stop you are told, and every call is refused until they resume you.")}
@@ -322,10 +329,13 @@ def _reached_by(entry: PcEntry) -> str:
 
 def _pc_entry(desks: Desks, entry: PcEntry, agent: str, graph: str, mine: set[str]) -> JsonObject:
     judged = entry["health"]
-    return {"name": entry["name"], "client": entry["client"], "state": entry["state"],
+    said: JsonObject = {"name": entry["name"], "client": entry["client"], "state": entry["state"],
             "reached_by": _reached_by(entry),
             "assigned_to_you": entry["name"] in mine, "held_by": _held_words(entry, agent), "shell": _shell_words(desks, entry, agent, graph),
             "health": None if judged is None else {"state": judged.state, "failing": [check.words for check in judged.failing]}}
+    if desks.invited(entry["name"]):
+        said |= {"reached_by": f"its person's invite only, and gone when this session ends. {INVITED_ONLY}", "shell": "none: a session an invite started is the desktop alone"}
+    return said
 
 
 async def _pcs(desks: Desks, call: Call, given: PcsInput) -> Answer:
@@ -385,6 +395,8 @@ async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
     if entry is None:
         return call.refused(REFUSED, f"no RigDesk PC named {pc} is set up in Rig; desk/pcs lists those that are")
     holds = held if held is not None and held.pc == pc else None
+    if desks.invited(pc):
+        return call.refused(REFUSED, f"{pc}: {INVITED_ONLY}")
     if entry["stock"]:
         if holds is None:
             return call.refused(REFUSED, f"{pc} runs stock RustDesk, which runs commands only in a joined session: desk/join it, then call desk/shell without pc")

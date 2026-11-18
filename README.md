@@ -107,6 +107,24 @@ client sign this text too before you run the line with it on.
 > *Pause sessions started from Rig*, in RigDesk's security settings behind the admin PIN, refuses new sessions until it
 > is unticked. Rerunning the install line with `-AgentJoin off` turns them off.
 
+### A PC Rig does not reach over Tailscale
+
+Such a PC is paired with Rig by Rig's key alone, for invites: the person there invites an agent from the tray (below),
+and Rig redeems the invite inside RustDesk's login, through the ID server and relay. Get Rig's public pairing key from
+the RigDesk plugin's `pair_key` route (`GET /x/rigdesk/pair_key`, which answers `{key}`; Rig makes the key on first
+asking, and its public half is no secret), and give it in place of `-AgentToken` and `-TailscaleAuthKey`:
+
+```powershell
+... -Client <slug> -Password ... -Pin ... -RigPairKey <key>
+```
+
+On Linux, add `--rig-pair-key <key>` and leave `tailscale_auth_key`, `agent_token` and `lane_token` out of the secrets.
+Neither script then touches Tailscale, and the PC has no agent API, agent shell or health readings. `-AgentJoin`
+still applies: an invite needs it on. Given with the agent token, the key is kept, and the PC still makes tailnet links.
+Known limits: a PC enrolled with the agent token whose Tailscale is down makes no relay link; and a session an invite
+starts through the relay is the desktop alone (screen, mouse, keyboard, clipboard), with no `desk/shell`, no MCP
+servers from the PC and no journal of the agent's actions on it.
+
 ### A Linux PC
 
 Debian or Ubuntu with systemd. You need the same values as for Windows, and a **lane token** too (32-128 of
@@ -200,7 +218,7 @@ In the remote window, the agent bar (bottom right) offers:
 
 At the PC itself, on Windows and Linux, the person there can invite an agent with no viewer: **Invite a Rig agent** in
 the RigDesk tray mints the same kind of link. It shows only on a PC paired with Rig, which has the agent API's token
-from its install line, and only while the PC takes sessions started from Rig (`-AgentJoin on`, not paused in the
+from its install line, or Rig's pairing key ([without Tailscale](#a-pc-rig-does-not-reach-over-tailscale)), and only while the PC takes sessions started from Rig (`-AgentJoin on`, not paused in the
 PIN-locked settings): an invite obeys the same switch as the operator's Accept, at mint and at claim.
 - **It takes nobody's place.** The tray offers it only while no agent holds the PC and no viewer's link is open, and a
   claim while another agent holds the PC is refused, naming that agent, and that agent keeps its session.
@@ -219,6 +237,12 @@ PIN-locked settings): an invite obeys the same switch as the operator's Accept, 
   `desk/join` with an invite claims nothing until the operator accepts it in Rig; the PC's `/health` says whether the
   open link is an invite (`invite_open`). On any other PC an invite needs no Accept in Rig: the person at the PC made
   it. A viewer's share link never asks. Closing the switch above revokes an open invite.
+- **Without Tailscale, through the relay.** A PC paired by Rig's key alone ([above](#a-pc-rig-does-not-reach-over-tailscale))
+  makes the link `rigdesk://id.<RustDesk ID>/<grant>#<secret>` instead. Rig redeems it inside RustDesk's login with a
+  signature by its pairing key over the invite, that login's challenge and the agent it names, so neither the
+  secret nor the key crosses the wire. The tray shows it and the agent the same way, and RustDesk's connection window
+  names the agent too and ends its session. The journal records the minting, revocation, the agent's join and the
+  person's end.
 - **Your input goes first.** Any mouse or keyboard input, from a viewer or at the PC itself, reaches the PC at once,
   and the agent's actions are refused ("the human is using the PC …", reads still work) until that input pauses for
   3 seconds; then the agent may act again by itself.

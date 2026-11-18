@@ -951,6 +951,24 @@ def test_an_invite_to_a_pc_where_an_agent_may_run_commands_waits_for_the_operato
     asyncio.run(run())
 
 
+def test_a_session_an_invite_started_tells_the_agent_it_is_the_desktop_alone() -> None:
+    from rigdesk import ShellInput, _pc_entry, _shell
+    from rigdesk.desks import AdHoc, StockRemote
+
+    with tempfile.TemporaryDirectory() as state:
+        desks = Desks(SimpleNamespace(state_dir=Path(state), report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+        name = "id-105517719"
+        desks._adhoc[name] = AdHoc("105517719", "the ID server rd.example.com", invited=True)
+        desks._pcs[name] = PcLink(name, DeskPc(url="http://127.0.0.1:21121", token_file="/dev/null", stock=StockRemote(id="105517719"), mcp=False))
+        desks._sessions[name] = Held(name, "a1", "g", "n", "Builder", "s", now_ms(), "adhoc")
+        entry = next(each for each in desks.entries() if each["name"] == name)
+        said = _pc_entry(desks, entry, "a1", "g", set())
+        assert "invite only" in str(said["reached_by"]) and "no desk/shell, none of the PC's MCP servers" in str(said["reached_by"]), said
+        assert str(said["shell"]).startswith("none: a session an invite started is the desktop alone"), said
+        call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1")), graph="g", node="n", refused=lambda code, words: (code, words))
+        refused = asyncio.run(_shell(desks, call, ShellInput.model_validate({"command": "whoami"})))  # type: ignore[arg-type]
+        assert isinstance(refused, tuple) and "no desk/shell" in refused[1], refused
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

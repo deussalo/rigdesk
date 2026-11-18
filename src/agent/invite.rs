@@ -14,6 +14,8 @@ use rigdesk_agent::{journal::recent_agents, operator::Switch, Entry, Owner};
 use serde_json::json;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
+pub mod relay;
+
 /// IPC config name: read, the invite as the tray shows it (see [`text`]); written, `mint`, `mint:<agent id>`, `revoke` or
 /// `end:<agent id>`.
 pub const IPC_INVITE: &str = "agent-invite";
@@ -89,7 +91,7 @@ fn unable() -> Option<String> {
 /// `\n<agent id>\t<title>` for each agent the person can pick.
 pub fn text() -> String {
     if super::bearer().is_none() {
-        return "off".into();
+        return relay::text();
     }
     let shared = super::shared();
     if let Some(owner) = shared.standing().owner {
@@ -124,7 +126,7 @@ pub fn text() -> String {
 /// From the tray: the person at the PC mints an invite, takes it back, or ends the session it started.
 pub fn act(verb: &str) {
     if super::bearer().is_none() {
-        return;
+        return relay::act(verb);
     }
     let shared = super::shared();
     match verb.split_once(':').unwrap_or((verb, "")) {
