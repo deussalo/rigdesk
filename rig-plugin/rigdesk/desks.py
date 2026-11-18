@@ -768,6 +768,7 @@ class Desks:
             await asyncio.gather(old, return_exceptions=True)
         held = self._sessions.pop(pc, None)
         if held is not None:
+            self._unsent.pop(pc, None)
             await asyncio.to_thread(self._write_state)
             await self._ended(held, f"RigDesk {pc}: the operator replaced its saved password, which restarts its bridge, so your session there ended. "
                                     "desk/join or desk/request it again.")
