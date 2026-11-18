@@ -1873,11 +1873,9 @@ class Desks:
         # Only our own PCs are dialed unasked; any other waits for the operator's approval, and once given, ours are not tried again.
         outside = [] if approved else [route for route in routes if route.rigdesk is None]
         if isinstance(password, Invited):
-            # The person at the device made the invite, so reaching it needs no approval, and a phone off the tailnet is on our own ID server.
-            if settings.id_server is not None:
-                ours = adhoc.Route(("--id", target.id, "--id-server", settings.id_server.host, "--key-file", str(Path(settings.id_server.key_file).expanduser())),
-                                   f"the ID server {settings.id_server.host}")
-                routes.insert(sum(route.rigdesk is not None for route in routes), ours)
+            # Anyone can write a link naming any ID, and whoever answers an ID server for it would get the login and the agent: a device registers
+            # nowhere, so only our own PCs on the tailnet are dialed, with no approval asked.
+            routes = [route for route in routes if route.rigdesk is not None]
         else:
             routes = [route for route in routes if (route.rigdesk is None) == approved]
         unasked = "".join(f"; {pc} was not tried, as {holder} holds it" for pc, holder in sorted(busy.items()))
@@ -1911,6 +1909,10 @@ class Desks:
         else:
             if outside:
                 raise ConnectAsk(target.id, outside[0].words, tuple(tried))
+            if isinstance(password, Invited):
+                answered = f"{', '.join(tried)} did not take it as {target.id}" if tried else "no such PC answered"
+                raise DeskRefused(f"{target.id} was not reached: an invite is redeemed only over the tailnet, from a PC set up in Rig's settings, and {answered}. "
+                                  f"The operator sets the device up under plugins.rigdesk.pcs with stock.peer, its tailnet name or address; the invite stays open until it lapses{unasked}")
             raise DeskRefused(f"{target.id} could not be reached")
         assert kept.process is not None
         kept_password = None if isinstance(password, Invited) else str(password_file)

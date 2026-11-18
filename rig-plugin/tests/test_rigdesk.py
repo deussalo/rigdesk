@@ -508,12 +508,12 @@ def test_connect_dials_a_pc_not_ours_only_once_the_operator_approves_and_leaves_
     asyncio.run(run())
 
 
-def test_an_invite_link_dials_the_device_with_rigs_key_and_no_password_and_names_the_calling_agent() -> None:
+def test_an_invite_link_dials_only_a_pc_set_up_on_the_tailnet_with_rigs_key_and_no_password_and_names_the_calling_agent() -> None:
     import json
     import os
     import stat
     from rigdesk import adhoc, desks as desks_module
-    from rigdesk.desks import DeskRefused, IdServer, RigdeskSettings
+    from rigdesk.desks import DeskRefused, IdServer, RigdeskSettings, StockRemote
 
     link = "rigdesk://id.105517719/" + "a" * 32 + "#" + "b" * 32
 
@@ -534,6 +534,8 @@ exit 3
             desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
             secrets_dir = desks_module.SECRETS
             desks_module.SECRETS = Path(state) / "secrets"
+            phone = await asyncio.start_server(lambda _reader, writer: writer.close(), "127.0.0.1", 0)
+            peer = f"127.0.0.1:{phone.sockets[0].getsockname()[1]}"
             try:
                 try:
                     await desks.join(link, "a1", "g", "n", "Builder")
@@ -546,13 +548,26 @@ exit 3
                 try:
                     await desks.join(link, "a1", "g", "n", "Builder")
                 except DeskRefused as refused:
+                    assert "stock.peer" in str(refused) and "b" * 32 not in str(refused), refused
+                else:
+                    raise AssertionError("an invite joined a device no PC in settings is")
+                assert len(dialed.read_text().splitlines()) == 1, "an invite was dialed through an ID server"
+                entry = DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=StockRemote(peer=peer))
+                settings = RigdeskSettings(pcs={"phone": entry}, bridge_bin=str(fake), id_server=server)
+                try:
+                    await desks.join(link, "a1", "g", "n", "Builder")
+                except DeskRefused as refused:
                     said = str(refused)
                 else:
                     raise AssertionError("a refused invite joined")
             finally:
+                phone.close()
+                await phone.wait_closed()
                 desks_module.SECRETS = secrets_dir
-            argv = dialed.read_text().splitlines()[-1]
-            assert "--id 105517719 --id-server rd.example.com" in argv and "--once" in argv and "--pair-key-file" in argv, argv
+            lines = dialed.read_text().splitlines()
+            argv = lines[-1]
+            assert len(lines) == 2 and f"--peer {peer} --login-id 105517719" in argv and "--once" in argv and "--pair-key-file" in argv, lines
+            assert "--id-server" not in argv, argv
             assert "--password-file" not in argv and "b" * 32 not in argv, argv
             assert json.loads(claim.read_text()) == {"grant": "a" * 32, "secret": "b" * 32, "agent_id": "a1", "agent_title": "Builder"}
             assert "can only be redeemed by Rig" in said and "b" * 32 not in said, said

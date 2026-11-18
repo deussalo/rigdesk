@@ -206,9 +206,10 @@ Known limits against a RigDesk PC:
   * Accept dials through the ID server RigDesk's settings name at that moment: if `connect_server` changed after the
     request was filed, that is not the server the request named.
 * `desk/join(link)` with a device's invite, `rigdesk://id.<RustDesk ID>/<grant>#<secret>` — the person at RigDesk on
-  Android made it, and it needs no password and no setup entry. Rig dials the device over the tailnet or through its ID
-  server, and the login carries a signature by Rig's pairing key over the invite, that login's challenge and the agent
-  Rig names. The device, which fetched the public half from the `pair_key` route, checks it and spends the invite on the
+  Android made it, and it needs no password. The device needs an entry in Rig's settings with `stock.peer`, its tailnet
+  name or address: Rig dials only the PCs set up there, over the tailnet, and never an ID server, since a link can name
+  any ID and a device registers on none. The login carries a signature by Rig's pairing key over the invite, that
+  login's challenge and the agent Rig names. The device, which fetched the public half from the `pair_key` route, checks it and spends the invite on the
   first login that passes, so the first agent owns the session; it shows that agent and can end it. The invite lapses
   after 15 minutes unclaimed. The person can instead make it for one agent, by its id on the device or from the agents
   that last used the PC in its tray; the device then refuses any other agent and the invite stays open. Known limits: a device requiring 2FA refuses invites, the session is the desktop only (no
