@@ -580,6 +580,63 @@ def test_a_pc_server_that_fails_a_call_shows_as_not_answering_with_its_own_error
     asyncio.run(run())
 
 
+async def _until(check, limit_s: float = 5.0) -> None:
+    for _ in range(int(limit_s / 0.01)):
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("never happened")
+
+
+def test_the_operator_replaces_a_stock_pcs_saved_password_and_its_bridge_logs_in_with_it_at_once() -> None:
+    from rigdesk.desks import DeskRefused, StockRemote
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state), report=lambda *_: None))  # type: ignore[arg-type]
+            told: list[str] = []
+
+            async def tell(_held: Held, words: str, _key: str, _timing: str = "steer") -> bool:
+                told.append(words)
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
+            password, started = Path(state) / "phone.password", Path(state) / "started"
+            password.write_text("old-password")
+            bridge = Path(state) / "bridge"
+            bridge.write_text(f"#!/bin/sh\nwhile [ \"$1\" != --password-file ]; do shift; done\ncat \"$2\" >> {started}; echo >> {started}\nexec sleep 60\n")
+            bridge.chmod(0o700)
+            desks._bridge_bin = str(bridge)
+            stock = StockRemote(peer="moto-g57.tail1234.ts.net", password_file=str(password))
+            link = desks._pcs["moto-g57"] = PcLink("moto-g57", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
+            desks._pcs["deus"] = PcLink("deus", PCS["deus"])
+            link.remote = asyncio.get_running_loop().create_task(desks._remote(link, stock))
+            try:
+                await _until(lambda: started.exists() and started.read_text() == "old-password\n")
+                desks._sessions["moto-g57"] = Held("moto-g57", "agent_a", "g", "n", "A", "s", 0)
+                both = await asyncio.gather(desks.set_password("moto-g57", "new-password"), desks.set_password("moto-g57", "new-password"))
+                assert both == [str(password), str(password)]
+                await _until(lambda: started.read_text() == "old-password\nnew-password\n")
+                await asyncio.sleep(0.2)
+                assert started.read_text() == "old-password\nnew-password\n", "two calls at once started two bridges"
+                assert "moto-g57" not in desks._sessions and len(told) == 1 and "session there ended" in told[0], told
+                assert password.read_text() == "new-password" and password.stat().st_mode & 0o777 == 0o600
+                rows = {row["name"]: row for row in desks.pcs()}
+                assert rows["moto-g57"]["password_file"] == str(password) and rows["deus"]["password_file"] is None
+                assert "new-password" not in json.dumps(rows, default=str)
+                try:
+                    await desks.set_password("deus", "new-password")
+                except DeskRefused as refused:
+                    assert "keeps no password" in str(refused)
+                else:
+                    raise AssertionError("a RigDesk PC was given a password")
+            finally:
+                if link.remote is not None:
+                    link.remote.cancel()
+                    await asyncio.gather(link.remote, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

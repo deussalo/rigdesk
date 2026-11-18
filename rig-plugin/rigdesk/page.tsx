@@ -58,6 +58,7 @@ type PcRow = {
   readonly shell?: PcShell | null | undefined
   readonly health?: PcHealth | null | undefined
   readonly adhoc?: { readonly id: string; readonly via: string } | null | undefined
+  readonly password_file?: string | null | undefined
 }
 type Listener = {
   readonly role: 'hbbs' | 'hbbr'
@@ -448,6 +449,27 @@ function StockButtons({ pc, minted }: { readonly pc: PcRow; readonly minted: (li
   )
 }
 
+/** A stock PC's saved password: where Rig keeps it, never what it is, and a field that replaces it; its bridge logs in with the new one at once. */
+function SavedPassword({ pc, file }: { readonly pc: PcRow; readonly file: string }): ReactNode {
+  const [password, setPassword] = useState('')
+  const wrong = password === '' || PASSWORD.test(password) ? null : '6 to 128 characters, no spaces'
+  const save = async (): Promise<Refused | null> => {
+    const set = await routes('POST', 'password', { pc: pc.name, password })
+    if (!set.ok) return told('password not saved', set.refused)
+    setPassword('')
+    tell({ key: `rigdesk:password:${pc.name}`, tone: 'info', source: 'RigDesk', message: `${pc.name}: password saved; its bridge is logging in with it` })
+    return null
+  }
+  return (
+    <BoardPart name="saved password">
+      <Text text={`kept in ${file}, not shown here`} ink="idle" size="xs" />
+      <Field kind="text" label="new password" value={password} placeholder="the PC's permanent RustDesk password" invalid={wrong} onChange={value => { setPassword(textOf(value)) }}
+        about="Replaces the one Rig logs in with, as the PC now has it; Rig keeps it in that file and never in settings." />
+      <BoardBar><Action label="save" tone="outlined" pending="saving…" disabled={!password || wrong !== null} onInvoke={save} /></BoardBar>
+    </BoardPart>
+  )
+}
+
 /** One PC as a row: its name, where it stands and who holds input, who is on it or why it is down, who is assigned, and stop while an agent is on it. */
 function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; readonly forFleet: boolean }): ReactNode {
   const [open, setOpen] = useRememberedFold('rigdesk-pc', pc.name, 'closed')
@@ -496,6 +518,7 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
       {pc.shell == null ? null : <BoardPart name="agent shell"><Shell pc={pc} shell={pc.shell} now={now} forFleet={forFleet} /></BoardPart>}
       <BoardPart name="screen"><Screenshot pc={pc} now={now} /></BoardPart>
       {pc.stock && pc.adhoc == null ? <Assign pc={pc} forFleet={forFleet} /> : null}
+      {pc.password_file == null ? null : <SavedPassword pc={pc} file={pc.password_file} />}
       {pc.stock || pc.mcp === undefined ? null : <McpSwitch pc={pc} mcp={pc.mcp} />}
       {pc.stock ? <StockButtons pc={pc} minted={setLink} /> : <Quiet>shared from the RigDesk viewer</Quiet>}
     </BoardRow>
