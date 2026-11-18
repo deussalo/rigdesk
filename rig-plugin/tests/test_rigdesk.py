@@ -727,9 +727,13 @@ def test_the_pcs_journal_is_told_a_join_was_the_persons_and_not_the_operators() 
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
             asks = _Asks("desk_1")
+            refused: list[str] = []
 
-            async def then(_seat: SeatId, ask: str, _choice: str, _by: str) -> str:
-                await desks.join_approved("front", "a1", "g", "n", "Builder", ask)
+            async def then(_seat: SeatId, ask: str, choice: str, _by: str) -> str:
+                if choice == "accept":
+                    await desks.join_approved("front", "a1", "g", "n", "Builder", ask)
+                else:
+                    refused.append(ask)
                 return "answered"
             desks = Desks(SimpleNamespace(state_dir=Path(state), confirming=asks.confirming, confirm_answered=then))  # type: ignore[arg-type]
 
@@ -745,6 +749,12 @@ def test_the_pcs_journal_is_told_a_join_was_the_persons_and_not_the_operators() 
                 await _until(lambda: "front" in desks._sessions)
                 del desks._sessions["front"]
                 await desks.join_approved("front", "a1", "g", "n", "Builder", "desk_2")
+                del desks._sessions["front"]
+                prompts.start(desks, "front", "desk_3", seat, "a1", "g", "Builder")
+                await _until(lambda: any(path == "/offer" and body["ask"] == "desk_3" for path, body in posted))
+                nonce = next(body["nonce"] for path, body in posted if path == "/offer" and body["ask"] == "desk_3")
+                await desks._event(link, {"type": "offer", "ask": "desk_3", "nonce": nonce, "answer": "deny"})
+                await _until(lambda: refused == ["desk_3"])
             finally:
                 await prompts.end_all(desks)
                 await desks._http.close()
