@@ -30,7 +30,9 @@ import java.util.Date
  * screen. RigDesk keeps Rig's public pairing key, fetched with Rig Assistant's address and token whenever the service
  * starts or that setup changes, and accepts only invites Rig proves with its private half. One notification shows the
  * state the device reports: Make invite (for any agent, for one remembered from an earlier session, or for one by id),
- * the open invite with Copy and Revoke, or the agent using the phone with End, and the last refused attempt.
+ * the open invite with Copy and Revoke, or the agent using the phone with End, and the last refused attempt. Rig reaches
+ * the phone over the tailnet, and only if its settings name this phone's address, which the phone cannot see: every
+ * invite says so.
  */
 class RigInvite(private val service: MainService) {
     private val main = Handler(Looper.getMainLooper())
@@ -40,12 +42,12 @@ class RigInvite(private val service: MainService) {
     private val setupChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> pairSoon() }
 
     @Volatile private var closed = false
+    @Volatile private var pairAgainAtMs = 0L
     private var poller: Thread? = null
 
     // Main thread only.
     private var link: String? = null
     private var shown = ""
-    private var paired = false
     private var pairWhy = "not paired with Rig yet"
 
     fun start() {
@@ -103,7 +105,7 @@ class RigInvite(private val service: MainService) {
     private fun copy(text: String) {
         val clipboard = service.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("RigDesk invite", text))
-        note("Invite link copied: give it to the agent in Rig")
+        note("Invite link copied. $REACH")
     }
 
     /** The agents that used this phone by invite, newest first, as (id, title): the person can invite one of them again. */
@@ -127,15 +129,19 @@ class RigInvite(private val service: MainService) {
 
     private fun pairSoon() {
         Thread({
-            val (paired, why) = pair()
-            main.post { this.paired = paired; pairWhy = why; refresh() }
+            val why = pair()
+            pairAgainAtMs = if (why.isEmpty()) 0L else System.currentTimeMillis() + PAIR_RETRY_MS
+            main.post { pairWhy = why; refresh() }
         }, "rigdesk-invite-pair").apply { isDaemon = true; start() }
     }
 
-    /** Fetches Rig's public pairing key and gives it to RigDesk; whether the phone is paired, and why not. */
-    private fun pair(): Pair<Boolean, String> {
+    /** A key RigDesk already keeps still proves invites while Rig cannot be asked for it again. */
+    private fun paired(): Boolean = FFI.getLocalOption(PAIR_KEY_OPTION).isNotEmpty()
+
+    /** Fetches Rig's public pairing key and gives it to RigDesk; why it could not, or nothing. */
+    private fun pair(): String {
         val (config, why) = Config.load(service)
-        if (config == null) return false to "Rig Assistant is $why"
+        if (config == null) return "Rig Assistant is $why"
         return try {
             val http = (URL(config.origin + PAIR_KEY_ROUTE).openConnection() as HttpURLConnection).apply {
                 setRequestProperty("Authorization", "Bearer ${config.token}")
@@ -144,21 +150,25 @@ class RigInvite(private val service: MainService) {
             }
             try {
                 val status = http.responseCode
-                if (status != 200) return false to "Rig answered HTTP $status for its pairing key"
+                if (status != 200) return "Rig answered HTTP $status for its pairing key"
                 val key = JSONObject(http.inputStream.bufferedReader().use { it.readText() }).optString("key")
-                if (FFI.invitePairKey(key)) true to "" else false to "Rig's pairing key was not one RigDesk takes"
+                if (FFI.invitePairKey(key)) "" else "Rig's pairing key was not one RigDesk takes"
             } finally {
                 http.disconnect()
             }
         } catch (e: Exception) {
             Log.w(TAG, "pairing key not fetched: $e")
-            false to "Rig did not answer for its pairing key: ${e.message ?: e.javaClass.simpleName}"
+            "Rig did not answer for its pairing key: ${e.message ?: e.javaClass.simpleName}"
         }
     }
 
     private fun poll() {
         while (!closed) {
             main.post(::refresh)
+            if (pairAgainAtMs != 0L && System.currentTimeMillis() >= pairAgainAtMs) {
+                pairAgainAtMs = 0L
+                pairSoon()
+            }
             try {
                 Thread.sleep(POLL_MS)
             } catch (e: InterruptedException) {
@@ -180,40 +190,43 @@ class RigInvite(private val service: MainService) {
             .setColor(ContextCompat.getColor(service, R.color.primary))
             .setOnlyAlertOnce(true)
         val key: String
+        val words: String
         when {
             holder != null -> {
                 val title = holder.optString("title").ifEmpty { holder.optString("agent") }
                 key = "held:${holder.optString("agent")}"
                 if (key != shown) remember(holder.optString("agent"), title)
+                words = "A Rig agent, by your invite. End takes the phone back."
                 builder.setOngoing(true)
                     .setContentTitle("$title is using this phone")
-                    .setContentText("A Rig agent, by your invite. End takes the phone back.")
                     .addAction(0, "End", action(ACT_END))
             }
             open != null -> {
                 val forAgent = if (open.isNull("agent")) "" else open.optString("agent")
                 key = "open:${open.optLong("until_ms")}:$forAgent:${link != null}:$lastRefused"
                 val forWho = if (forAgent.isEmpty()) "" else " for $forAgent"
+                val who = if (forAgent.isEmpty()) "The first Rig agent to use it gets this phone, once."
+                          else "Only Rig agent $forAgent can use it, once. Revoke it if the id is wrong."
+                words = listOfNotNull(lastRefused, who, REACH).joinToString(" ")
                 builder.setOngoing(true)
                     .setContentTitle("Invite$forWho open until ${clock(open.optLong("until_ms"))}")
-                    .setContentText(lastRefused ?: if (forAgent.isEmpty()) "The first Rig agent to use it gets this phone, once."
-                                                   else "Only Rig agent $forAgent can use it, once. Revoke it if the id is wrong.")
                 if (link != null) builder.addAction(0, "Copy", action(ACT_COPY))
                 builder.addAction(0, "Revoke", action(ACT_REVOKE))
             }
-            !paired -> {
+            !paired() -> {
                 key = "unpaired:$pairWhy"
+                words = pairWhy
                 builder.setOngoing(false)
                     .setContentTitle("Rig invites are off")
-                    .setContentText(pairWhy)
             }
             else -> {
                 val last = remembered().firstOrNull()
                 key = "idle:${MainService.isStart}:$lastRefused:${last?.first}"
+                val next = if (MainService.isStart) "Make a link and give it to an agent in Rig."
+                           else "Start sharing the screen first: the phone answers an invite only while it shares."
+                words = listOfNotNull(lastRefused, next, REACH).joinToString(" ")
                 builder.setOngoing(false)
                     .setContentTitle("Invite a Rig agent")
-                    .setContentText(lastRefused ?: if (MainService.isStart) "Make an invite link and give it to an agent in Rig."
-                                    else "Start sharing the screen first: the phone answers an invite only while it shares.")
                 if (MainService.isStart) {
                     builder.addAction(0, "Make invite", action(ACT_MINT))
                     last?.let { (id, title) -> builder.addAction(0, "For ${title.ifEmpty { id }}", action(ACT_MINT_FOR, id)) }
@@ -221,7 +234,7 @@ class RigInvite(private val service: MainService) {
                 }
             }
         }
-        lastRefused?.let { builder.setStyle(NotificationCompat.BigTextStyle().bigText(it)) }
+        builder.setContentText(words).setStyle(NotificationCompat.BigTextStyle().bigText(words))
         if (key == shown) return
         shown = key
         notifications.notify(NOTIFY_ID, builder.build())
@@ -252,6 +265,9 @@ class RigInvite(private val service: MainService) {
         private const val CHANNEL = "rig-invite"
         private const val NOTIFY_ID = 7_301
         private const val POLL_MS = 2_000L
+        private const val PAIR_RETRY_MS = 5 * 60_000L
+        private const val PAIR_KEY_OPTION = "rigdesk-invite-key"
+        private const val REACH = "Rig reaches this phone only over Tailscale, and only if Rig's settings list it."
         private const val PAIR_KEY_ROUTE = "/api/contributions/rigdesk/routes/pair_key"
         private const val REMEMBERED = 3
         private const val BY_ID_REQUEST = 7_302
