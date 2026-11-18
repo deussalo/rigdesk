@@ -108,6 +108,9 @@ class MainService : Service() {
             "is_start" -> {
                 isStart.toString()
             }
+            "is_ready" -> {
+                isReady.toString()
+            }
             else -> ""
         }
     }
@@ -129,10 +132,16 @@ class MainService : Service() {
                         translate("Share screen")
                     }
                     if (authorized) {
-                        if (!isFileTransfer && !isStart) {
-                            startCapture()
+                        val capturing = isFileTransfer || startCapture()
+                        val seesScreen = !isFileTransfer &&
+                            !jsonObject.optBoolean("is_terminal") &&
+                            !jsonObject.optBoolean("is_view_camera") &&
+                            jsonObject.optString("port_forward").isEmpty()
+                        if (capturing || !seesScreen) {
+                            onClientAuthorizedNotification(id, type, username, peerId)
+                        } else {
+                            noPictureNotification(id, username)
                         }
-                        onClientAuthorizedNotification(id, type, username, peerId)
                     } else {
                         loginRequestNotification(id, type, username, peerId)
                     }
@@ -142,7 +151,7 @@ class MainService : Service() {
             }
             "remove_connection" -> {
                 val id = arg1.toIntOrNull() ?: return
-                if (rigRequests.contains(id)) {
+                if (noPicture.remove(id) || rigRequests.contains(id)) {
                     cancelNotification(id)
                 }
             }
@@ -269,6 +278,9 @@ class MainService : Service() {
 
     /// RigDesk: the connections whose Rig agent request is on the notifications.
     private val rigRequests: MutableSet<Int> = Collections.synchronizedSet(HashSet())
+
+    /// RigDesk: the connections let in while the screen is not captured: capture starts for them once it is allowed.
+    private val noPicture: MutableSet<Int> = Collections.synchronizedSet(HashSet())
 
     private var agentStop: AgentStop? = null
     private var rigInvite: RigInvite? = null
@@ -475,7 +487,7 @@ class MainService : Service() {
         resultIntent: Intent,
     ) {
         val wasCapturing = isStart
-        val restartCapture = wasCapturing || captureRestartPending
+        val restartCapture = wasCapturing || captureRestartPending || noPicture.isNotEmpty()
         val restartInVoiceCall = if (wasCapturing) {
             audioRecordHandle.isVoiceCallActive()
         } else {
@@ -634,6 +646,10 @@ class MainService : Service() {
         _isStart = true
         FFI.setFrameRawEnable("video",true)
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
+        noPicture.toTypedArray().forEach {
+            noPicture.remove(it)
+            cancelNotification(it)
+        }
         return true
     }
 
@@ -1000,13 +1016,30 @@ class MainService : Service() {
         val clientID = intent.getIntExtra(EXT_LOGIN_REQ_ID, -1)
         val allow = intent.getBooleanExtra(EXT_LOGIN_REQ_NOTIFY, false)
         if (clientID < 0) return
-        if (!FFI.cmLoginRes(clientID, allow)) {
+        val answered = FFI.cmLoginRes(clientID, allow)
+        if (!answered) {
             Log.w(logTag, "the Rig request $clientID could not be answered from its notification")
-        } else if (allow) {
-            // With the app closed nothing else starts it: the dialog's Accept does, and a login that is in at once.
-            startCapture()
         }
+        // With the app closed nothing else starts it: the dialog's Accept does, and a login that is in at once.
+        val noCapture = answered && allow && !startCapture()
         cancelNotification(clientID)
+        if (noCapture) {
+            noPictureNotification(clientID, "The Rig agent")
+        }
+    }
+
+    /// RigDesk: whoever was let in sees nothing until capture runs, and the person at the phone is the one who can start it.
+    @Synchronized
+    private fun noPictureNotification(clientID: Int, who: String) {
+        if (isStart) return
+        noPicture.add(clientID)
+        val notification = notificationBuilder
+            .setOngoing(false)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setContentTitle("$who can't see this screen")
+            .setContentText(if (isReady) "RigDesk could not start screen capture" else "Screen capture is off: tap Start service in RigDesk")
+            .build()
+        notificationManager.notify(getClientNotifyID(clientID), notification)
     }
 
     private fun onClientAuthorizedNotification(

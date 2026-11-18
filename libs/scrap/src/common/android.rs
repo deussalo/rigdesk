@@ -197,3 +197,9 @@ pub fn is_start() -> Option<bool> {
     let res = call_main_service_get_by_name("is_start").ok()?;
     Some(res == "true")
 }
+
+/// Whether the person has allowed screen capture, without which no frame ever comes.
+pub fn is_capture_allowed() -> Option<bool> {
+    let res = call_main_service_get_by_name("is_ready").ok()?;
+    Some(res == "true")
+}
