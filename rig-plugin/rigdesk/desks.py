@@ -76,7 +76,7 @@ MCP_CALL_LIMIT_S = 310.0  # the PC waits 300 s on its server's answer
 MCP_PROTOCOL = "2025-06-18"
 MCP_TOOL = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 MCP_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
+LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9._-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
 type Grantee = Annotated[str, StringConstraints(pattern=r"^(agent|graph):[A-Za-z0-9_.:-]{1,128}$")]
@@ -271,6 +271,8 @@ class PcLink:
     shell: dict[str, Any] | None = None
     # The OS its agent API names in /health: "windows" or "linux"; None until it answers, or from a RigDesk older than that.
     os: str | None = None
+    # The host name the PC reports in /health, which its invites name it by; None until it answers, or from an older RigDesk.
+    host: str | None = None
     # A Linux PC's watch on its management lane, which says the agent shell's switch apart from the desktop's agent API.
     lane: asyncio.Task[None] | None = None
     # The PC's switch for sessions the operator starts from Rig, as it last said: {open, code, words}; None for a RigDesk without /join, or a stock PC.
@@ -359,8 +361,9 @@ def _grants(assigned: tuple[str, ...], agent: str, graph: str) -> bool:
     return bool({f"agent:{agent}", f"graph:{graph}"} & set(assigned))
 
 
-def pc_of_link(link: str, pcs: dict[str, DeskPc]) -> tuple[str, str, str] | str:
-    """The PC a share link names, and its grant and secret; or why it names none. The host is the PC's name, its URL's host, or that host's first label."""
+def pc_of_link(link: str, pcs: dict[str, DeskPc], hosts: dict[str, str] | None = None) -> tuple[str, str, str] | str:
+    """The PC a share link names, and its grant and secret; or why it names none. The host is the PC's name, its URL's host, or that host's first label;
+    or the host name the PC reported in hosts, by PC name, as an invite from its tray names it."""
     matched = LINK.match(link.strip())
     if matched is None:
         return ("that is not a RigDesk share link: one reads rigdesk://<pc>/<grant>#<secret>, copied with Share with agent in the viewer, or Invite a Rig agent in the PC's tray. "
@@ -369,6 +372,9 @@ def pc_of_link(link: str, pcs: dict[str, DeskPc]) -> tuple[str, str, str] | str:
     for name, spec in pcs.items():
         url_host = (urlsplit(spec.url).hostname or "").lower()
         if host in (name.lower(), url_host, url_host.split(".")[0]):
+            return name, matched["grant"], matched["secret"]
+    for name, reported in (hosts or {}).items():
+        if name in pcs and host == reported.lower():
             return name, matched["grant"], matched["secret"]
     return f"no RigDesk PC named {host} is set up in Rig (plugins.rigdesk.pcs); the operator adds it there"
 
@@ -873,6 +879,7 @@ class Desks:
             health = await answer.json()
         link.standing = health.get("standing")
         link.os = health["os"] if isinstance(health.get("os"), str) else None
+        link.host = health["host"] if isinstance(health.get("host"), str) else None
         if link.spec.lane_token_file is None:
             link.shell = _object(health["shell"]) if isinstance(health.get("shell"), dict) else None
         link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
@@ -1403,7 +1410,7 @@ class Desks:
 
     async def join(self, link_text: str, agent: str, graph: str, node: str, title: str, via: Literal["link", "assigned"] = "link") -> Held:
         settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
-        found = pc_of_link(link_text, dict(settings.pcs))
+        found = pc_of_link(link_text, dict(settings.pcs), {name: link.host for name, link in self._pcs.items() if link.host})
         if isinstance(found, str):
             raise DeskRefused(found)
         pc, grant, secret = found

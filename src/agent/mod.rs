@@ -92,6 +92,7 @@ pub fn start() {
     #[cfg(windows)]
     crate::platform::windows::agent_lane::manage(&api, &host.shared, &host.journal, data_dir());
     api.operator_joins(Arc::new(operator::PcSwitch { file: data_dir().map(|dir| dir.join(operator::SWITCH_FILE)) }));
+    api.names_host(invite::link_host());
     #[cfg(target_os = "linux")]
     operator::notify_starts();
     tokio::spawn(async move {
