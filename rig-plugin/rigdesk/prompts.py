@@ -1,10 +1,10 @@
 """The person at a PC answers an agent's desk/request on the PC itself, while the operator's ask stands in Rig: the PC's own accept prompt
 names the agent, and its Allow or Deny answers the operator's ask as the operator's would. The first answer wins; the other side is closed.
 
-A stock PC is knocked on by a rigdesk-bridge --knock that Rig starts for this one ask, which logs in with no password, so the PC shows RustDesk's
-accept prompt, and says on its stdout what the person answered. A RigDesk PC is sent POST /offer with the ask and a nonce Rig keeps to itself,
-over Rig's bearer, and shows the agent in its connection manager; the answer comes back on that PC's /events stream, and counts only when it
-names that PC, that ask and that nonce. Either way the answer is taken only while no agent holds a session on the PC, so no agent can click it."""
+Either PC is sent POST /offer with the ask and a nonce Rig keeps to itself, over Rig's bearer: a RigDesk PC shows the agent in its connection
+manager; a stock PC's rigdesk-bridge logs in to it with no password, so it shows RustDesk's own accept prompt, and on Allow that connection
+carries the session, so no password is used. The answer comes back on the PC's /events stream, and counts only when it names that PC, that ask
+and that nonce. It is taken only while no agent holds a session on the PC, so no agent can click it."""
 from __future__ import annotations
 
 import asyncio
@@ -21,12 +21,11 @@ from core.model import SeatId
 from core.tasks import TASKS, scoped
 
 if TYPE_CHECKING:
-    from .desks import Desks, PcLink, StockRemote
+    from .desks import Desks, PcLink
 
 _LOG = event_log(__name__)
 OPEN_EVERY_S = 2.0
 SHOWS = 3
-KNOCK_SAID = {"allowed": "allow", "dismissed": "deny"}
 
 
 @dataclass
@@ -77,9 +76,9 @@ def answered(desks: Desks, link: PcLink, event: dict[str, Any]) -> None:
 
 async def _prompting(desks: Desks, prompt: Prompt) -> None:
     try:
-        stock, said = desks.stock_of(prompt.pc), None
+        said = None
         for _ in range(SHOWS):
-            said = await _while_open(desks, prompt, _knocked(desks, prompt, stock) if stock is not None else _offered(desks, prompt))
+            said = await _while_open(desks, prompt, _offered(desks, prompt))
             if said != "lapsed":
                 break
         if said in ("allow", "deny"):
@@ -110,41 +109,8 @@ async def _while_open(desks: Desks, prompt: Prompt, shown: Awaitable[str]) -> st
             await asyncio.gather(task, return_exceptions=True)
 
 
-async def _knocked(desks: Desks, prompt: Prompt, stock: StockRemote) -> str:
-    """A stock PC: RustDesk's own accept prompt, from a bridge that logs in with no password. Lapsed only when the prompt was shown."""
-    bridge, *route = desks.bridge_argv(stock)
-    process = await asyncio.create_subprocess_exec(bridge, "--knock", "--name", f"{prompt.title} (Rig agent)", *route,
-                                                   stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    shown, last = False, "it ended without an answer"
-    try:
-        assert process.stdout is not None
-        async for raw in process.stdout:
-            line = raw.decode(errors="replace").strip()
-            if line == "waiting":
-                shown = True
-            elif line in KNOCK_SAID:
-                return KNOCK_SAID[line]
-            elif line.startswith("lapsed"):
-                return "lapsed" if shown else line
-            elif line:
-                last = line
-        return last
-    finally:
-        await _stopped(process)
-
-
-async def _stopped(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    process.terminate()
-    try:
-        await asyncio.wait_for(asyncio.shield(process.wait()), 5)
-    except TimeoutError:
-        process.kill()
-
-
 async def _offered(desks: Desks, prompt: Prompt) -> str:
-    """A RigDesk PC: the agent in its connection manager, answered by an offer event; taken away with POST /offer/end when Rig answers first."""
+    """The agent in the PC's own prompt, answered by an offer event; taken away with POST /offer/end when Rig answers first."""
     url, headers = desks.offer_at(prompt.pc)
     prompt.offered = asyncio.get_running_loop().create_future()
     body = {"agent": {"id": prompt.agent, "title": prompt.title, "graph": prompt.graph}, "ask": prompt.ask, "nonce": prompt.nonce}

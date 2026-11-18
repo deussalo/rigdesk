@@ -120,7 +120,8 @@ class StockRemote(Shape):
                                                                                  "by direct IP over the tailnet (peer) or by its RustDesk ID through the ID server (id)."})
     peer: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$")] | None, Field(description="The PC on the tailnet: its MagicDNS name or 100.x address, with :port if not 21118.")] = None
     id: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{6,32}$")] | None, Field(description="The PC's RustDesk ID, digits without spaces, for a PC registered with the id_server instead of on the tailnet.")] = None
-    password_file: Annotated[str, Field(description="A file readable by this user alone holding the PC's RustDesk permanent password.")]
+    password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the PC's RustDesk permanent password, for unattended access. "
+                                                       "Unset, an agent joins only when the person at the PC presses Allow on desk/request's prompt there.")] = None
     viewer_port: Annotated[int | None, Field(ge=1, le=65535, description="Where the bridge relays its session to RigDesk GUIs, on loopback (publish it with tailscale serve --tcp); unset, no GUI can attach.")] = None
     viewer_password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the password GUIs log in to the bridge with.")] = None
     mcp_servers: Annotated[list[StockMcpServer], Field(description="MCP servers on the PC's own address that the bridge offers the holding agent.")] = []
@@ -765,7 +766,7 @@ class Desks:
     async def _remote(self, link: PcLink, stock: StockRemote) -> None:
         """Keeps one rigdesk-bridge running for a stock PC, restarting it when it exits; its output goes to bridge-<pc>.log here."""
         argv = [str(Path(self._bridge_bin).expanduser()) if "/" in self._bridge_bin else self._bridge_bin,
-                *self._route(stock), "--password-file", str(Path(stock.password_file).expanduser()),
+                *self._route(stock), *([] if stock.password_file is None else ["--password-file", str(Path(stock.password_file).expanduser())]),
                 "--token-file", str(Path(link.spec.token_file).expanduser()), "--port", str(urlsplit(link.spec.url).port),
                 "--journal", str(self._dir / f"bridge-{link.name}.journal")]
         if stock.viewer_port is not None and stock.viewer_password_file is not None:
@@ -1719,12 +1720,6 @@ class Desks:
 
     def held_on(self, pc: str) -> Held | None:
         return self._sessions.get(pc)
-
-    def stock_of(self, pc: str) -> StockRemote | None:
-        return self._link(pc).spec.stock
-
-    def bridge_argv(self, stock: StockRemote) -> list[str]:
-        return [str(Path(self._bridge_bin).expanduser()) if "/" in self._bridge_bin else self._bridge_bin, *self._route(stock)]
 
     def offer_at(self, pc: str) -> tuple[str, dict[str, str]]:
         link = self._link(pc)
