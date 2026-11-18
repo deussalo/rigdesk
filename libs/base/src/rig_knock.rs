@@ -84,12 +84,6 @@ impl Refusal {
             Refusal::OtherDialer => "This login comes from another address than the one Rig signed",
         }
     }
-
-    /// Only a signature that fails is an attempt on the device. Rig itself knocks unproved at a device it is not paired
-    /// with, or from an address the device sees differently, and must not lock itself out of password logins.
-    pub fn counts_as_failure(self) -> bool {
-        self == Refusal::BadProof
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -223,7 +217,6 @@ mod tests {
         let relayed = check(Some(&public), Some(&good), &elsewhere).unwrap_err();
         assert_eq!(relayed, Refusal::OtherDialer, "brought here by another PC");
         assert_ne!(relayed.words(), Refusal::BadProof.words(), "Rig and the log can tell this from a wrong key");
-        assert!(!relayed.counts_as_failure());
         let readdressed = RigKnock { dialer: "100.64.0.2".into(), ..good.clone() };
         assert_eq!(check(Some(&public), Some(&readdressed), &elsewhere), Err(Refusal::BadProof), "an address Rig did not sign");
 
@@ -238,7 +231,6 @@ mod tests {
         let refused = check(None, Some(&knock(&secret, &here)), &here).unwrap_err();
         assert_eq!(refused, Refusal::NotPaired);
         assert_eq!(refused.words(), "This device is not paired with Rig");
-        assert!(!refused.counts_as_failure() && !Refusal::NoProof.counts_as_failure() && Refusal::BadProof.counts_as_failure());
     }
 
     #[test]

@@ -45,9 +45,6 @@ impl Connection {
         let proved = match rig_knock::verify(lr.rig_knock.as_ref(), &login) {
             Ok(proved) => proved,
             Err(refusal) => {
-                if refusal.counts_as_failure() {
-                    self.update_failure_with_scope(failure, false, 0, FailureScope::Default);
-                }
                 match refusal {
                     rig_knock::Refusal::OtherDialer => hbb_common::throttled_log!(
                         Duration::from_secs(60),
