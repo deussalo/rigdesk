@@ -307,6 +307,9 @@ class PcLink:
     join: dict[str, Any] | None = None
     sampling: asyncio.Lock = field(default_factory=asyncio.Lock)
     samples_why: str | None = None
+    # The newest password asked for and not yet saved, and the one task saving it, which takes any that arrive meanwhile, so saves at once start one bridge.
+    password_wanted: str | None = None
+    saving_password: asyncio.Task[None] | None = None
 
 
 @dataclass
@@ -540,7 +543,7 @@ class Desks:
         TASKS.spawn("rigdesk-adhoc-lost", self._adhoc_restarted())
 
     async def end(self, _ending: LiveEnding) -> None:
-        tasks = [task for task in (self._watch, self._probe, *(task for link in self._pcs.values() for task in (link.task, link.remote, link.lane))) if task is not None]
+        tasks = [task for task in (self._watch, self._probe, *(task for link in self._pcs.values() for task in (link.task, link.remote, link.lane, link.saving_password))) if task is not None]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -801,9 +804,19 @@ class Desks:
             path.chmod(0o600)
         replace_file(path, value.encode(), new_mode=0o600)
 
+    async def _wanted_password_saved(self, link: PcLink, path: Path, saved: str | None = None) -> str | None:
+        """Writes the newest password asked for until no newer one is waiting, and returns what the file now holds from this run; None if nothing was waiting."""
+        while (wanted := link.password_wanted) is not None:
+            if wanted != saved:
+                await asyncio.to_thread(self._replaced_secret, path, wanted)
+                saved = wanted
+            if link.password_wanted == wanted:
+                link.password_wanted = None
+        return saved
+
     async def set_password(self, pc: str, password: str) -> str:
         """Replaces a stock PC's saved password in the file its entry names, and restarts its rigdesk-bridge so it logs in with it now. A session an
-        agent holds there ends with the bridge, and the agent's next desk call says so."""
+        agent holds there ends with the bridge, and the agent's next desk call says so. Calls at once end in one restart, with the newest password."""
         link = self._pcs.get(pc)
         if link is None or pc in self._adhoc:
             raise DeskRefused(f"no PC named {pc} is set up in Rig's settings")
@@ -811,22 +824,37 @@ class Desks:
         if stock is None:
             raise DeskRefused(f"{pc} is a RigDesk PC: Rig reaches it with its token, so it keeps no password")
         path = stock.password_file
-        await asyncio.to_thread(self._replaced_secret, Path(path).expanduser(), password)
+        link.password_wanted = password
+        if link.saving_password is None or link.saving_password.done():
+            link.saving_password = TASKS.spawn(f"rigdesk-password-{pc}", self._wanted_password_applied(link, stock, Path(path).expanduser()))
+        # Shielded: a call cancelled halfway must leave neither a stopped bridge nor a write still running beside the next one.
+        await asyncio.shield(link.saving_password)
+        return path
+
+    async def _wanted_password_applied(self, link: PcLink, stock: StockRemote, file: Path) -> None:
+        pc = link.name
+        saved = await self._wanted_password_saved(link, file)
         old = link.remote
         if old is not None:
             old.cancel()
             await asyncio.gather(old, return_exceptions=True)
-        held = self._sessions.pop(pc, None)
-        if held is not None:
-            self._unsent.pop(pc, None)
-            await asyncio.to_thread(self._write_state)
-            await self._ended(held, f"RigDesk {pc}: the operator replaced its saved password, which restarts its bridge, so your session there ended. "
-                                    "desk/join or desk/request it again.")
-        # A settings change that replaced the link, or another call, started the bridge already, and it reads the new file.
+        failed: Exception | None = None
+        try:
+            held = self._sessions.pop(pc, None)
+            if held is not None:
+                self._unsent.pop(pc, None)
+                await asyncio.to_thread(self._write_state)
+                await self._ended(held, f"RigDesk {pc}: the operator replaced its saved password, which restarts its bridge, so your session there ended. "
+                                        "desk/join or desk/request it again.")
+            await self._wanted_password_saved(link, file, saved)
+        except Exception as error:  # noqa: BLE001
+            failed = error
+        # The bridge was stopped, so it comes back even after a failure. A settings change that replaced the link started it already, and it reads the new file.
         if self._pcs.get(pc) is link and link.remote is old:
             link.remote = TASKS.spawn(f"rigdesk-bridge-{pc}", self._remote(link, stock))
+        if failed is not None:
+            raise failed
         _LOG.info("rigdesk_password_set", f"RigDesk {pc}: the operator replaced its saved password, and its rigdesk-bridge restarted", pc=pc)
-        return path
 
     # --- rigdesk-bridge, for a stock PC ---
 

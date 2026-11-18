@@ -2,6 +2,7 @@
 import asyncio
 import json
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -980,6 +981,107 @@ async def _until(check, limit_s: float = 5.0) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("never happened")
+
+
+def test_passwords_saved_at_once_start_one_bridge_and_the_newest_one_stays() -> None:
+    from rigdesk.desks import StockRemote
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state), report=lambda *_: None))  # type: ignore[arg-type]
+            password, started = Path(state) / "phone.password", Path(state) / "started"
+            password.write_text("old-password")
+            bridge = Path(state) / "bridge"
+            bridge.write_text(f"#!/bin/sh\nwhile [ \"$1\" != --password-file ]; do shift; done\ncat \"$2\" >> {started}; echo >> {started}\nexec sleep 60\n")
+            bridge.chmod(0o700)
+            desks._bridge_bin = str(bridge)
+            stock = StockRemote(peer="moto-g57.tail1234.ts.net", password_file=str(password))
+            link = desks._pcs["moto-g57"] = PcLink("moto-g57", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
+            link.remote = asyncio.get_running_loop().create_task(desks._remote(link, stock))
+            write = desks._replaced_secret
+            writes: list[str] = []
+
+            def first_write_is_slow(path: Path, value: str) -> None:
+                writes.append(value)
+                if len(writes) == 1:
+                    time.sleep(0.3)
+                write(path, value)
+            desks._replaced_secret = first_write_is_slow  # type: ignore[method-assign]
+
+            async def save_after_the_first_began() -> None:
+                await asyncio.sleep(0.05)
+                await desks.set_password("moto-g57", "last-password")
+            try:
+                await _until(lambda: started.exists() and started.read_text() == "old-password\n")
+                await asyncio.gather(desks.set_password("moto-g57", "first-password"), save_after_the_first_began())
+                await _until(lambda: started.read_text() != "old-password\n")
+                await asyncio.sleep(0.3)
+                assert started.read_text() == "old-password\nlast-password\n"
+                assert password.read_text() == "last-password"
+            finally:
+                if link.remote is not None:
+                    link.remote.cancel()
+                    await asyncio.gather(link.remote, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_password_save_still_ends_with_the_newest_password_and_a_running_bridge() -> None:
+    from rigdesk.desks import StockRemote
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state), report=lambda *_: None))  # type: ignore[arg-type]
+            password, started = Path(state) / "phone.password", Path(state) / "started"
+            password.write_text("old-password")
+            bridge = Path(state) / "bridge"
+            bridge.write_text(f"#!/bin/sh\nwhile [ \"$1\" != --password-file ]; do shift; done\ncat \"$2\" >> {started}; echo >> {started}\nexec sleep 60\n")
+            bridge.chmod(0o700)
+            desks._bridge_bin = str(bridge)
+            stock = StockRemote(peer="moto-g57.tail1234.ts.net", password_file=str(password))
+            link = desks._pcs["moto-g57"] = PcLink("moto-g57", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
+            write = desks._replaced_secret
+            writes: list[str] = []
+
+            def first_write_is_slow(path: Path, value: str) -> None:
+                writes.append(value)
+                if len(writes) == 1:
+                    time.sleep(0.3)
+                write(path, value)
+            desks._replaced_secret = first_write_is_slow  # type: ignore[method-assign]
+
+            async def slow_to_stop() -> None:
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    await asyncio.sleep(0.2)
+                    raise
+
+            async def cancelled_soon(new_password: str) -> None:
+                call = asyncio.get_running_loop().create_task(desks.set_password("moto-g57", new_password))
+                await asyncio.sleep(0.05)
+                call.cancel()
+                await asyncio.gather(call, return_exceptions=True)
+            try:
+                await cancelled_soon("cancelled-in-its-write")
+                await desks.set_password("moto-g57", "newest-password")
+                await _until(lambda: started.exists())
+                await asyncio.sleep(0.3)
+                assert password.read_text() == "newest-password"
+                assert started.read_text() == "newest-password\n"
+
+                assert link.remote is not None
+                link.remote.cancel()
+                await asyncio.gather(link.remote, return_exceptions=True)
+                link.remote = asyncio.get_running_loop().create_task(slow_to_stop())
+                await cancelled_soon("cancelled-while-the-bridge-stops")
+                await _until(lambda: started.read_text().endswith("cancelled-while-the-bridge-stops\n"))
+            finally:
+                if link.remote is not None:
+                    link.remote.cancel()
+                    await asyncio.gather(link.remote, return_exceptions=True)
+
+    asyncio.run(run())
 
 
 def test_the_operator_replaces_a_stock_pcs_saved_password_and_its_bridge_logs_in_with_it_at_once() -> None:
