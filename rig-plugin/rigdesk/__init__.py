@@ -1019,6 +1019,19 @@ async def post_pc(request: Request[AddParams]) -> PcAdded | RefusedOutcome:
     return PcAdded(name=body.name, entry=added.model_dump(mode="json", exclude_none=True))
 
 
+class PairKeyView(View):
+    key: str = Field(description="Rig's public pairing key, base64: the device keeps it and accepts only invites proved with its private half.")
+
+
+@endpoint(NoParams, OPERATOR)
+async def get_pair_key(request: Request[NoParams]) -> PairKeyView | RefusedOutcome:
+    """Rig's public pairing key, made on first asking, for RigDesk on a device to keep."""
+    try:
+        return PairKeyView(key=await request.host().live(Desks).pair_key())
+    except DeskRefused as refused:
+        return request.refused(REFUSED, str(refused))
+
+
 CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, states=REPORTED,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
@@ -1028,4 +1041,5 @@ CONTRIBUTION = ContributionDescriptor(
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
             RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "screenshot", post_screenshot),
-            RouteContribution("POST", "shell_grant", post_shell_grant), RouteContribution("GET", "health", get_health), RouteContribution("GET", "shell_ran", get_shell_ran)))
+            RouteContribution("POST", "shell_grant", post_shell_grant), RouteContribution("GET", "health", get_health), RouteContribution("GET", "shell_ran", get_shell_ran),
+            RouteContribution("GET", "pair_key", get_pair_key)))

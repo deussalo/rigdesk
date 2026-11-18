@@ -11,7 +11,11 @@
 //!                  [--port 21120] [--journal <file>] [--name "Rig agent"] [--once] [--login-id <ID, with --peer>]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
 //!                  [--mcp-server http://<host>[:port][/path] [--mcp-token-file <file>]]...
+//!                  [--invite-file <file> --pair-key-file <file>, with --once]
+//!   rigdesk-bridge --pair-key <file>
 //!
+//! `--invite-file` redeems an invite the device made, with Rig's pairing key, in place of a password (see `invite`);
+//! `--pair-key` makes that key if the file has none and prints its public half, which the device keeps.
 //! With no `--password-file`, only a connection the person at the PC allows on Rig's `POST /offer` carries a session (see
 //! `knock`); with one, such a connection carries the session the same way, and the password serves unattended access.
 //! Each `--mcp-server` names an MCP server on the PC's own address (a phone's native tools, say), offered to the holding
@@ -19,6 +23,7 @@
 //! The passwords and the API bearer are read from files (0600) so they never sit on a command line.
 
 mod desk;
+mod invite;
 mod keys;
 mod knock;
 mod rendezvous;
@@ -46,6 +51,7 @@ struct Args {
     viewer: Option<(u16, PathBuf)>,
     servers: Vec<Remote>,
     once: bool,
+    invite: Option<(PathBuf, PathBuf)>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -63,6 +69,8 @@ fn parse_args() -> Result<Args, String> {
     let mut servers: Vec<(String, Option<PathBuf>)> = Vec::new();
     let mut once = false;
     let mut login_id = None;
+    let mut invite_file = None;
+    let mut pair_key_file = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -81,6 +89,8 @@ fn parse_args() -> Result<Args, String> {
             "--mcp-server" => servers.push((value()?, None)),
             "--once" => once = true,
             "--login-id" => login_id = Some(value()?),
+            "--invite-file" => invite_file = Some(PathBuf::from(value()?)),
+            "--pair-key-file" => pair_key_file = Some(PathBuf::from(value()?)),
             "--mcp-token-file" => match servers.last_mut() {
                 Some((_, file @ None)) => *file = Some(PathBuf::from(value()?)),
                 _ => return Err("--mcp-token-file follows the --mcp-server it is for, once".into()),
@@ -92,6 +102,11 @@ fn parse_args() -> Result<Args, String> {
         (Some(port), Some(file)) => Some((port, file)),
         (None, None) => None,
         _ => return Err("--viewer-port and --viewer-password-file go together".into()),
+    };
+    let invite = match (invite_file, pair_key_file) {
+        (Some(file), Some(key)) if once && password_file.is_none() => Some((file, key)),
+        (None, None) => None,
+        _ => return Err("--invite-file and --pair-key-file go together, with --once and no --password-file".into()),
     };
     if login_id.is_some() && peer.is_none() {
         return Err("--login-id goes with --peer".into());
@@ -124,6 +139,7 @@ fn parse_args() -> Result<Args, String> {
         viewer,
         servers,
         once,
+        invite,
     })
 }
 
@@ -138,13 +154,39 @@ fn read_secret(path: &PathBuf, what: &str) -> Result<String, String> {
 
 fn main() {
     hbb_common::env_logger::Builder::from_env(hbb_common::env_logger::Env::default().default_filter_or("info")).init();
-    let args = match parse_args() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let [flag, file] = argv.as_slice() {
+        if flag == "--pair-key" {
+            match invite::pair_key(std::path::Path::new(file)) {
+                Ok(public) => println!("{public}"),
+                Err(e) => {
+                    eprintln!("rigdesk-bridge: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+    }
+    let mut args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("rigdesk-bridge: {e}");
             std::process::exit(2);
         }
     };
+    let invite = match &args.invite {
+        Some((file, key)) => match invite::Invite::load(file, key) {
+            Ok(invite) => Some(invite),
+            Err(e) => {
+                eprintln!("rigdesk-bridge: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+    if let Some(invite) = &invite {
+        args.name = invite.display_name();
+    }
     let password = args.password_file.as_ref().map_or(Ok(String::new()), |file| read_secret(file, "password"));
     let (password, bearer) = match (password, read_secret(&args.token_file, "token")) {
         (Ok(p), Ok(t)) => (p, t),
@@ -176,6 +218,9 @@ fn main() {
         let link = link::Link::new(args.route, password, args.name.clone(), shared.clone());
         if args.once {
             link.set_once();
+        }
+        if let Some(invite) = invite {
+            link.set_invite(invite);
         }
         tokio::spawn(link.clone().run());
         let journal = match &args.journal {

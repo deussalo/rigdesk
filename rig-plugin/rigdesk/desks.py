@@ -77,6 +77,9 @@ MCP_PROTOCOL = "2025-06-18"
 MCP_TOOL = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 MCP_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
+# A device's own invite names it by RustDesk ID, as id.<id>; no PC's name or tailnet host reads so, as an ID holds no dot.
+INVITE_HOST = re.compile(r"^id\.(?P<id>[A-Za-z0-9_-]{6,32})$")
+PAIR_KEY = "invite-pair.key"
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
 type Grantee = Annotated[str, StringConstraints(pattern=r"^(agent|graph):[A-Za-z0-9_.:-]{1,128}$")]
@@ -329,6 +332,14 @@ class AdHoc:
     files: tuple[Path, ...] = ()
     watch: asyncio.Task[None] | None = None
     port: int | None = None
+    invited: bool = False
+
+
+@dataclass(frozen=True)
+class Invited:
+    """A device's invite link, in place of a password: the bridge proves it with Rig's pairing key, inside RustDesk's login."""
+    grant: str
+    secret: str
 
 
 @dataclass
@@ -1408,6 +1419,10 @@ class Desks:
         return link
 
     async def join(self, link_text: str, agent: str, graph: str, node: str, title: str, via: Literal["link", "assigned"] = "link") -> Held:
+        invite = LINK.match(link_text.strip())
+        device = None if invite is None else INVITE_HOST.match(invite["host"])
+        if invite is not None and device is not None:
+            return await self._join_invite(device["id"], Invited(invite["grant"], invite["secret"]), agent, graph, node, title)
         settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
         found = pc_of_link(link_text, dict(settings.pcs))
         if isinstance(found, str):
@@ -1690,6 +1705,47 @@ class Desks:
             await self._adhoc_closed(name, None)
             raise
 
+    async def pair_key(self) -> str:
+        """Rig's public pairing key, base64, made on first asking: the device keeps it and accepts only invites proved with its private half, which
+        stays in a 0600 file here."""
+        settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
+        bridge = str(Path(settings.bridge_bin).expanduser()) if "/" in settings.bridge_bin else settings.bridge_bin
+        await asyncio.to_thread(SECRETS.expanduser().mkdir, mode=0o700, parents=True, exist_ok=True)
+        try:
+            process = await asyncio.create_subprocess_exec(bridge, "--pair-key", str((SECRETS / PAIR_KEY).expanduser()), stdin=asyncio.subprocess.DEVNULL,
+                                                           stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        except OSError as failed:
+            raise DeskRefused(f"rigdesk-bridge could not start ({bridge}): {failed}") from failed
+        out, err = await asyncio.wait_for(process.communicate(), 15)
+        if process.returncode != 0:
+            raise DeskRefused(f"rigdesk-bridge gave no pairing key: {err.decode('utf-8', 'replace').strip() or f'exit code {process.returncode}'}")
+        return out.decode().strip()
+
+    async def _join_invite(self, device: str, invite: Invited, agent: str, graph: str, node: str, title: str) -> Held:
+        """Redeems a device's invite for this agent, which Rig names: the device spends the invite on the first login that proves Rig's key, so the first
+        agent to arrive owns the session and any later one is refused there."""
+        target = adhoc.target_of(device)
+        if isinstance(target, str):
+            raise DeskRefused(target)
+        mine = self.held_by(agent, graph)
+        if mine is not None:
+            raise DeskRefused(f"you already own the session on {mine.pc}; desk/leave it before joining another")
+        if not await asyncio.to_thread((SECRETS / PAIR_KEY).expanduser().exists):
+            raise DeskRefused("this Rig has no pairing key yet, so no device can have been paired with it: open RigDesk on the device while it reaches Rig, then invite again")
+        name = f"id-{target.id}"
+        settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
+        if name in self._pcs or name in self._adhoc or name in settings.pcs:
+            other = self._sessions.get(name)
+            raise DeskRefused(f"{other.title if other is not None else 'another agent'} holds {target.id} now" if name not in settings.pcs
+                              else f"{name} is set up in Rig's settings under the name an invite's session would take")
+        kept = self._adhoc[name] = AdHoc(target.id, invited=True)
+        try:
+            held, _ = await self._adhoc_joined(name, kept, target, invite, settings, agent, graph, node, title, True)
+            return held
+        except BaseException:
+            await self._adhoc_closed(name, None)
+            raise
+
     def connect_asked(self, ask: str, given_id: str, password: str, agent: str, seat: SeatId, route: tuple[str, dict[str, str]]) -> None:
         """Holds a desk/connect's password, in memory only, while the operator decides; it lapses unanswered after CONNECT_ASK_S, and the
         operator's request, whose Accept goes to route, is withdrawn."""
@@ -1737,10 +1793,16 @@ class Desks:
     async def tell_seat(self, pc: str, agent: str, seat: SeatId, words: str, key: str) -> bool:
         return await self._tell(Held(pc, agent, seat.graph, seat.node, "", key, now_ms()), words, key, "queue")
 
-    async def _adhoc_joined(self, name: str, kept: AdHoc, target: adhoc.Target, password: str, settings: RigdeskSettings,
+    async def _adhoc_joined(self, name: str, kept: AdHoc, target: adhoc.Target, password: str | Invited, settings: RigdeskSettings,
                             agent: str, graph: str, node: str, title: str, approved: bool) -> tuple[Held, str]:
         secret = f"adhoc-{target.id}"
-        password_file = Path(await asyncio.to_thread(self._keep_secret, secret, "password", password)).expanduser()
+        if isinstance(password, Invited):
+            claim = json.dumps({"grant": password.grant, "secret": password.secret, "agent_id": agent, "agent_title": title or agent})
+            password_file = Path(await asyncio.to_thread(self._keep_secret, secret, "invite", claim)).expanduser()
+            login = ("--invite-file", str(password_file), "--pair-key-file", str((SECRETS / PAIR_KEY).expanduser()))
+        else:
+            password_file = Path(await asyncio.to_thread(self._keep_secret, secret, "password", password)).expanduser()
+            login = ("--password-file", str(password_file))
         token_file = Path(await asyncio.to_thread(self._keep_secret, secret, "token", secrets.token_urlsafe(32))).expanduser()
         server = settings.connect_server
         key_file = Path(await asyncio.to_thread(self._keep_secret, secret, "key", target.key or (server.key if server is not None else adhoc.PUBLIC_KEY))).expanduser()
@@ -1749,7 +1811,14 @@ class Desks:
         routes = await self._adhoc_routes(target, settings, key_file, set(busy))
         # Only our own PCs are dialed unasked; any other waits for the operator's approval, and once given, ours are not tried again.
         outside = [] if approved else [route for route in routes if route.rigdesk is None]
-        routes = [route for route in routes if (route.rigdesk is None) == approved]
+        if isinstance(password, Invited):
+            # The person at the device made the invite, so reaching it needs no approval, and a phone off the tailnet is on our own ID server.
+            if settings.id_server is not None:
+                ours = adhoc.Route(("--id", target.id, "--id-server", settings.id_server.host, "--key-file", str(Path(settings.id_server.key_file).expanduser())),
+                                   f"the ID server {settings.id_server.host}")
+                routes.insert(sum(route.rigdesk is not None for route in routes), ours)
+        else:
+            routes = [route for route in routes if (route.rigdesk is None) == approved]
         unasked = "".join(f"; {pc} was not tried, as {holder} holds it" for pc, holder in sorted(busy.items()))
         bridge = str(Path(settings.bridge_bin).expanduser()) if "/" in settings.bridge_bin else settings.bridge_bin
         tried: list[str] = []
@@ -1760,7 +1829,7 @@ class Desks:
             port = kept.port = self._first_free(taken)
             log = await asyncio.to_thread(self._remote_log, name)
             try:
-                process = await asyncio.create_subprocess_exec(bridge, *route.argv, "--password-file", str(password_file), "--token-file", str(token_file),
+                process = await asyncio.create_subprocess_exec(bridge, *route.argv, *login, "--token-file", str(token_file),
                                                                "--port", str(port), "--once", "--journal", str(self._dir / f"bridge-{name}.journal"),
                                                                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=log, start_new_session=True)
             except OSError as failed:
@@ -1783,7 +1852,8 @@ class Desks:
                 raise ConnectAsk(target.id, outside[0].words, tuple(tried))
             raise DeskRefused(f"{target.id} could not be reached")
         assert kept.process is not None
-        stock = StockRemote(peer=route.argv[1], password_file=str(password_file)) if route.rigdesk is not None else StockRemote(id=target.id, password_file=str(password_file))
+        kept_password = None if isinstance(password, Invited) else str(password_file)
+        stock = StockRemote(peer=route.argv[1], password_file=kept_password) if route.rigdesk is not None else StockRemote(id=target.id, password_file=kept_password)
         link = self._pcs[name] = PcLink(name, DeskPc(url=f"http://127.0.0.1:{port}", token_file=str(token_file), stock=stock, mcp=False))
         link.task = TASKS.spawn(f"rigdesk-{name}", self._held(link))
         kept.watch = TASKS.spawn(f"rigdesk-adhoc-{name}", self._adhoc_watch(name, kept.process))
@@ -1837,8 +1907,9 @@ class Desks:
         self.host.forget(PC, self._pcs.keys())
         if held is not None and why is not None:
             _LOG.info("rigdesk_session_ended", f"RigDesk {name}: {held.title}'s ad-hoc session ended: {why}", pc=name)
-            await self._ended(held, f"RigDesk {name}: your session on RustDesk ID {kept.id} ended: {why}. desk/connect with its ID and a password joins it "
-                                    "again; a one-time password works for one session only.")
+            again = ("An invite works once: the person at the device can make a new one." if kept.invited
+                     else "desk/connect with its ID and a password joins it again; a one-time password works for one session only.")
+            await self._ended(held, f"RigDesk {name}: your session on RustDesk ID {kept.id} ended: {why}. {again}")
 
     async def _adhoc_idle(self) -> None:
         cutoff = now_ms() - adhoc.IDLE_MS

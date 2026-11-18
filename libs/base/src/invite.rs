@@ -175,8 +175,8 @@ impl Invites {
             agent_id: &invite.agent_id,
             agent_title: &invite.agent_title,
         };
-        let signature = <[u8; 64]>::try_from(invite.signature.as_ref()).map_err(|_| Refusal::BadProof)?;
-        if !sign::verify_detached(&sign::Signature::new(signature), &claim.message(), key) {
+        let signature = sign::Signature::from_bytes(&invite.signature).map_err(|_| Refusal::BadProof)?;
+        if !sign::verify_detached(&signature, &claim.message(), key) {
             return Err(Refusal::BadProof);
         }
         Ok(Holder { agent: invite.agent_id.clone(), title: invite.agent_title.clone(), conn: login.conn })
