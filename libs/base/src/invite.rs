@@ -139,7 +139,7 @@ impl Invites {
         }
     }
 
-    /// A new link replaces an open one. An agent using the device is ended first, so one invite means one agent.
+    /// A new link replaces an open one. None is made while an agent uses the device, so one invite means one agent.
     fn mint(&mut self, device_id: &str, agent: Option<&str>, now_ms: i64) -> Result<Minted, &'static str> {
         if self.holder.is_some() {
             return Err("A Rig agent is using this device");

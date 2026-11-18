@@ -5,13 +5,10 @@
 //! `--server` over IPC once a second, as `notice` does. Next to the plain invite, which Rig binds to whichever agent
 //! claims it first, the tray offers one for each agent that last used this PC, which only that agent can claim.
 
-use std::{
-    sync::{mpsc, Mutex},
-    time::{Duration, Instant},
-};
+use std::sync::{mpsc, Mutex};
 
 use hbb_common::log;
-use rigdesk_agent::{journal::recent_agents, Entry};
+use rigdesk_agent::{journal::recent_agents, Entry, Owner};
 use serde_json::json;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
@@ -20,27 +17,42 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 pub const IPC_INVITE: &str = "agent-invite";
 
 const PICKABLE_AGENTS: usize = 3;
-/// The journal can run to many megabytes, and a list a little behind only offers one agent less.
-const PICKABLE_EVERY: Duration = Duration::from_secs(600);
 
 lazy_static::lazy_static! {
     /// The open invite's link, kept only here and in the tray, to be copied again, with the title of the agent it is for,
     /// if the person chose one; the agent API keeps its secret hashed.
     static ref LINK: Mutex<Option<(String, String)>> = Default::default();
-    static ref PICKABLE: Mutex<(Option<Instant>, Vec<(String, String)>)> = Default::default();
+    /// The agents the tray offers, newest first: read from the journal once, then kept as agents take the session.
+    static ref PICKABLE: Mutex<Option<Vec<(String, String)>>> = Default::default();
 }
 
-/// The agents the tray offers, as (id, title). The journal is read on its own thread, as this answers the tray's IPC.
+/// The agents the tray offers, as (id, title). The journal is read once, on its own thread, as this answers the tray's IPC.
 fn pickable() -> Vec<(String, String)> {
     let mut kept = PICKABLE.lock().unwrap();
-    if kept.0.map_or(true, |at| at.elapsed() >= PICKABLE_EVERY) {
-        kept.0 = Some(Instant::now());
+    if kept.is_none() {
+        *kept = Some(Vec::new());
         std::thread::spawn(|| {
-            let agents = recent_agents(&super::HOST.journal.tail(usize::MAX), PICKABLE_AGENTS);
-            PICKABLE.lock().unwrap().1 = agents;
+            let read = recent_agents(&super::HOST.journal.tail(usize::MAX), PICKABLE_AGENTS);
+            let mut kept = PICKABLE.lock().unwrap();
+            let mut agents = kept.take().unwrap_or_default();
+            agents.extend(read.into_iter().filter(|(id, _)| !agents.iter().any(|(met, _)| met == id)).collect::<Vec<_>>());
+            agents.truncate(PICKABLE_AGENTS);
+            *kept = Some(agents);
         });
     }
-    kept.1.clone()
+    kept.clone().unwrap_or_default()
+}
+
+/// An agent holding the session goes first in the list.
+fn met(owner: &Owner) {
+    let mut kept = PICKABLE.lock().unwrap();
+    let agents = kept.get_or_insert_with(Vec::new);
+    if agents.first().map_or(false, |(id, _)| *id == owner.agent_id) {
+        return;
+    }
+    agents.retain(|(id, _)| *id != owner.agent_id);
+    agents.insert(0, (owner.agent_id.clone(), owner.title.split_whitespace().collect::<Vec<_>>().join(" ")));
+    agents.truncate(PICKABLE_AGENTS);
 }
 
 /// For the tray: `off` without a pairing with Rig, `held\n<agent id>\n<title>` while an agent holds a session an invite
@@ -51,6 +63,9 @@ pub fn text() -> String {
         return "off".into();
     }
     let shared = super::shared();
+    if let Some(owner) = shared.standing().owner {
+        met(&owner);
+    }
     if let Some(owner) = shared.invited_owner() {
         return format!("held\n{}\n{}", owner.agent_id, owner.title);
     }
