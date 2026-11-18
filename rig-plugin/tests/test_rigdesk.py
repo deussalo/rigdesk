@@ -574,6 +574,73 @@ def test_an_operator_names_a_pc_by_rustdesk_id_or_by_id_at_a_self_hosted_server_
     assert "not a RustDesk ID" in str(target_of("rigdesk://deus/x"))
 
 
+def test_only_a_tailnet_address_is_a_direct_peer_and_a_key_still_means_an_id_server() -> None:
+    from rigdesk.adhoc import PUBLIC_KEY, Target, target_of
+    assert target_of("105 517 719@100.64.0.1") == Target("105517719", None, None, "100.64.0.1:21118")
+    assert target_of("105517719@100.127.255.254:21119") == Target("105517719", None, None, "100.127.255.254:21119")
+    assert target_of("105517719@Front.Tail1234.TS.NET") == Target("105517719", None, None, "front.tail1234.ts.net:21118")
+    for server in ("100.64.0.1", "8.8.8.8", "front.tail1234.ts.net:21116", "rd.example.com"):
+        assert target_of(f"105517719@{server}?key={PUBLIC_KEY}") == Target("105517719", server, PUBLIC_KEY), server
+    for outside in ("8.8.8.8", "8.8.8.8:21118", "100.63.255.255", "100.128.0.1", "192.168.1.5", "127.0.0.1", "rd.example.com", "ts.net", "eviltS.net", "front.ts.net.example.com",
+                    "100.64.0.1.example.com", "[fd7a:115c:a1e0::1]", "[fd7a:115c:a1e0::1]:21118", "100.64.0.1:0", "100.64.0.1:65536", "100.64.0.1:port", "front..ts.net", "front.ts.net."):
+        said = target_of(f"105517719@{outside}")
+        assert isinstance(said, str) and "give its public key too" in said, (outside, said)
+
+
+def test_connect_dials_a_tailnet_peer_directly_only_once_the_operator_approves_and_never_off_the_tailnet() -> None:
+    import stat
+    from rigdesk import adhoc, desks as desks_module
+    from rigdesk.desks import ConnectAsk, DeskRefused, RigdeskSettings
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            dialed = Path(state) / "dialed"
+            fake = Path(state) / "bridge"
+            fake.write_text(f'#!/bin/sh\necho "$*" >> {dialed}\necho "refused: Wrong Password"\nexit 3\n')
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            settings = RigdeskSettings(pcs={}, bridge_bin=str(fake))
+            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            names = {"good.tail1234.ts.net": ["100.70.1.2"], "mixed.tail1234.ts.net": ["100.70.1.3", "8.8.8.8"], "public.tail1234.ts.net": ["8.8.8.8"], "gone.tail1234.ts.net": []}
+
+            async def lookup(name: str) -> list[str]:
+                return names[name]
+            secrets_dir, kept_lookup = desks_module.SECRETS, adhoc.lookup
+            desks_module.SECRETS, adhoc.lookup = Path(state) / "secrets", lookup  # type: ignore[assignment]
+
+            async def approved(given: str) -> str:
+                try:
+                    await desks.connect(given, "hunter2-secret", "a1", "g", "n", "A")
+                except ConnectAsk as asked:
+                    assert "over the tailnet" in asked.where and not dialed.exists(), asked.where
+                else:
+                    raise AssertionError("a PC not ours was joined unasked")
+                desks.connect_asked("desk-1", given, "hunter2-secret", "a1", SeatId(GraphName("g"), NodeId("n")), ("p", {"ask": "desk-1"}))
+                try:
+                    await desks.connect_approved("desk-1", "a1", "g", "n", "A")
+                except DeskRefused as refused:
+                    assert "Wrong Password" in str(refused) and "hunter2" not in str(refused), refused
+                argv = dialed.read_text().strip().split()
+                dialed.unlink()
+                assert "--id-server" not in argv and argv[argv.index("--login-id") + 1] == "105517719", argv
+                return argv[argv.index("--peer") + 1]
+            try:
+                assert await approved("105517719@100.70.1.9") == "100.70.1.9:21118"
+                assert await approved("105517719@100.70.1.9:21119") == "100.70.1.9:21119"
+                assert await approved("105517719@good.tail1234.ts.net") == "100.70.1.2:21118"
+                for host, words in (("8.8.8.8", "give its public key too"), ("mixed.tail1234.ts.net", "8.8.8.8"), ("public.tail1234.ts.net", "8.8.8.8"), ("gone.tail1234.ts.net", "no address")):
+                    try:
+                        await desks.connect(f"105517719@{host}", "hunter2-secret", "a1", "g", "n", "A", approved=True)
+                    except DeskRefused as refused:
+                        assert words in str(refused), (host, refused)
+                    else:
+                        raise AssertionError(f"{host} was dialed")
+                    assert not dialed.exists(), host
+            finally:
+                desks_module.SECRETS, adhoc.lookup = secrets_dir, kept_lookup
+
+    asyncio.run(run())
+
+
 def test_connect_dials_a_pc_not_ours_only_once_the_operator_approves_and_leaves_no_password_behind() -> None:
     import os
     import stat

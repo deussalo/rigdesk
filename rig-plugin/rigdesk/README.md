@@ -207,7 +207,11 @@ Known limits against a RigDesk PC:
   resident on the phone through Rig's rig-assistant plugin, with its own setup and no screen sharing needed.
 * `desk/connect(id, password, why)` — joins a PC by its RustDesk ID and password. One of our RigDesk PCs that answers
   under that ID joins at once; any other PC is dialed only once the operator accepts, and its password waits in memory
-  alone. Unanswered for 15 minutes, the request lapses: it is withdrawn and the agent is told. Known limits:
+  alone. Unanswered for 15 minutes, the request lapses: it is withdrawn and the agent is told. `id` is the ID alone,
+  `ID@host[:port]?key=<key>` for a self-hosted ID server, or `ID@<tailnet address>[:port]` to dial the PC directly, with
+  no ID server. Only an address in 100.64.0.0/10 or a `*.ts.net` name is dialed so, and a name must resolve to tailnet
+  addresses alone, as a direct session has no RustDesk encryption of its own and relies on the tailnet's. The PC needs
+  direct IP access on, on port 21118 unless the address says otherwise, and must show that ID. Known limits:
   * a request open when Rig restarts stays open, as nothing that would withdraw it outlives the restart; its password
     is gone, so a later Accept refuses and dials nothing;
   * Accept dials through the ID server RigDesk's settings name at that moment: if `connect_server` changed after the
