@@ -235,7 +235,7 @@ class RigInvite(private val service: MainService) {
             }
         } catch (e: Exception) {
             Log.w(TAG, "pairing key not fetched: $e")
-            Fetched(null, "Rig did not answer for its pairing key: ${e.message ?: e.javaClass.simpleName}")
+            Fetched(null, "Rig did not answer for its pairing key")
         }
     }
 
