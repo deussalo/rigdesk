@@ -169,7 +169,8 @@ fn forward() {
                     | EventKind::Reach { .. }
                     | EventKind::Shell { .. }
                     | EventKind::ShellSwitch { .. }
-                    | EventKind::Health { .. } => {}
+                    | EventKind::Health { .. }
+                    | EventKind::Offer { .. } => {}
                 },
                 Err(RecvError::Lagged(_)) => broadcast(state()),
                 Err(RecvError::Closed) => break,
