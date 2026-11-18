@@ -26,11 +26,13 @@ import android.widget.TextView
 class SetupActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private lateinit var state: TextView
+    /** Why the last pairing link was not taken; the screen's second-by-second state must not wipe it. */
+    private var pairRefusal = ""
     private val switches = mutableListOf<Pair<Button, () -> Boolean>>()
     private val refresh = object : Runnable {
         override fun run() {
             val who = Link.resident.ifEmpty { "no agent resident yet: assign one on Rig's Rig Assistant page" }
-            state.text = "${Link.state}\n${if (Link.connected()) "Resident: $who" else ""}"
+            state.text = listOf(pairRefusal, Link.state, if (Link.connected()) "Resident: $who" else "").filter { it.isNotEmpty() }.joinToString("\n")
             for ((button, on) in switches) button.alpha = if (on()) 0.5f else 1f
             main.postDelayed(this, 1_000)
         }
@@ -112,14 +114,15 @@ class SetupActivity : Activity() {
         val url = link.getQueryParameter("url").orEmpty().trim()
         val token = link.getQueryParameter("token").orEmpty().trim()
         val phone = link.getQueryParameter("phone").orEmpty().trim().ifEmpty { Config.defaultPhone() }
+        pairRefusal = ""
         val target = try { Uri.parse(url) } catch (e: Exception) { null }
         val host = target?.host
         if (target == null || host == null || token.isEmpty()) {
-            state.text = "That pairing link is incomplete: it needs Rig's address and a token"
+            pairRefusal = "That pairing link is incomplete: it needs Rig's address and a token"
             return
         }
         if (target.scheme != "https" && !Config.privateHost(host)) {
-            state.text = "That pairing link would send Rig's token unencrypted to $host: only https, or http on the tailnet, is taken"
+            pairRefusal = "That pairing link would send Rig's token unencrypted to $host: only https, or http on the tailnet, is taken"
             return
         }
         val origin = "${target.scheme}://$host" + if (target.port != -1) ":${target.port}" else ""

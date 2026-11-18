@@ -158,6 +158,9 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
 
     private fun target() = Link.resident.ifEmpty { "Rig" }
 
+    /** Every line the sheet shows while it cannot reach Rig ends with why, so a refused address is never hidden behind another message. */
+    private fun notConnected() = if (Link.connected()) "" else " Not connected to Rig (${Link.state})."
+
     private fun showListening() {
         status.text = if (Link.connected()) "Listening for ${target()}. Tap Send when you're done."
             else "Listening. Not connected to Rig (${Link.state}): Send keeps it until the phone reconnects."
@@ -166,7 +169,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
     private fun listen() {
         if (!granted(context, Manifest.permission.RECORD_AUDIO)) {
             recording = false
-            status.text = "Allow the microphone, and the sheet opens again listening. Or type."
+            status.text = "Allow the microphone, and the sheet opens again listening. Or type.${notConnected()}"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 val asked = mutableListOf(Manifest.permission.RECORD_AUDIO)
                 if (Build.VERSION.SDK_INT >= 33) asked.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -179,7 +182,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
             made.setRecognitionListener(listener)
         }
         if (r == null) {
-            status.text = "This phone offers no speech recognition: type instead"
+            status.text = "This phone offers no speech recognition: type instead.${notConnected()}"
             recording = false
             return
         }
@@ -274,7 +277,7 @@ class AssistSession(context: Context) : VoiceInteractionSession(context) {
                     if (finishing) { deliver(); return }
                     if (++failures > MAX_FAILURES) {
                         recording = false
-                        status.text = "Speech recognition keeps failing ($error): type, or Send what was heard"
+                        status.text = "Speech recognition keeps failing ($error): type, or Send what was heard.${notConnected()}"
                         return
                     }
                     main.postDelayed({ if (recording) listen() }, 300L * failures)
