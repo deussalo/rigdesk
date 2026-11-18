@@ -2,13 +2,15 @@
 //! claiming it takes the agent API's bearer, the key this PC was paired with. The link works once and lapses unclaimed
 //! after `rigdesk_agent::session::INVITE_FOR_MS`. While it is open the tray says until when, and copies or revokes it; once an agent joined by
 //! it, the tray names the agent and ends its session, as for a session the operator started. The tray process asks
-//! `--server` over IPC once a second, as `notice` does. Next to the plain invite, which Rig binds to whichever agent
-//! claims it first, the tray offers one for each agent that last used this PC, which only that agent can claim.
+//! `--server` over IPC once a second, as `notice` does. An invite takes nobody's session and replaces no viewer's link,
+//! so the tray offers one only while neither is there; and it obeys the PC's switch for sessions started from Rig. Next
+//! to the plain invite, which Rig binds to whichever agent claims it first, the tray offers one for each agent that last
+//! used this PC, which only that agent can claim.
 
 use std::sync::{mpsc, Mutex};
 
 use hbb_common::log;
-use rigdesk_agent::{journal::recent_agents, Entry, Owner};
+use rigdesk_agent::{journal::recent_agents, operator::Switch, Entry, Owner};
 use serde_json::json;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
@@ -55,9 +57,31 @@ fn met(owner: &Owner) {
     agents.truncate(PICKABLE_AGENTS);
 }
 
-/// For the tray: `off` without a pairing with Rig, `held\n<agent id>\n<title>` while an agent holds a session an invite
-/// started, `open\n<until ms>\n<link>\n<title of the agent it is for, or nothing>` while an invite waits, else
-/// `idle` and a `\n<agent id>\t<title>` for each agent the person can pick.
+/// The name an invite's link gives this PC, which /health reports so Rig can match it.
+pub fn link_host() -> String {
+    crate::common::hostname().to_lowercase()
+}
+
+/// Why the person cannot invite an agent now, if they cannot.
+fn unable() -> Option<String> {
+    let switch = super::operator::PcSwitch { file: super::data_dir().map(|dir| dir.join(super::operator::SWITCH_FILE)) };
+    if let Err(closed) = switch.open() {
+        return Some(rigdesk_agent::operator::Refused::Closed(closed).words());
+    }
+    let standing = super::shared().standing();
+    if let Some(owner) = standing.owner {
+        return Some(format!("{} holds this PC's session now", owner.title));
+    }
+    if standing.link_open && super::shared().invite_until().is_none() {
+        return Some("a viewer's share link is open".into());
+    }
+    None
+}
+
+/// For the tray: `off` without a pairing with Rig or while an invite cannot be made (see [`unable`]),
+/// `held\n<agent id>\n<title>` while an agent holds a session an invite started,
+/// `open\n<until ms>\n<link>\n<title of the agent it is for, or nothing>` while an invite waits, else `idle` and a
+/// `\n<agent id>\t<title>` for each agent the person can pick.
 pub fn text() -> String {
     if super::bearer().is_none() {
         return "off".into();
@@ -74,6 +98,9 @@ pub fn text() -> String {
         (Some(until_ms), Some((text, title))) => format!("open\n{until_ms}\n{text}\n{title}"),
         _ => {
             *link = None;
+            if unable().is_some() {
+                return "off".into();
+            }
             let agents: String = pickable().iter().map(|(id, title)| format!("\n{id}\t{title}")).collect();
             format!("idle{agents}")
         }
@@ -90,9 +117,13 @@ pub fn act(verb: &str) {
         ("mint", agent_id) => {
             let bound = (!agent_id.is_empty()).then(|| agent_id.to_string());
             let title = pickable().into_iter().find(|(id, _)| id == agent_id).map_or_else(|| agent_id.to_string(), |(_, title)| title);
-            let (minted, until_ms) = shared.invite(bound.clone());
-            let host = crate::common::hostname().to_lowercase();
-            *LINK.lock().unwrap() = Some((format!("rigdesk://{host}/{}#{}", minted.grant, minted.secret), title));
+            let refused = unable();
+            let Some((minted, until_ms)) = refused.is_none().then(|| shared.invite(bound.clone())).flatten() else {
+                let reason = refused.unwrap_or_else(|| "a viewer's share link is open".into());
+                super::HOST.journal.record(&Entry::new("human", "invite", "refused", json!({"reason": reason})));
+                return;
+            };
+            *LINK.lock().unwrap() = Some((format!("rigdesk://{}/{}#{}", link_host(), minted.grant, minted.secret), title));
             super::HOST.journal.record(&Entry::new("human", "invite", "minted", json!({"until_ms": until_ms, "for": bound})));
         }
         ("revoke", _) => {
@@ -120,6 +151,8 @@ enum Shown {
 pub struct Invites {
     rx: mpsc::Receiver<String>,
     shown: Shown,
+    /// The agent last announced, so a state read again after a failed poll does not notify twice.
+    toasted: Option<String>,
 }
 
 /// Starts asking `--server` for the invite's state.
@@ -138,7 +171,7 @@ pub fn start() -> Invites {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
-    Invites { rx, shown: Shown::Off }
+    Invites { rx, shown: Shown::Off, toasted: None }
 }
 
 fn send(verb: String) {
@@ -157,6 +190,9 @@ impl Invites {
     /// Shows the entries for the invite's state as it changes; called from the tray's event loop.
     pub fn tick(&mut self, menu: &Menu) {
         let Some(text) = self.rx.try_iter().last() else { return };
+        if text.starts_with("idle") || text.starts_with("open\n") {
+            self.toasted = None;
+        }
         let mut lines = text.splitn(4, '\n');
         let shown = match (lines.next().unwrap_or(""), lines.next(), lines.next(), lines.next()) {
             ("off", ..) => Shown::Off,
@@ -175,10 +211,13 @@ impl Invites {
                 revoke: MenuItem::new("Revoke the invite", true, None),
             },
             ("held", Some(agent_id), Some(title), _) => {
-                #[cfg(windows)]
-                toast(title);
-                #[cfg(target_os = "linux")]
-                notify(title);
+                if self.toasted.as_deref() != Some(agent_id) {
+                    self.toasted = Some(agent_id.to_string());
+                    #[cfg(windows)]
+                    toast(title);
+                    #[cfg(target_os = "linux")]
+                    notify(title);
+                }
                 Shown::Held {
                     agent_id: agent_id.to_string(),
                     said: MenuItem::new(format!("Rig agent {title} joined by your invite"), false, None),

@@ -18,6 +18,7 @@ def test_a_link_names_its_pc_by_name_or_tailnet_host() -> None:
     assert pc_of_link(f"rigdesk://deus/{GRANT}#{SECRET}", PCS) == ("deus", GRANT, SECRET)
     assert pc_of_link(f"rigdesk://deus.tail1234.ts.net/{GRANT}#{SECRET}", PCS) == ("deus", GRANT, SECRET)
     assert "no RigDesk PC named other" in str(pc_of_link(f"rigdesk://other/{GRANT}#{SECRET}", PCS))
+    assert pc_of_link(f"rigdesk://desktop_ab12/{GRANT}#{SECRET}", PCS, {"deus": "DESKTOP_AB12"}) == ("deus", GRANT, SECRET)
     assert "not a RigDesk share link" in str(pc_of_link("https://example.com", PCS))
 
 
