@@ -392,6 +392,7 @@ class MainActivity : FlutterActivity() {
                     ClientSessionService.set(this, call.arguments as Boolean)
                     result.success(true)
                 }
+                "rig_bridge_refused" -> result.success(AgentStop.refused())
                 "try_sync_clipboard" -> {
                     rdClipboardManager?.syncClipboard(true)
                     result.success(true)

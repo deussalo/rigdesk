@@ -12,6 +12,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import dev.rig.assistant.Config
 import dev.rig.assistant.Desk
 import dev.rig.assistant.Stop
 import ffi.FFI
@@ -53,14 +54,8 @@ class AgentStop(private val ctx: Context) {
         main.post { holder = ""; refresh() }
     }
 
-    private fun host(): Host? = try {
-        val j = JSONObject(FFI.getLocalOption(HOST_OPTION))
-        val url = j.optString("url").trim().trimEnd('/')
-        val token = j.optString("token").trim()
-        if ((url.startsWith("https://") || url.startsWith("http://")) && token.isNotEmpty()) Host(url, token) else null
-    } catch (e: Exception) {
-        null
-    }
+    /** The bridge to tell, or null while none is set or its address would carry the token in the clear ([refused]). */
+    private fun host(): Host? = parse(FFI.getLocalOption(HOST_OPTION))?.takeIf { Config.plainHttpTo(it.url) == null }
 
     private fun open(host: Host, path: String, method: String = "GET"): HttpURLConnection =
         (URL(host.url + path).openConnection() as HttpURLConnection).apply {
@@ -204,8 +199,25 @@ class AgentStop(private val ctx: Context) {
     companion object {
         private const val TAG = "AgentStop"
         const val HOST_OPTION = "rigdesk-agent-host-self"
+
         // A gesture the phone injects ends within this of its last event (long press and wheel swipes included).
         private const val OWN_INPUT_MS = 1_000L
         private const val HUMAN_EVERY_MS = 500L
+
+        private fun parse(option: String): Host? = try {
+            val j = JSONObject(option)
+            val url = j.optString("url").trim().trimEnd('/')
+            val token = j.optString("token").trim()
+            if ((url.startsWith("https://") || url.startsWith("http://")) && token.isNotEmpty()) Host(url, token) else null
+        } catch (e: Exception) {
+            null
+        }
+
+        /** Why the Rig bridge set on this phone is not told anything, for the Rig bridge row; null when it is, or none is set. */
+        fun refused(): String? {
+            val host = parse(FFI.getLocalOption(HOST_OPTION))?.let { Config.plainHttpTo(it.url) } ?: return null
+            return "Refused: plain http to $host would send the bridge's token unencrypted, so this phone does not connect to it, and Stop and " +
+                "your touches do not reach the agent. Use its https address, or its Tailscale address (100.x.y.z or a name ending in .ts.net)."
+        }
     }
 }

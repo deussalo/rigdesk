@@ -715,7 +715,15 @@ class _RigBridgeRowState extends State<_RigBridgeRow> {
       dense: true,
       contentPadding: EdgeInsets.zero,
       title: const Text('Rig bridge'),
-      subtitle: Text(host?.url ?? 'Not set: Stop and your touches do not reach the agent'),
+      subtitle: host == null
+          ? const Text('Not set: Stop and your touches do not reach the agent')
+          : FutureBuilder<String?>(
+              // Refused by the phone's own rule (AgentStop.refused), so the row says what the service does.
+              future: platformFFI.invokeMethodWithResult<String>('rig_bridge_refused'),
+              builder: (context, refused) => refused.data == null
+                  ? Text(host.url)
+                  : Text('${host.url}\n${refused.data}',
+                      style: TextStyle(color: Theme.of(context).colorScheme.error))),
       trailing: const Icon(Icons.chevron_right),
       onTap: () async {
         final set = await showDialog<AgentHost>(

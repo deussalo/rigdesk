@@ -13,7 +13,9 @@ The phone's assistant inside the RigDesk Android app, as a module of its own: it
 - **Stop:** one red Stop pill shows while an agent is active on the phone, within 20 s of its last `phone/*` or `desk/*` call
   (reads count), and hides when it goes idle, so it never covers an idle screen or a screenshot. Stop refuses every `phone/*`
   call and blocks RigDesk's desk holder; a green Resume shows until pressed. The resident is told of both. Without "drawing
-  over apps", the phone asks for it once, the first time the pill should show.
+  over apps", the phone asks for it once, the first time the pill should show. For `desk/*`, Stop and the person's touches
+  reach the rigdesk-bridge set in RigDesk's Share screen > Rig bridge, under the same address rule as Rig's address below:
+  with plain http outside loopback and the tailnet the phone sends that bridge nothing, and the Rig bridge row says why.
 - **Link:** one socket the phone dials to `<Rig>/api/contributions/rig-assistant/sockets/phone`, with Rig's access token.
 
 ## Setting a phone up

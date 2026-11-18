@@ -30,11 +30,17 @@ class Config private constructor(val origin: String, val token: String, val phon
 
         private fun storedUrl(ctx: Context): String = prefs(ctx).getString("url", "").orEmpty().trim().trimEnd('/')
 
-        /** Why Rig's token must not go to this address, whichever way it got here, or null. */
-        private fun exposes(url: String): String? {
+        /** The host a bearer token sent to this address would cross unencrypted (plain http outside loopback and the tailnet), or null.
+         *  The phone's one rule for every bearer it holds: Rig Assistant's and the Rig bridge's (AgentStop). */
+        fun plainHttpTo(url: String): String? {
             val uri = try { URI.create(url) } catch (e: IllegalArgumentException) { return null }
             val host = uri.host ?: return null
-            if (uri.scheme != "http" || privateHost(host)) return null
+            return if (uri.scheme == "http" && !privateHost(host)) host else null
+        }
+
+        /** Why Rig's token must not go to this address, whichever way it got here, or null. */
+        private fun exposes(url: String): String? {
+            val host = plainHttpTo(url) ?: return null
             return "Rig's address is plain http to $host, which would send its access token unencrypted, so this phone will not connect. " +
                 "Change it in Rig Assistant to Rig's https address, or to its Tailscale address (100.x.y.z or a name ending in .ts.net)."
         }
