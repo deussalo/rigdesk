@@ -127,6 +127,8 @@ pub struct Link {
     swap: Notify,
     /// The session running now is on an adopted connection.
     carried: AtomicBool,
+    /// Hangs up the adopted session running now (`hang_up`).
+    hang: AtomicBool,
 }
 
 fn now_ms() -> u64 {
@@ -180,6 +182,7 @@ impl Link {
             adopted: Mutex::new(None),
             swap: Notify::new(),
             carried: AtomicBool::new(false),
+            hang: AtomicBool::new(false),
         })
     }
 
@@ -228,7 +231,7 @@ impl Link {
             }
             let started = now_ms();
             let ended = self.session().await;
-            if self.carried.swap(false, Ordering::SeqCst) {
+            if self.carried.swap(false, Ordering::SeqCst) && !self.may_dial() {
                 self.shared.revoke("the RustDesk session the person at the PC allowed ended; desk/request asks them again");
             }
             {
@@ -329,7 +332,7 @@ impl Link {
                 }
                 Some(out) = rx.recv() => stream.send(&out).await?,
                 _ = self.swap.notified() => {
-                    if self.adopted.lock().unwrap().is_some() {
+                    if self.adopted.lock().unwrap().is_some() || self.hang.swap(false, Ordering::SeqCst) {
                         return Ok(());
                     }
                 }
@@ -490,6 +493,15 @@ impl Link {
         self.last_use_ms.store(now_ms(), Ordering::SeqCst);
         self.swap.notify_one();
         self.demand.notify_one();
+    }
+
+    /// Hangs up the connection adopted last, whether it waits or carries the session now; nothing else is touched.
+    pub fn hang_up(&self) {
+        self.last_use_ms.store(0, Ordering::SeqCst);
+        if self.adopted.lock().unwrap().take().is_none() && self.carried.load(Ordering::SeqCst) {
+            self.hang.store(true, Ordering::SeqCst);
+            self.swap.notify_one();
+        }
     }
 
     fn on_cursor(&self, x: i32, y: i32) {

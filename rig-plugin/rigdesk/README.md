@@ -164,9 +164,10 @@ Known limits against a RigDesk PC:
   the prompt away. A RigDesk PC shows the agent in its connection manager. A stock PC's rigdesk-bridge (a phone among
   them, as a notification with Allow) logs in to it with no password, so the PC shows RustDesk's own prompt, and on
   Allow that very connection carries the agent's session: no password is used, and a stock PC needs none kept in Rig
-  (leave out `password_file`, and only the person's Allow lets an agent in). When the allowed connection ends, the agent
-  is told, and its next `desk/request` asks again; Rig's saved password, where one is kept, serves only unattended
-  access. How the answer is bound: it counts only when it comes on that PC's own `/events` stream under Rig's bearer,
+  (leave out `password_file`, and only the person's Allow lets an agent in). An allowed connection no agent claims within
+  30 s, as when the operator answered first, is hung up. With no password kept, the agent is told when the allowed
+  connection ends (the person disconnects, or ten idle minutes), and its next `desk/request` asks again; with one kept,
+  the agent keeps its hold and its next action dials in with the password, as unattended access. How the answer is bound: it counts only when it comes on that PC's own `/events` stream under Rig's bearer,
   names that request and carries the 128-bit nonce Rig made for it, which goes to the PC alone and never to the agent;
   and only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
   Known limits:

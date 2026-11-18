@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use base::message_proto::{login_response, message, misc, Message, OptionMessage};
 use hbb_common::protobuf::Message as _;
 use hbb_common::tcp::FramedStream;
-use hbb_common::tokio::{runtime::Handle, task::AbortHandle};
+use hbb_common::tokio::{self, runtime::Handle, task::AbortHandle};
 use rigdesk_agent::operator::{Closed, Offer, Switch};
 use rigdesk_agent::{EventKind, Shared};
 
@@ -23,6 +23,8 @@ const NO_PASSWORD_ACCESS: &str = "No Password Access";
 const CLOSED_BY_PERSON: &str = "Closed manually by the peer";
 /// The PC drops an unanswered prompt itself after about 3 minutes; this only bounds a PC that went silent.
 const READ_TIMEOUT_MS: u64 = 30_000;
+/// An allowed connection no agent has claimed by then is hung up: Rig settled the ask another way, or never claimed it.
+const UNCLAIMED: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, PartialEq)]
 pub enum Answer {
@@ -57,29 +59,45 @@ pub struct Knocker {
     shared: Arc<Shared>,
     runtime: Handle,
     shown: Mutex<Option<(String, AbortHandle)>>,
+    /// The ask whose allowed connection the link took last.
+    allowed: Arc<Mutex<Option<String>>>,
 }
 
 impl Knocker {
     pub fn new(link: Arc<Link>, shared: Arc<Shared>, runtime: Handle) -> Arc<Self> {
-        Arc::new(Knocker { link, shared, runtime, shown: Mutex::new(None) })
+        Arc::new(Knocker { link, shared, runtime, shown: Mutex::new(None), allowed: Arc::default() })
     }
 }
 
 impl Switch for Knocker {
+    /// Always open: this also makes the bridge's `/join` reachable, behind Rig's bearer, though the plugin never uses it for a stock PC.
     fn open(&self) -> Result<(), Closed> {
         Ok(())
     }
 
     fn offer(&self, offer: Offer) -> Result<(), String> {
-        let (link, shared) = (self.link.clone(), self.shared.clone());
+        let (link, shared, taken) = (self.link.clone(), self.shared.clone(), self.allowed.clone());
         let name = format!("{} (Rig agent)", offer.owner.title);
         let ask = offer.ask.clone();
         let task = self.runtime.spawn(async move {
             let (answer, shown, allowed) = knock(&link, &name).await;
+            let adopted = allowed.is_some();
             if let Some(allowed) = allowed {
+                *taken.lock().unwrap() = Some(offer.ask.clone());
                 link.adopt(allowed);
             }
-            shared.events.push(EventKind::Offer { ask: offer.ask, nonce: offer.nonce, answer: answer.said(shown) });
+            shared.events.push(EventKind::Offer { ask: offer.ask.clone(), nonce: offer.nonce, answer: answer.said(shown) });
+            if adopted {
+                tokio::spawn(async move {
+                    tokio::time::sleep(UNCLAIMED).await;
+                    if !hang_up_unclaimed(&link, &shared, &taken, &offer.ask) {
+                        let mut taken = taken.lock().unwrap();
+                        if taken.as_deref() == Some(offer.ask.as_str()) {
+                            *taken = None;
+                        }
+                    }
+                });
+            }
         });
         if let Some((_, earlier)) = self.shown.lock().unwrap().replace((ask, task.abort_handle())) {
             earlier.abort();
@@ -89,7 +107,7 @@ impl Switch for Knocker {
 
     fn offer_end(&self, ask: &str) -> bool {
         let mut shown = self.shown.lock().unwrap();
-        match shown.take() {
+        let ended = match shown.take() {
             Some((held, task)) if held == ask => {
                 let showing = !task.is_finished();
                 task.abort();
@@ -99,8 +117,20 @@ impl Switch for Knocker {
                 *shown = other;
                 false
             }
-        }
+        };
+        hang_up_unclaimed(&self.link, &self.shared, &self.allowed, ask) || ended
     }
+}
+
+/// Hangs up the connection allowed for `ask` while no agent holds the session: Rig settled that ask another way, or never claimed it.
+fn hang_up_unclaimed(link: &Link, shared: &Shared, taken: &Mutex<Option<String>>, ask: &str) -> bool {
+    let mut taken = taken.lock().unwrap();
+    if taken.as_deref() != Some(ask) || shared.standing().owner.is_some() {
+        return false;
+    }
+    *taken = None;
+    link.hang_up();
+    true
 }
 
 /// One knock: the prompt is shown, and its person's answer read; whether the PC showed it; on Allow, the connection.
@@ -201,6 +231,21 @@ mod tests {
         assert!(login.password.is_empty());
         assert_eq!(login.my_name, "a1 (Rig agent)");
         assert_eq!(login.my_id, "rig");
+    }
+
+    #[test]
+    fn an_allowed_connection_is_hung_up_for_its_own_ask_only_while_no_agent_holds_the_session() {
+        let link = link();
+        let shared = rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8));
+        let taken = Mutex::new(Some("desk_1".to_string()));
+        assert!(!hang_up_unclaimed(&link, &shared, &taken, "desk_2"), "another ask's end");
+        let minted = shared.mint();
+        let owner = rigdesk_agent::Owner { agent_id: "a1".into(), title: "Builder".into(), graph: "g".into() };
+        assert!(shared.claim(&minted.grant, &minted.secret, owner).is_ok());
+        assert!(!hang_up_unclaimed(&link, &shared, &taken, "desk_1"), "a claimed session stays");
+        shared.revoke("left");
+        assert!(hang_up_unclaimed(&link, &shared, &taken, "desk_1"));
+        assert!(taken.lock().unwrap().is_none());
     }
 
     #[test]
