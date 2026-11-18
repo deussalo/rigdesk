@@ -565,8 +565,15 @@ impl Api {
             Ok(read) => read,
             Err(why) => return json_response(StatusCode::BAD_REQUEST, &json!({"error": why, "code": "bad_request"})),
         };
-        let joined = switch.open().map_err(crate::operator::Refused::Closed).and_then(|()| self.shared.join_operator(owner.clone()));
-        let by = if body.get("answered_by").and_then(Value::as_str) == Some("person") { "Rig, allowed by the person at the PC" } else { "Rig, operator-approved" };
+        let person = body.get("answered_by").and_then(Value::as_str) == Some("person");
+        let joined = switch.open().map_err(crate::operator::Refused::Closed).and_then(|()| {
+            if person {
+                self.shared.join_person_allowed(owner.clone())
+            } else {
+                self.shared.join_operator(owner.clone())
+            }
+        });
+        let by = if person { "Rig, allowed by the person at the PC" } else { "Rig, operator-approved" };
         let detail = json!({"graph": owner.graph, "ask": ask, "by": by});
         match joined {
             Ok(token) => {
@@ -929,10 +936,12 @@ mod tests {
         assert!(held["error"].as_str().unwrap().contains("Helper holds"));
         let joins: Vec<String> = journal.tail(20).into_iter().filter(|e| e.what == "join").map(|e| e.outcome).collect();
         assert_eq!(joins, vec!["refused: join_off", "refused: join_paused", "ok", "refused: held"]);
+        assert!(!shared.operator_person_allowed(), "the operator's Accept stays the operator's");
         assert!(shared.revoke("done"));
         post(port, "/join", "", &json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk-3", "answered_by": "person"})).await;
         let by: Vec<Value> = journal.tail(20).into_iter().filter(|e| e.what == "join" && e.outcome == "ok").map(|e| e.detail["by"].clone()).collect();
         assert_eq!(by, vec![json!("Rig, operator-approved"), json!("Rig, allowed by the person at the PC")]);
+        assert!(shared.operator_person_allowed(), "the PC's notification says who allowed it");
         let _ = std::fs::remove_dir_all(dir);
     }
 

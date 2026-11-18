@@ -6,10 +6,11 @@ use std::path::PathBuf;
 
 use base::config::keys;
 use hbb_common::{config::Config, log};
-use rigdesk_agent::operator::{Closed, Offer, Switch};
+use rigdesk_agent::operator::{session_line, Closed, Offer, Switch};
+pub use rigdesk_agent::operator::{parse_session, words};
 
 pub const SWITCH_FILE: &str = "agent-join";
-/// IPC config names: read, the agent holding an operator-started session as "<agent id>\n<title>" (empty when none);
+/// IPC config names: read, the agent holding an operator-started session as `session_line` writes it (empty when none);
 /// written with that agent id, its session ends.
 pub const IPC_SESSION: &str = "agent-operator-session";
 pub const IPC_END: &str = "agent-operator-end";
@@ -42,7 +43,8 @@ impl Switch for PcSwitch {
 
 /// For the tray: who holds a session the operator started, as "<agent id>\n<title>"; empty when nobody does.
 pub fn session_text() -> String {
-    super::shared().operator_owner().map_or(String::new(), |owner| format!("{}\n{}", owner.agent_id, owner.title))
+    let shared = super::shared();
+    shared.operator_owner().map_or(String::new(), |owner| session_line(&owner.agent_id, &owner.title, shared.operator_person_allowed()))
 }
 
 /// The person at the PC ended that agent's operator-started session from the tray.
@@ -67,7 +69,8 @@ pub fn notify_starts() {
                     if let EventKind::Holder { holder: Holder::Agent, by } = &event.kind {
                         if by == "operator" {
                             if let Some(owner) = super::shared().operator_owner() {
-                                tokio::task::spawn_blocking(move || notify(&owner.title));
+                                let person_allowed = super::shared().operator_person_allowed();
+                                tokio::task::spawn_blocking(move || notify(&owner.title, person_allowed));
                             }
                         }
                     }
@@ -80,9 +83,9 @@ pub fn notify_starts() {
 }
 
 #[cfg(target_os = "linux")]
-fn notify(title: &str) {
+fn notify(title: &str, person_allowed: bool) {
     use dbus::arg::PropMap;
-    let (summary, body) = words(title);
+    let (summary, body) = words(title, person_allowed);
     let sent = dbus::blocking::Connection::new_session().and_then(|conn| {
         let proxy = conn.with_proxy("org.freedesktop.Notifications", "/org/freedesktop/Notifications", std::time::Duration::from_secs(3));
         let notified: Result<(u32,), dbus::Error> =
@@ -92,12 +95,4 @@ fn notify(title: &str) {
     if let Err(e) = sent {
         log::warn!("agent: the desktop notification of a session started from Rig failed: {e}");
     }
-}
-
-/// The notification's title and text.
-pub fn words(title: &str) -> (String, String) {
-    (
-        format!("Rig agent {title} is using this computer"),
-        "The operator approved it in Rig. Your own mouse and keyboard still go first, and every action is logged. End it from the RigDesk tray icon.".to_string(),
-    )
 }
