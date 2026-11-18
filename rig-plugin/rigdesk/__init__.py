@@ -83,7 +83,7 @@ CONNECT_ASKED: TypeAdapter[ConnectAsked] = TypeAdapter(ConnectAsked)
 
 
 class JoinInput(ToolInput):
-    link: str | None = Field(default=None, description="The share link the human gave you: rigdesk://<pc>/<grant>#<secret>. It works once.")
+    link: str | None = Field(default=None, description="The share link or invite the human gave you: rigdesk://<pc>/<grant>#<secret>. It works once.")
     pc: str | None = Field(default=None, description="Instead of a link: a PC assigned to you, by name.")
 
 

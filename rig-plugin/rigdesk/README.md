@@ -124,8 +124,8 @@ Known limits against a RigDesk PC:
 
 ## What an agent gets
 
-* `desk/join(link)` — the human clicks **Share with agent** in the viewer and gives the agent the
-  `rigdesk://<pc>/<grant>#<secret>` link. Joining claims the PC's session for that agent alone; a
+* `desk/join(link)` — the human clicks **Share with agent** in the viewer, or **Invite a Rig agent** in a RigDesk PC's
+  tray, and gives the agent the `rigdesk://<pc>/<grant>#<secret>` link. An invite lapses unclaimed after 15 minutes. Joining claims the PC's session for that agent alone; a
   link works once.
 * **Standing grant.** rigdesk keeps who holds one, `"agent:<id>"` or `"graph:<name>"` per PC, in its own
   `grants` doc in Rig's store, and alone writes it: on the RigDesk page, which assigns any agent or every agent in a

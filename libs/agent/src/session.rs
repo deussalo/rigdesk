@@ -10,6 +10,8 @@ use crate::now_ms;
 
 /// How long the human's input must pause before input goes back to the agent by itself.
 pub const QUIET_MS: u64 = 3_000;
+/// How long an invite the person at the PC made waits to be claimed.
+pub const INVITE_FOR_MS: u64 = 15 * 60_000;
 
 /// Who may drive the desktop now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +41,7 @@ impl Owner {
 pub enum Refusal {
     NoSession,
     WrongGrant,
+    InviteLapsed,
     Blocked { since_ms: u64 },
     HumanHolds { since_ms: u64 },
 }
@@ -48,6 +51,7 @@ impl Refusal {
         match self {
             Refusal::NoSession => "no session: this desktop is not shared with you; ask the human for a share link and call desk/join".into(),
             Refusal::WrongGrant => "that share link is not valid here: it was already used, replaced or never minted; ask the human for a new one".into(),
+            Refusal::InviteLapsed => format!("that invite lapsed: it waits {} minutes to be claimed; ask the person at the PC for a new one", INVITE_FOR_MS / 60_000),
             Refusal::Blocked { since_ms } => format!("the human blocked the agent at {}; nothing runs until they unblock it", clock(*since_ms)),
             Refusal::HumanHolds { since_ms } => format!(
                 "the human is using the PC (since {}); reads still work, and actions work again once their input pauses for {} s: look again, then retry",
@@ -67,6 +71,8 @@ fn clock(at_ms: u64) -> String {
 struct Grant {
     id: String,
     secret: [u8; 32],
+    /// An invite the person at the PC made, rather than a viewer's link: when it lapses unclaimed.
+    until_ms: Option<u64>,
 }
 
 /// Who has the input while the agent is not blocked; a block is the agent's, not the session's (see [`Block`]).
@@ -84,6 +90,8 @@ struct Session {
     last_input_ms: u64,
     /// Started by Rig on the operator's Accept, not by a share link: the PC's tray names it and offers to end it.
     operator: bool,
+    /// Started by an invite the person at the PC made: the tray names it and offers to end it, as for `operator`.
+    invited: bool,
 }
 
 /// The human's Block or Stop, on an agent: it outlives that agent's session, so leaving and joining again (a new link,
@@ -156,8 +164,53 @@ impl Shared {
     /// A new link, replacing any open one; the session already held stays until the link is claimed.
     pub fn mint(&self) -> Minted {
         let minted = Minted { grant: fresh(), secret: fresh() };
-        self.state.lock().unwrap().grant = Some(Grant { id: minted.grant.clone(), secret: digest(&minted.secret) });
+        self.state.lock().unwrap().grant = Some(Grant { id: minted.grant.clone(), secret: digest(&minted.secret), until_ms: None });
         minted
+    }
+
+    /// An invite the person at the PC made: a link like a viewer's, replacing any open one, that lapses unclaimed after `INVITE_FOR_MS`.
+    pub fn invite(&self) -> (Minted, u64) {
+        let minted = Minted { grant: fresh(), secret: fresh() };
+        let until_ms = now_ms() + INVITE_FOR_MS;
+        self.state.lock().unwrap().grant = Some(Grant { id: minted.grant.clone(), secret: digest(&minted.secret), until_ms: Some(until_ms) });
+        (minted, until_ms)
+    }
+
+    /// When the open invite lapses, while one is open; a lapsed one is closed here.
+    pub fn invite_until(&self) -> Option<u64> {
+        let mut state = self.state.lock().unwrap();
+        let until_ms = state.grant.as_ref()?.until_ms?;
+        if now_ms() >= until_ms {
+            state.grant = None;
+            return None;
+        }
+        Some(until_ms)
+    }
+
+    /// The person at the PC takes their open invite back; a viewer's link is left as it is.
+    pub fn revoke_invite(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.grant.as_ref().map_or(true, |grant| grant.until_ms.is_none()) {
+            return false;
+        }
+        state.grant = None;
+        true
+    }
+
+    /// The agent holding a session an invite started, if one does.
+    pub fn invited_owner(&self) -> Option<Owner> {
+        self.state.lock().unwrap().session.as_ref().filter(|s| s.invited).map(|s| s.owner.clone())
+    }
+
+    /// The person at the PC ends the session `agent_id` holds through their invite; false when it holds none.
+    pub fn end_invited(&self, agent_id: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if !state.session.as_ref().map_or(false, |s| s.invited && s.owner.agent_id == agent_id) {
+            return false;
+        }
+        let Some(session) = state.session.take() else { return false };
+        self.events.push(EventKind::Revoked { agent_id: session.owner.agent_id, reason: "the person at the PC ended the session".into() });
+        true
     }
 
     /// The link's first claim wins it: the claimant becomes the owner, replacing any earlier one, and holds input.
@@ -169,12 +222,18 @@ impl Shared {
         if !fits {
             return Err(Refusal::WrongGrant);
         }
+        let until_ms = state.grant.as_ref().and_then(|grant| grant.until_ms);
+        if until_ms.map_or(false, |until_ms| now_ms() >= until_ms) {
+            state.grant = None;
+            return Err(Refusal::InviteLapsed);
+        }
         state.grant = None;
         if let Some(previous) = state.session.take() {
             self.events.push(EventKind::Revoked { agent_id: previous.owner.agent_id, reason: "the desktop was shared with another agent".into() });
         }
         let token = fresh();
-        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: false });
+        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: false,
+                                       invited: until_ms.is_some() });
         let holder = state.holder().map_or(Holder::Agent, |(holder, _)| holder);
         self.events.push(EventKind::Claimed { owner });
         self.events.push(EventKind::Holder { holder, by: "share".into() });
@@ -192,7 +251,7 @@ impl Shared {
             return Err(crate::operator::Refused::Blocked { since_ms: block.since_ms });
         }
         let token = fresh();
-        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: true });
+        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: true, invited: false });
         self.events.push(EventKind::Claimed { owner });
         self.events.push(EventKind::Holder { holder: Holder::Agent, by: "operator".into() });
         Ok(token)
@@ -527,5 +586,32 @@ mod tests {
         assert!(shared.revoke("ended in the viewer"));
         assert_eq!(shared.admit(&token, true), Err(Refusal::NoSession));
         assert_eq!(shared.claim(&open.grant, &open.secret, owner("a2")), Err(Refusal::WrongGrant));
+    }
+
+    #[test]
+    fn an_invite_starts_a_session_its_person_can_end_and_lapses_or_is_taken_back_unclaimed() {
+        let shared = Shared::new(Events::new(64));
+        let (invite, until_ms) = shared.invite();
+        assert_eq!(shared.invite_until(), Some(until_ms));
+        let token = shared.claim(&invite.grant, &invite.secret, owner("a1")).unwrap();
+        assert_eq!(shared.invited_owner().map(|o| o.agent_id), Some("a1".into()));
+        assert_eq!(shared.operator_owner(), None, "an invited session is not one the operator started");
+        assert!(!shared.end_invited("a2"));
+        assert!(shared.end_invited("a1"));
+        assert_eq!(shared.admit(&token, true), Err(Refusal::NoSession));
+
+        let (lapsing, _) = shared.invite();
+        shared.state.lock().unwrap().grant.as_mut().unwrap().until_ms = Some(now_ms() - 1);
+        assert_eq!(shared.claim(&lapsing.grant, &lapsing.secret, owner("a1")), Err(Refusal::InviteLapsed));
+        assert_eq!(shared.invite_until(), None);
+        assert_eq!(shared.claim(&lapsing.grant, &lapsing.secret, owner("a1")), Err(Refusal::WrongGrant));
+
+        let (taken_back, _) = shared.invite();
+        assert!(shared.revoke_invite());
+        assert_eq!(shared.claim(&taken_back.grant, &taken_back.secret, owner("a1")), Err(Refusal::WrongGrant));
+        let viewers = shared.mint();
+        assert!(!shared.revoke_invite(), "a viewer's link is not the person's invite");
+        assert!(shared.claim(&viewers.grant, &viewers.secret, owner("a1")).is_ok());
+        assert_eq!(shared.invited_owner(), None);
     }
 }

@@ -363,7 +363,7 @@ def pc_of_link(link: str, pcs: dict[str, DeskPc]) -> tuple[str, str, str] | str:
     """The PC a share link names, and its grant and secret; or why it names none. The host is the PC's name, its URL's host, or that host's first label."""
     matched = LINK.match(link.strip())
     if matched is None:
-        return ("that is not a RigDesk share link: one reads rigdesk://<pc>/<grant>#<secret>, copied with Share with agent in the viewer. "
+        return ("that is not a RigDesk share link: one reads rigdesk://<pc>/<grant>#<secret>, copied with Share with agent in the viewer, or Invite a Rig agent in the PC's tray. "
                 "Given a PC's RustDesk ID and password instead, desk/connect(id, password) joins it")
     host = matched["host"].lower()
     for name, spec in pcs.items():

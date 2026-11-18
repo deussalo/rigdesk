@@ -18,6 +18,7 @@ mod desk;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod enroll;
 mod input;
+pub mod invite;
 pub mod notice;
 pub mod operator;
 mod shell;
