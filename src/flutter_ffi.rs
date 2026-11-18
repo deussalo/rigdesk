@@ -3184,6 +3184,27 @@ pub mod server_side {
         return env.new_string(res).unwrap_or_default().into_raw();
     }
 
+    /// RigDesk: a Rig agent's request answered from its notification, as the app's dialog answers it; Accept only where
+    /// the approve mode takes clicks, as the dialog shows it.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_cmLoginRes(_env: JNIEnv, _class: JClass, conn_id: jni::sys::jint, res: jboolean) -> jboolean {
+        let res = res != 0;
+        if res && !click_approves() {
+            return jboolean::from(false);
+        }
+        super::cm_login_res(conn_id, res);
+        jboolean::from(true)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_clickApproves(_env: JNIEnv, _class: JClass) -> jboolean {
+        jboolean::from(click_approves())
+    }
+
+    fn click_approves() -> bool {
+        hbb_common::password_security::approve_mode() != hbb_common::password_security::ApproveMode::Password
+    }
+
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_isServiceClipboardEnabled(
         env: JNIEnv,

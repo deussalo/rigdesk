@@ -154,6 +154,25 @@ Known limits against a RigDesk PC:
   `desk/join(pc)` joins with no ask, through `POST /join` with the ask `standing grant` in the PC's journal. The PC's
   switch and another holder still refuse it. The RigDesk page lists the grant under the PC, and unassigning it there
   ends a session held through it; the agent is told, and its next `desk/request` asks again.
+  **The PC asks too.** While a join request waits for the operator, the PC itself shows "<agent> (Rig agent)" in its own
+  accept prompt, where Rig is new enough to have plugins answer their own asks (`PluginHost.confirm_answered`). Its
+  Accept answers the request as the operator's Accept (Join once) would, and its Dismiss as Deny; the agent is told the
+  person at the PC answered. The first answer wins: when the operator answers first, the prompt is taken off the PC
+  within 2 s, and an answer either side gives later changes nothing. A prompt the PC lets lapse is shown again, three
+  times in all. On a stock PC (a phone among them, as a notification with Allow), Rig starts `rigdesk-bridge --knock`
+  for that one request, which logs in with no password, so the PC shows RustDesk's own prompt, and reads the answer from
+  the bridge's output. A RigDesk PC is sent `POST /offer {agent, ask, nonce}` over Rig's bearer and shows the agent in
+  its connection manager; `POST /offer/end {ask}` takes it away. How the answer is bound: it counts only when it comes
+  from that PC (the knock Rig started for it, or that PC's own `/events` stream under Rig's bearer), names that request,
+  and on a RigDesk PC carries the 128-bit nonce Rig made for it, which goes to the PC alone and never to the agent; and
+  only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
+  Known limits:
+  * a stock PC whose RustDesk approves by password only shows no Accept, so only the operator can answer;
+  * on a stock PC, Accept fully authorizes the login that asked, so the person may briefly see it connected before it closes;
+  * an agent picks its own title, and the prompt shows it, marked "(Rig agent)": the name says who asks only as far as the title does;
+  * a PC that hides its connection manager (`allow-hide-cm`) shows nothing;
+  * a request open when Rig restarts is not shown on the PC again;
+  * agents' shells run as Rig's own user, so an agent that can run commands on Rig's host can do what Rig can.
 * `desk/join(pc)` — joins a PC assigned to the caller, by name. A desk call with no session joins the caller's
   assigned PC by itself only when it has exactly one; with more it is refused and lists them.
 * `desk/<tool>` — the PC's own tools (screenshot, click, type, scroll, move, drag, key, shortcut, wait, clipboard

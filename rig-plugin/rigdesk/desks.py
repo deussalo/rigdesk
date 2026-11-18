@@ -30,7 +30,7 @@ from core.node_data import Shape
 from core.plugin_host import LiveEnding, PluginHost, PluginWords
 from core.tasks import TASKS
 
-from . import adhoc
+from . import adhoc, prompts
 from .health import STATES, History, Health, Thresholds, health, samples_of
 
 ID = "rigdesk"
@@ -457,6 +457,8 @@ class Desks:
         self._adhoc: dict[str, AdHoc] = {}
         self._asked: dict[str, AskedConnect] = {}
         self._adhoc_lost: list[Held] = []
+        self.prompts: dict[str, prompts.Prompt] = {}
+        self.person_answered: set[str] = set()
         self._read_state()
 
     # --- state kept across restarts ---
@@ -496,6 +498,7 @@ class Desks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._adhoc_end_all()
+        await prompts.end_all(self)
         for asked in self._asked.values():
             if asked.expiry is not None:
                 asked.expiry.cancel()
@@ -1049,6 +1052,8 @@ class Desks:
             link.shell = {"open": event.get("open") is True, "code": event.get("code"), "words": event.get("words")}
         if kind == "health":
             TASKS.spawn(f"rigdesk-samples-{link.name}", self._catch_up(link, int(event.get("sample") or 0)))
+        if kind == "offer":
+            prompts.answered(self, link, event)
         if held is not None and (kind != "revoked" or held.agent == event.get("agent_id")):
             key = f"{self._boots.get(pc, '')}:{event_id}" if event_id else f"{self._boots.get(pc, '')}:gap:{now_ms()}"
             if kind == "message":
@@ -1509,6 +1514,9 @@ class Desks:
         """Rig's bearer asks a RigDesk PC for its session for this agent, with no share link; the PC's own switch admits it."""
         link = self._link(pc)
         body = {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ask}
+        if ask in self.person_answered:
+            self.person_answered.discard(ask)
+            body["answered_by"] = "person"
         async with self._client().post(f"{link.spec.url}/join", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             said = _object(await answer.json(content_type=None)) if answer.content_type == "application/json" else {}
             if answer.status == 404 and said.get("code") != "no_join":
@@ -1745,6 +1753,28 @@ class Desks:
                  "its password is gone and the operator's request is withdrawn. desk/connect again if you still need it.")
         lapsed = Held(f"id-{asked.target}", asked.agent, seat.graph, seat.node, "", f"lapsed-{ask}", now_ms(), "adhoc")
         await self._tell(lapsed, words, f"lapsed:{ask}", "queue")
+
+    # --- the PC's own prompt for an agent's desk/request (prompts.py) ---
+
+    def held_on(self, pc: str) -> Held | None:
+        return self._sessions.get(pc)
+
+    def stock_of(self, pc: str) -> StockRemote | None:
+        return self._link(pc).spec.stock
+
+    def bridge_argv(self, stock: StockRemote) -> list[str]:
+        return [str(Path(self._bridge_bin).expanduser()) if "/" in self._bridge_bin else self._bridge_bin, *self._route(stock)]
+
+    def offer_at(self, pc: str) -> tuple[str, dict[str, str]]:
+        link = self._link(pc)
+        return link.spec.url, self._headers(link)
+
+    @property
+    def http(self) -> aiohttp.ClientSession:
+        return self._client()
+
+    async def tell_seat(self, pc: str, agent: str, seat: SeatId, words: str, key: str) -> bool:
+        return await self._tell(Held(pc, agent, seat.graph, seat.node, "", key, now_ms()), words, key, "queue")
 
     async def _adhoc_joined(self, name: str, kept: AdHoc, target: adhoc.Target, password: str, settings: RigdeskSettings,
                             agent: str, graph: str, node: str, title: str, approved: bool) -> tuple[Held, str]:

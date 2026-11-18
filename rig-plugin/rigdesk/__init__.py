@@ -28,7 +28,7 @@ from core.provided import Provision, provider
 from core.policy import OPERATOR
 from core.refusal import PluginCode
 
-from . import adhoc
+from . import adhoc, prompts
 from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
 from .health import figures_json, series
 from .shots import inline
@@ -412,6 +412,8 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
         state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
                                          Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": "join", "ask": asked}),
                                          RIGDESK_CHOICES)
+    if state == "active" and (given.kind == "join" or not entry["stock"]):
+        prompts.start(desks, given.pc, asked, seat, agent, graph, title)
     return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
             "said": "Nothing is granted yet: the operator is asked to Accept, and the decision arrives as your next input."}
 
@@ -425,6 +427,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
     if identity is None or identity.agent != given["agent"] or seat in await host.roster.closed((seat,)):
         raise Refused(REFUSED, f"{given['agent']} no longer stands at {seat.graph}/{seat.node}, so nothing was done on {given['pc']}")
     desks = host.live(Desks)
+    prompts.end(desks, given.get("ask", ""))
     try:
         if asked.get("choice") == "always":
             return await _always_allowed(desks, given, seat.node, identity.label)

@@ -11,13 +11,16 @@
 //!                  [--port 21120] [--journal <file>] [--name "Rig agent"] [--once] [--login-id <ID, with --peer>]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
 //!                  [--mcp-server http://<host>[:port][/path] [--mcp-token-file <file>]]...
+//!   rigdesk-bridge --knock --name "<agent> (Rig agent)" <--peer ... or --id ...>
 //!
+//! `--knock` takes no password or token: it shows the PC's own accept prompt and says what its person answered (see `knock`).
 //! Each `--mcp-server` names an MCP server on the PC's own address (a phone's native tools, say), offered to the holding
 //! agent as a found server; the `--mcp-token-file` after it holds the bearer that server wants.
 //! The passwords and the API bearer are read from files (0600) so they never sit on a command line.
 
 mod desk;
 mod keys;
+mod knock;
 mod rendezvous;
 mod link;
 mod relay;
@@ -43,6 +46,7 @@ struct Args {
     viewer: Option<(u16, PathBuf)>,
     servers: Vec<Remote>,
     once: bool,
+    knock: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -59,6 +63,7 @@ fn parse_args() -> Result<Args, String> {
     let mut viewer_password_file = None;
     let mut servers: Vec<(String, Option<PathBuf>)> = Vec::new();
     let mut once = false;
+    let mut knock = false;
     let mut login_id = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -77,6 +82,7 @@ fn parse_args() -> Result<Args, String> {
             "--viewer-password-file" => viewer_password_file = Some(PathBuf::from(value()?)),
             "--mcp-server" => servers.push((value()?, None)),
             "--once" => once = true,
+            "--knock" => knock = true,
             "--login-id" => login_id = Some(value()?),
             "--mcp-token-file" => match servers.last_mut() {
                 Some((_, file @ None)) => *file = Some(PathBuf::from(value()?)),
@@ -113,14 +119,15 @@ fn parse_args() -> Result<Args, String> {
         .collect::<Result<Vec<_>, String>>()?;
     Ok(Args {
         route,
-        password_file: password_file.ok_or("--password-file is required")?,
-        token_file: token_file.ok_or("--token-file is required")?,
+        password_file: if knock { password_file.unwrap_or_default() } else { password_file.ok_or("--password-file is required")? },
+        token_file: if knock { token_file.unwrap_or_default() } else { token_file.ok_or("--token-file is required")? },
         port,
         journal,
         name,
         viewer,
         servers,
         once,
+        knock,
     })
 }
 
@@ -142,6 +149,9 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if args.knock {
+        std::process::exit(run_knock(args));
+    }
     let (password, bearer) = match (read_secret(&args.password_file, "password"), read_secret(&args.token_file, "token")) {
         (Ok(p), Ok(t)) => (p, t),
         (Err(e), _) | (_, Err(e)) => {
@@ -201,4 +211,20 @@ fn main() {
         }
         std::future::pending::<()>().await;
     });
+}
+
+fn run_knock(args: Args) -> i32 {
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("rigdesk-bridge: no runtime: {e}");
+            return 1;
+        }
+    };
+    runtime.block_on(async move {
+        let link = link::Link::new(args.route, String::new(), args.name, Arc::new(Shared::new(Events::new(1))));
+        let answer = knock::knock(&link).await;
+        println!("{}", answer.line());
+        if answer == knock::Answer::Allowed { 0 } else { 3 }
+    })
 }

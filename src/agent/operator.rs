@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use base::config::keys;
 use hbb_common::{config::Config, log};
-use rigdesk_agent::operator::{Closed, Switch};
+use rigdesk_agent::operator::{Closed, Offer, Switch};
 
 pub const SWITCH_FILE: &str = "agent-join";
 /// IPC config names: read, the agent holding an operator-started session as "<agent id>\n<title>" (empty when none);
@@ -29,6 +29,14 @@ impl Switch for PcSwitch {
             return Err(Closed::Paused);
         }
         Ok(())
+    }
+
+    fn offer(&self, offer: Offer) -> Result<(), String> {
+        super::offer::show(offer)
+    }
+
+    fn offer_end(&self, ask: &str) -> bool {
+        super::offer::end(ask)
     }
 }
 

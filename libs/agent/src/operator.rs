@@ -18,6 +18,35 @@ pub enum Closed {
 /// The PC's switch for operator-started sessions, filled by the host.
 pub trait Switch: Send + Sync {
     fn open(&self) -> Result<(), Closed>;
+
+    /// Asks the person at the PC, while the operator's ask stands in Rig, whether the agent may join: the host shows its own
+    /// accept prompt and pushes their answer as an `offer` event with the offer's ask and nonce. Err says why it shows none.
+    fn offer(&self, _offer: Offer) -> Result<(), String> {
+        Err("this PC's RigDesk shows no prompt for an agent's request".into())
+    }
+
+    /// Takes the prompt for this ask away; false when none shows.
+    fn offer_end(&self, _ask: &str) -> bool {
+        false
+    }
+}
+
+/// An agent's request shown at the PC: `nonce` is Rig's, carried back with the answer, so only Rig's own ask is settled by it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Offer {
+    pub owner: Owner,
+    pub ask: String,
+    pub nonce: String,
+}
+
+/// The offer in an `/offer` body: `{agent, ask, nonce}`.
+pub fn offer_request(body: &Value) -> Result<Offer, String> {
+    let (owner, ask) = request(body)?;
+    let nonce = body.get("nonce").and_then(Value::as_str).filter(|nonce| nonce.len() >= 16).ok_or("offer wants a nonce of 16 characters or more")?;
+    if ask.is_empty() {
+        return Err("offer wants the ask it is for".into());
+    }
+    Ok(Offer { owner, ask, nonce: nonce.to_string() })
 }
 
 /// Why a `/join` was refused.

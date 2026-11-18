@@ -32,6 +32,8 @@ pub enum EventKind {
     ShellSwitch { open: bool, code: Option<String>, words: Option<String> },
     /// The PC took a health sample, read at GET /samples.
     Health { sample: u64 },
+    /// The person at the PC answered an agent's request shown there (`/offer`): `allow`, `deny`, or `lapsed` unanswered.
+    Offer { ask: String, nonce: String, answer: String },
 }
 
 #[derive(Clone, Debug, Serialize)]

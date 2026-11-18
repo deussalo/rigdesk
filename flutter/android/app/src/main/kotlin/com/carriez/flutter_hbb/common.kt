@@ -35,6 +35,9 @@ const val EXT_INIT_FROM_BOOT = "EXT_INIT_FROM_BOOT"
 const val EXT_MEDIA_PROJECTION_RES_INTENT = "MEDIA_PROJECTION_RES_INTENT"
 const val EXT_MEDIA_PROJECTION_RESULT_RECEIVER = "MEDIA_PROJECTION_RESULT_RECEIVER"
 const val EXT_LOGIN_REQ_NOTIFY = "LOGIN_REQ_NOTIFY"
+const val EXT_LOGIN_REQ_ID = "LOGIN_REQ_ID"
+// RigDesk: the login name rigdesk-bridge's --knock gives, asking for a Rig agent (libs/bridge/src/knock.rs)
+const val RIG_KNOCK_ID = "rig"
 
 // Activity requestCode
 const val REQ_INVOKE_PERMISSION_ACTIVITY_MEDIA_PROJECTION = 101
