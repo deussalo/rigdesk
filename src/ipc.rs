@@ -1013,6 +1013,8 @@ async fn handle(data: Data, stream: &mut Connection) {
                     value = Some(Config::get_unlock_pin());
                 } else if name == "agent-operator-session" {
                     value = agent_operator_session();
+                } else if name == "agent-invite" {
+                    value = agent_invite();
                 } else {
                     value = None;
                 }
@@ -1077,6 +1079,8 @@ async fn handle(data: Data, stream: &mut Connection) {
                     Config::set_unlock_pin(&value);
                 } else if name == "agent-operator-end" {
                     agent_operator_end(&value);
+                } else if name == "agent-invite" {
+                    agent_invite_act(&value);
                 } else {
                     return;
                 }
@@ -1762,6 +1766,20 @@ fn agent_operator_session() -> Option<String> {
 fn agent_operator_end(_agent_id: &str) {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     crate::agent::operator::end(_agent_id);
+}
+
+/// For the tray: the invite the person at the PC made, and the session it started (see `agent::invite`).
+fn agent_invite() -> Option<String> {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return Some(crate::agent::invite::text());
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    None
+}
+
+/// From the tray: the person at the PC mints, revokes or ends an invite.
+fn agent_invite_act(_verb: &str) {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    crate::agent::invite::act(_verb);
 }
 
 #[tokio::main(flavor = "current_thread")]

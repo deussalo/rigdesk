@@ -18,6 +18,7 @@ mod desk;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod enroll;
 mod input;
+pub mod invite;
 pub mod notice;
 pub mod offer;
 pub mod operator;
@@ -94,6 +95,7 @@ pub fn start() {
     #[cfg(windows)]
     crate::platform::windows::agent_tray::ensure();
     api.operator_joins(Arc::new(operator::PcSwitch { file: data_dir().map(|dir| dir.join(operator::SWITCH_FILE)) }));
+    api.names_host(invite::link_host());
     #[cfg(target_os = "linux")]
     operator::notify_starts();
     tokio::spawn(async move {

@@ -18,6 +18,7 @@ def test_a_link_names_its_pc_by_name_or_tailnet_host() -> None:
     assert pc_of_link(f"rigdesk://deus/{GRANT}#{SECRET}", PCS) == ("deus", GRANT, SECRET)
     assert pc_of_link(f"rigdesk://deus.tail1234.ts.net/{GRANT}#{SECRET}", PCS) == ("deus", GRANT, SECRET)
     assert "no RigDesk PC named other" in str(pc_of_link(f"rigdesk://other/{GRANT}#{SECRET}", PCS))
+    assert pc_of_link(f"rigdesk://desktop_ab12/{GRANT}#{SECRET}", PCS, {"deus": "DESKTOP_AB12"}) == ("deus", GRANT, SECRET)
     assert "not a RigDesk share link" in str(pc_of_link("https://example.com", PCS))
 
 
@@ -844,6 +845,55 @@ def test_a_message_whose_session_ended_while_it_was_told_is_not_kept_for_the_pcs
             desks._message = message  # type: ignore[method-assign]
             await desks._event(link, {"type": "message", "id": 7, "text": "for agent_a"})
             assert "deus" not in desks._unsent, "a message for the ended session would go to the PC's next agent"
+
+    asyncio.run(run())
+
+
+def test_an_invite_to_a_pc_where_an_agent_may_run_commands_waits_for_the_operator_and_one_elsewhere_joins_at_once() -> None:
+    from aiohttp import ClientSession, web
+    from rigdesk.desks import InviteAsk, RigdeskSettings
+    claimed: list[str] = []
+
+    async def health(_request: web.Request) -> web.Response:
+        return web.json_response({"ok": True, "invite_open": True})
+
+    async def claim(request: web.Request) -> web.Response:
+        claimed.append(request.host)
+        return web.json_response({"session": "s"})
+
+    async def run() -> None:
+        app = web.Application()
+        app.router.add_get("/health", health)
+        app.router.add_post("/claim", claim)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        with tempfile.TemporaryDirectory() as state:
+            token = Path(state) / "token"
+            token.write_text("t" * 32)
+            pcs = {name: DeskPc(url=f"http://127.0.0.1:{port}", token_file=str(token)) for name in ("front", "back")}
+            settings = RigdeskSettings(pcs=pcs)
+            desks = Desks(SimpleNamespace(state_dir=Path(state), docs=_Docs(), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            desks._pcs.update({name: PcLink(name, spec) for name, spec in pcs.items()})
+            desks._resync = lambda *_: None  # type: ignore[method-assign]
+            desks._http = ClientSession()
+            try:
+                assert await desks.allow_shell("front", "agent:a9", "user")
+                try:
+                    await desks.join(f"rigdesk://front/{GRANT}#{SECRET}", "a1", "g", "n", "A")
+                except InviteAsk as asked:
+                    assert asked.pc == "front"
+                else:
+                    raise AssertionError("an invite to a PC with a shell grant was claimed unasked")
+                assert claimed == [] and desks.held_by("a1", "g") is None
+                assert (await desks.join(f"rigdesk://front/{GRANT}#{SECRET}", "a1", "g", "n", "A", approved=True)).pc == "front"
+                assert (await desks.join(f"rigdesk://back/{GRANT}#{SECRET}", "a2", "g", "n", "B")).pc == "back"
+                assert len(claimed) == 2
+            finally:
+                await desks._http.close()
+                await runner.cleanup()
 
     asyncio.run(run())
 

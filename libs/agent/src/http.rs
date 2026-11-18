@@ -16,7 +16,8 @@
 //!        sent again with a key already sent to the same owning agent is answered with the first one's event, not told twice
 //!   GET  /frame?display=N  - a PNG of the PC's screen now, for the bearer's holder: the human to clip and draw on, or the operator's
 //!        screenshot on demand; journaled
-//!   GET  /health           - liveness, this process's boot id, the current standing, and whether the agent shell is open
+//!   GET  /health           - liveness, this process's boot id, the current standing, whether the agent shell is open, and whether an invite is
+//!        open
 //!   GET  /log?n=N          - the newest N entries of the action log (claims, holder changes, blocks, calls)
 //!   GET  /servers          - the MCP servers found on the PC while an agent is connected, and whether MCP is on
 //!   POST /servers/<name>/mcp - MCP to that server, forwarded to its loopback port (on a bridge, to the address it was
@@ -73,7 +74,14 @@ pub struct Api {
     collector: std::sync::OnceLock<Arc<Collector>>,
     operator: std::sync::OnceLock<Arc<dyn crate::operator::Switch>>,
     noted: std::sync::Mutex<Noted>,
+    /// The PC's own host name, which an invite's link names it by; /health reports it so Rig can match it.
+    host: std::sync::OnceLock<String>,
+    /// `/claim`s with a wrong bearer: when one was last journaled, and how many came since.
+    refused_claims: std::sync::Mutex<(u64, u64)>,
 }
+
+/// A wrong-bearer `/claim` is journaled at most this often, with a count of the rest.
+const REFUSED_CLAIM_EVERY_MS: u64 = 60_000;
 
 /// The note keys sent to the owning agent, newest last; forgotten when another agent owns the session.
 #[derive(Default)]
@@ -140,7 +148,7 @@ impl Api {
     pub fn new(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, lane_only: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, lane_only: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default(), host: Default::default(), refused_claims: Default::default() })
     }
 
     /// As `new`, plus the `/viewer/*` routes: the human's share and holder buttons, for a host with no RigDesk viewer.
@@ -148,7 +156,7 @@ impl Api {
     pub fn hosted(shared: Arc<Shared>, desk: Arc<dyn Desk>, journal: Arc<Journal>, bearer: &str, found: Option<Arc<Found>>) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk, journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, lane_only: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() })
+        Arc::new(Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: true, lane_only: false, found, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default(), host: Default::default(), refused_claims: Default::default() })
     }
 
     /// An API that serves the management lane alone, with its own bearer and journal: a Linux PC's root service, whose
@@ -156,7 +164,7 @@ impl Api {
     pub fn lane_only(lane: Arc<Lane>, collector: Option<Arc<Collector>>, shared: Arc<Shared>, journal: Arc<Journal>, bearer: &str) -> Arc<Self> {
         let mcp = Arc::new(Mcp { shared: shared.clone(), desk: Arc::new(NoDesk), journal: journal.clone() });
         let boot = format!("{:016x}", rand::random::<u64>());
-        let api = Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, lane_only: true, found: None, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default() };
+        let api = Api { shared, journal, mcp, bearer: Sha256::digest(bearer.as_bytes()).into(), boot, viewer_routes: false, lane_only: true, found: None, lane: Default::default(), collector: Default::default(), operator: Default::default(), noted: Default::default(), host: Default::default(), refused_claims: Default::default() };
         api.manage(lane, collector);
         Arc::new(api)
     }
@@ -172,6 +180,22 @@ impl Api {
     /// Offers `/join`, sessions the operator starts from Rig, admitted by `switch`. Before `serve`, once.
     pub fn operator_joins(&self, switch: Arc<dyn crate::operator::Switch>) {
         let _ = self.operator.set(switch);
+    }
+
+    /// Names the PC's host in /health. Before `serve`, once.
+    pub fn names_host(&self, host: String) {
+        let _ = self.host.set(host);
+    }
+
+    /// Someone without Rig's bearer tried to claim a link: nothing in the request is trusted, so only the count is kept.
+    fn claim_refused(&self) {
+        let mut refused = self.refused_claims.lock().unwrap_or_else(|p| p.into_inner());
+        if refused.0 != 0 && crate::now_ms().saturating_sub(refused.0) < REFUSED_CLAIM_EVERY_MS {
+            refused.1 += 1;
+            return;
+        }
+        self.journal.record(&Entry::new("a caller without Rig's key", "claim", "refused: bad bearer token", json!({"also_refused_since_last": refused.1})));
+        *refused = (crate::now_ms(), 0);
     }
 
     fn bearer_ok(&self, request: &Request<Incoming>) -> bool {
@@ -254,6 +278,9 @@ impl Api {
     async fn route(self: Arc<Self>, mut request: Request<Incoming>) -> Response<Body> {
         let path = request.uri().path().to_string();
         if !self.bearer_ok(&request) {
+            if path == "/claim" {
+                self.claim_refused();
+            }
             return text(StatusCode::UNAUTHORIZED, "bad bearer token");
         }
         let method = request.method().clone();
@@ -263,9 +290,10 @@ impl Api {
         match (method.as_str(), path.as_str()) {
             ("GET", "/health") if self.lane_only => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "os": std::env::consts::OS, "lane": true,
                                                                   "shell": self.lane.get().map(|lane| lane.switch())})),
-            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "os": std::env::consts::OS, "standing": self.shared.standing(), "down": self.shared.down(),
+            ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "os": std::env::consts::OS, "host": self.host.get(), "standing": self.shared.standing(), "down": self.shared.down(),
                                                                   "shell": self.lane.get().map(|lane| lane.switch()),
-                                                                  "join": self.operator.get().map(|switch| crate::operator::said(switch.as_ref()))})),
+                                                                  "join": self.operator.get().map(|switch| crate::operator::said(switch.as_ref())),
+                                                                  "invite_open": self.shared.invite_until().is_some()})),
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
             ("POST", "/leave") => {
@@ -506,9 +534,16 @@ impl Api {
         if owner.agent_id.is_empty() {
             return text(StatusCode::BAD_REQUEST, "claim wants agent.id");
         }
+        // The one open grant is an invite, so this claim is for it or for nothing: the PC's switch for Rig's sessions holds it too.
+        let invite = self.shared.invite_until().is_some();
+        if let Some(Err(closed)) = self.operator.get().filter(|_| invite).map(|switch| switch.open()) {
+            let words = crate::operator::Refused::Closed(closed).words();
+            self.journal.record(&Entry::new(owner.who(), "claim", "refused", json!({"reason": words, "invited": true})));
+            return json_response(StatusCode::FORBIDDEN, &json!({"error": words}));
+        }
         match self.shared.claim(grant, secret, owner.clone()) {
             Ok(token) => {
-                self.journal.record(&Entry::new(owner.who(), "claim", "ok", json!({"graph": owner.graph})));
+                self.journal.record(&Entry::new(owner.who(), "claim", "ok", json!({"graph": owner.graph, "invited": invite})));
                 json_response(StatusCode::OK, &json!({"session": token, "standing": self.shared.standing()}))
             }
             Err(refusal) => {
@@ -795,6 +830,15 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
+    async fn health(port: u16) -> Value {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream.write_all(b"GET /health HTTP/1.1\r\nhost: x\r\nauthorization: Bearer b\r\nconnection: close\r\n\r\n").await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        let (_, json) = answer.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(json).unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_block_from_the_viewer_is_readable_in_the_log() {
         let dir = std::env::temp_dir().join(format!("rigdesk-http-{}", rand::random::<u32>()));
@@ -923,6 +967,40 @@ mod tests {
         let plain = Api::new(Arc::new(Shared::new(Events::new(64))), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
         let plain = plain.serve(0).await.unwrap();
         assert_eq!(post(plain, "/offer", "", &json!({"agent": agent, "ask": "desk-1", "nonce": "0123456789abcdef"})).await["code"], json!("no_offer"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invites_claim_is_journaled_as_one_and_a_claim_without_rigs_key_is_journaled_refused() {
+        let dir = std::env::temp_dir().join(format!("rigdesk-http-{}", rand::random::<u32>()));
+        let shared = Arc::new(Shared::new(Events::new(64)));
+        let journal = Arc::new(Journal::open(dir.join("a.jsonl"), 1 << 20));
+        let api = Api::new(shared.clone(), Arc::new(NoDesk), journal.clone(), "b", None);
+        let switch = Arc::new(Toggle(std::sync::Mutex::new(Err(crate::operator::Closed::Paused))));
+        api.operator_joins(switch.clone());
+        let port = api.serve(0).await.unwrap();
+        for _ in 0..3 {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            stream.write_all(b"POST /claim HTTP/1.1\r\nhost: x\r\nauthorization: Bearer stolen\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await.unwrap();
+            let mut answer = String::new();
+            stream.read_to_string(&mut answer).await.unwrap();
+            assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+        }
+        assert_eq!(health(port).await["invite_open"], json!(false));
+        let (invite, _) = shared.invite().unwrap();
+        assert_eq!(health(port).await["invite_open"], json!(true), "Rig asks its operator before claiming an invite on a PC an agent may run commands on");
+        let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
+        let claim = json!({"grant": invite.grant, "secret": invite.secret, "agent": agent});
+        assert!(post(port, "/claim", "", &claim).await["error"].as_str().unwrap().contains("paused"));
+        *switch.0.lock().unwrap() = Ok(());
+        assert!(post(port, "/claim", "", &claim).await["session"].is_string());
+        assert_eq!(health(port).await["invite_open"], json!(false));
+
+        let claims: Vec<(String, Value)> = journal.tail(20).into_iter().filter(|e| e.what == "claim").map(|e| (e.outcome, e.detail)).collect();
+        assert_eq!(claims[0], ("refused: bad bearer token".to_string(), json!({"also_refused_since_last": 0})));
+        assert_eq!(claims.len(), 3, "three wrong bearers are one line: {claims:?}");
+        assert_eq!((claims[1].0.as_str(), &claims[1].1["invited"]), ("refused", &json!(true)));
+        assert_eq!((claims[2].0.as_str(), &claims[2].1["invited"]), ("ok", &json!(true)));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]

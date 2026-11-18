@@ -76,7 +76,7 @@ MCP_CALL_LIMIT_S = 310.0  # the PC waits 300 s on its server's answer
 MCP_PROTOCOL = "2025-06-18"
 MCP_TOOL = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 MCP_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9.-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
+LINK = re.compile(r"^rigdesk://(?P<host>[A-Za-z0-9._-]{1,253})/(?P<grant>[0-9a-f]{16,128})#(?P<secret>[0-9a-f]{16,128})$")
 
 type PcName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
 type Grantee = Annotated[str, StringConstraints(pattern=r"^(agent|graph):[A-Za-z0-9_.:-]{1,128}$")]
@@ -272,6 +272,8 @@ class PcLink:
     shell: dict[str, Any] | None = None
     # The OS its agent API names in /health: "windows" or "linux"; None until it answers, or from a RigDesk older than that.
     os: str | None = None
+    # The host name the PC reports in /health, which its invites name it by; None until it answers, or from an older RigDesk.
+    host: str | None = None
     # A Linux PC's watch on its management lane, which says the agent shell's switch apart from the desktop's agent API.
     lane: asyncio.Task[None] | None = None
     # The PC's switch for sessions the operator starts from Rig, as it last said: {open, code, words}; None for a RigDesk without /join, or a stock PC.
@@ -348,6 +350,13 @@ class ConnectAsk(Exception):
         self.target, self.where, self.tried = target, where, tried
 
 
+class InviteAsk(Exception):
+    """desk/join was given the invite a PC's person made, on a PC where an agent holds a shell grant: claiming it waits for the operator's Accept."""
+    def __init__(self, pc: str) -> None:
+        super().__init__(pc)
+        self.pc = pc
+
+
 def failure(failed: BaseException) -> str:
     """An exception in words. A timeout's own text is usually empty, so it is named as one."""
     words = str(failed).strip()
@@ -360,16 +369,20 @@ def _grants(assigned: tuple[str, ...], agent: str, graph: str) -> bool:
     return bool({f"agent:{agent}", f"graph:{graph}"} & set(assigned))
 
 
-def pc_of_link(link: str, pcs: dict[str, DeskPc]) -> tuple[str, str, str] | str:
-    """The PC a share link names, and its grant and secret; or why it names none. The host is the PC's name, its URL's host, or that host's first label."""
+def pc_of_link(link: str, pcs: dict[str, DeskPc], hosts: dict[str, str] | None = None) -> tuple[str, str, str] | str:
+    """The PC a share link names, and its grant and secret; or why it names none. The host is the PC's name, its URL's host, or that host's first label;
+    or the host name the PC reported in hosts, by PC name, as an invite from its tray names it."""
     matched = LINK.match(link.strip())
     if matched is None:
-        return ("that is not a RigDesk share link: one reads rigdesk://<pc>/<grant>#<secret>, copied with Share with agent in the viewer. "
+        return ("that is not a RigDesk share link: one reads rigdesk://<pc>/<grant>#<secret>, copied with Share with agent in the viewer, or Invite a Rig agent in the PC's tray. "
                 "Given a PC's RustDesk ID and password instead, desk/connect(id, password) joins it")
     host = matched["host"].lower()
     for name, spec in pcs.items():
         url_host = (urlsplit(spec.url).hostname or "").lower()
         if host in (name.lower(), url_host, url_host.split(".")[0]):
+            return name, matched["grant"], matched["secret"]
+    for name, reported in (hosts or {}).items():
+        if name in pcs and host == reported.lower():
             return name, matched["grant"], matched["secret"]
     return f"no RigDesk PC named {host} is set up in Rig (plugins.rigdesk.pcs); the operator adds it there"
 
@@ -911,6 +924,7 @@ class Desks:
             health = await answer.json()
         link.standing = health.get("standing")
         link.os = health["os"] if isinstance(health.get("os"), str) else None
+        link.host = health["host"] if isinstance(health.get("host"), str) else None
         if link.spec.lane_token_file is None:
             link.shell = _object(health["shell"]) if isinstance(health.get("shell"), dict) else None
         link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
@@ -1443,9 +1457,9 @@ class Desks:
             raise DeskRefused(f"RigDesk PC {pc} is no longer set up in Rig")
         return link
 
-    async def join(self, link_text: str, agent: str, graph: str, node: str, title: str, via: Literal["link", "assigned"] = "link") -> Held:
+    async def join(self, link_text: str, agent: str, graph: str, node: str, title: str, via: Literal["link", "assigned"] = "link", approved: bool = False) -> Held:
         settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
-        found = pc_of_link(link_text, dict(settings.pcs))
+        found = pc_of_link(link_text, dict(settings.pcs), {name: link.host for name, link in self._pcs.items() if link.host})
         if isinstance(found, str):
             raise DeskRefused(found)
         pc, grant, secret = found
@@ -1453,6 +1467,8 @@ class Desks:
         if mine is not None:
             raise DeskRefused(f"you already own the session on {mine.pc}; desk/leave it before joining another" if mine.pc != pc else f"you already own the session on {pc}")
         link = self._link(pc)
+        if not approved and self.shell_granted(pc) and await self._invite_open(pc):
+            raise InviteAsk(pc)
         body = {"grant": grant, "secret": secret, "agent": {"id": agent, "title": title, "graph": graph}}
         async with self._client().post(f"{link.spec.url}/claim", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             said = await answer.json(content_type=None)
@@ -1513,6 +1529,14 @@ class Desks:
             health = _object(await answer.json(content_type=None))
         link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
         return link.join
+
+    async def _invite_open(self, pc: str) -> bool:
+        """Whether the grant open on a RigDesk PC now is an invite its person made, read from its /health; a build without invites says nothing, so False."""
+        link = self._link(pc)
+        async with self._client().get(f"{link.spec.url}/health", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
+            if answer.status != 200:
+                raise DeskRefused(f"{pc}'s /health answered HTTP {answer.status}")
+            return _object(await answer.json(content_type=None)).get("invite_open") is True
 
     async def _join_operator(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str, via: Literal["link", "assigned"] = "link") -> Held:
         """Rig's bearer asks a RigDesk PC for its session for this agent, with no share link; the PC's own switch admits it."""
