@@ -61,6 +61,7 @@ pub enum Refusal {
     NotPaired,
     NoInvite,
     BadProof,
+    ForOtherAgent,
 }
 
 impl Refusal {
@@ -69,6 +70,7 @@ impl Refusal {
             Refusal::NotPaired => "This device is not paired with Rig",
             Refusal::NoInvite => "This invite has lapsed, was revoked or was already used",
             Refusal::BadProof => "This invite can only be redeemed by Rig",
+            Refusal::ForOtherAgent => "This invite is for another Rig agent",
         }
     }
 }
@@ -90,6 +92,7 @@ pub struct Holder {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OpenInvite {
     pub until_ms: i64,
+    pub agent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -110,6 +113,7 @@ struct Open {
     grant: String,
     secret_hash: [u8; 32],
     until_ms: i64,
+    agent: Option<String>,
 }
 
 /// One login's redemption attempt.
@@ -136,14 +140,14 @@ impl Invites {
     }
 
     /// A new link replaces an open one. An agent using the device is ended first, so one invite means one agent.
-    fn mint(&mut self, device_id: &str, now_ms: i64) -> Result<Minted, &'static str> {
+    fn mint(&mut self, device_id: &str, agent: Option<&str>, now_ms: i64) -> Result<Minted, &'static str> {
         if self.holder.is_some() {
             return Err("A Rig agent is using this device");
         }
         let (grant, secret) = (fresh(), fresh());
         let until_ms = now_ms + LIFETIME_MS;
         let link = format!("rigdesk://id.{device_id}/{grant}#{secret}");
-        self.open = Some(Open { grant, secret_hash: secret_hash(&secret), until_ms });
+        self.open = Some(Open { grant, secret_hash: secret_hash(&secret), until_ms, agent: agent.map(str::to_owned) });
         self.refused = None;
         Ok(Minted { link, until_ms })
     }
@@ -179,13 +183,16 @@ impl Invites {
         if !sign::verify_detached(&signature, &claim.message(), key) {
             return Err(Refusal::BadProof);
         }
+        if open.agent.as_ref().map_or(false, |agent| *agent != invite.agent_id) {
+            return Err(Refusal::ForOtherAgent);
+        }
         Ok(Holder { agent: invite.agent_id.clone(), title: invite.agent_title.clone(), conn: login.conn })
     }
 
     fn state(&mut self, now_ms: i64) -> State {
         self.lapse(now_ms);
         State {
-            open: self.open.as_ref().map(|open| OpenInvite { until_ms: open.until_ms }),
+            open: self.open.as_ref().map(|open| OpenInvite { until_ms: open.until_ms, agent: open.agent.clone() }),
             holder: self.holder.clone(),
             refused: self.refused.clone(),
         }
@@ -225,11 +232,17 @@ pub fn pair(key: &str) -> bool {
     true
 }
 
-pub fn mint() -> Result<Minted, &'static str> {
+/// With `agent`, the Rig agent id the person chose, only that agent can redeem the invite; without it, the first agent
+/// Rig names does.
+pub fn mint(agent: Option<&str>) -> Result<Minted, &'static str> {
     if paired_key().is_none() {
         return Err(Refusal::NotPaired.words());
     }
-    INVITES.lock().unwrap().mint(&Config::get_id(), get_time())
+    let agent = agent.map(str::trim);
+    if agent == Some("") {
+        return Err("Name the Rig agent this invite is for");
+    }
+    INVITES.lock().unwrap().mint(&Config::get_id(), agent, get_time())
 }
 
 pub fn revoke() -> bool {
@@ -294,7 +307,7 @@ mod tests {
     fn rigs_signature_redeems_once_and_names_the_agent() {
         let (public, secret) = sign::gen_keypair();
         let mut invites = Invites::default();
-        let minted = invites.mint(DEVICE, NOW).unwrap();
+        let minted = invites.mint(DEVICE, None, NOW).unwrap();
         assert_eq!(minted.until_ms, NOW + LIFETIME_MS);
         let invite = invite(&minted.link, &secret, "salt", "challenge", "agent_a");
 
@@ -313,7 +326,7 @@ mod tests {
         let (public, secret) = sign::gen_keypair();
         let (_, other) = sign::gen_keypair();
         let mut invites = Invites::default();
-        let link = invites.mint(DEVICE, NOW).unwrap().link;
+        let link = invites.mint(DEVICE, None, NOW).unwrap().link;
 
         let forged = invite(&link, &other, "salt", "challenge", "agent_a");
         assert_eq!(invites.redeem(Some(&public), &login(&forged), NOW), Err(Refusal::BadProof));
@@ -332,13 +345,13 @@ mod tests {
     fn an_invite_lapses_after_fifteen_minutes_and_is_replaced_by_a_new_one() {
         let (public, secret) = sign::gen_keypair();
         let mut invites = Invites::default();
-        let first = invites.mint(DEVICE, NOW).unwrap().link;
-        let second = invites.mint(DEVICE, NOW).unwrap().link;
+        let first = invites.mint(DEVICE, None, NOW).unwrap().link;
+        let second = invites.mint(DEVICE, None, NOW).unwrap().link;
         let replaced = invite(&first, &secret, "salt", "challenge", "agent_a");
         assert_eq!(invites.redeem(Some(&public), &login(&replaced), NOW), Err(Refusal::NoInvite));
 
         let late = invite(&second, &secret, "salt", "challenge", "agent_a");
-        assert_eq!(invites.state(NOW + LIFETIME_MS - 1).open, Some(OpenInvite { until_ms: NOW + LIFETIME_MS }));
+        assert_eq!(invites.state(NOW + LIFETIME_MS - 1).open, Some(OpenInvite { until_ms: NOW + LIFETIME_MS, agent: None }));
         assert_eq!(invites.redeem(Some(&public), &login(&late), NOW + LIFETIME_MS), Err(Refusal::NoInvite));
         assert_eq!(invites.state(NOW + LIFETIME_MS).open, None);
     }
@@ -347,14 +360,29 @@ mod tests {
     fn a_new_invite_waits_until_the_agent_has_left() {
         let (public, secret) = sign::gen_keypair();
         let mut invites = Invites::default();
-        let link = invites.mint(DEVICE, NOW).unwrap().link;
+        let link = invites.mint(DEVICE, None, NOW).unwrap().link;
         let invite = invite(&link, &secret, "salt", "challenge", "agent_a");
         invites.redeem(Some(&public), &login(&invite), NOW).unwrap();
 
-        assert!(invites.mint(DEVICE, NOW).is_err());
+        assert!(invites.mint(DEVICE, None, NOW).is_err());
         invites.left(8);
-        assert!(invites.mint(DEVICE, NOW).is_err());
+        assert!(invites.mint(DEVICE, None, NOW).is_err());
         invites.left(7);
-        assert!(invites.mint(DEVICE, NOW).is_ok());
+        assert!(invites.mint(DEVICE, None, NOW).is_ok());
+    }
+
+    #[test]
+    fn an_invite_made_for_one_agent_refuses_another_and_stays_open_for_it() {
+        let (public, secret) = sign::gen_keypair();
+        let mut invites = Invites::default();
+        let link = invites.mint(DEVICE, Some("agent_a"), NOW).unwrap().link;
+        assert_eq!(invites.state(NOW).open.and_then(|open| open.agent), Some("agent_a".to_owned()));
+
+        let other = invite(&link, &secret, "salt", "challenge", "agent_b");
+        assert_eq!(invites.redeem(Some(&public), &login(&other), NOW), Err(Refusal::ForOtherAgent));
+        assert_eq!(invites.state(NOW).holder, None);
+
+        let chosen = invite(&link, &secret, "salt", "challenge", "agent_a");
+        assert_eq!(invites.redeem(Some(&public), &login(&chosen), NOW).unwrap().agent, "agent_a");
     }
 }

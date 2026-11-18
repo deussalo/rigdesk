@@ -38,6 +38,23 @@ impl Entry {
     }
 }
 
+/// The agents that last held a session here, newest first and at most `most`, as (id, title) on one line each: whom the
+/// person at the PC can pick for an invite.
+pub fn recent_agents(entries: &[Entry], most: usize) -> Vec<(String, String)> {
+    let mut agents: Vec<(String, String)> = Vec::new();
+    for entry in entries.iter().rev().filter(|e| matches!(e.what.as_str(), "claim" | "join") && e.outcome == "ok") {
+        let Some((title, id)) = entry.who.strip_suffix(')').and_then(|who| who.rsplit_once(" (")) else { continue };
+        if id.is_empty() || id.contains(char::is_whitespace) || agents.iter().any(|(known, _)| known == id) {
+            continue;
+        }
+        agents.push((id.to_string(), title.split_whitespace().collect::<Vec<_>>().join(" ")));
+        if agents.len() == most {
+            break;
+        }
+    }
+    agents
+}
+
 /// Append-only JSONL on disk, rotated to `<name>.1` past `max_bytes`; one previous file is kept.
 pub struct Journal {
     path: Option<PathBuf>,
@@ -111,6 +128,21 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_agents_are_those_that_joined_newest_first_once_each() {
+        let entries = [
+            Entry::new("Old (a0)", "claim", "ok", Value::Null),
+            Entry::new("Ops (a1)", "claim", "ok", Value::Null),
+            Entry::new("Front\ndesk (a2)", "join", "ok", Value::Null),
+            Entry::new("Ops (a1)", "claim", "ok", Value::Null),
+            Entry::new("Stranger (a3)", "claim", "refused", Value::Null),
+            Entry::new("Clicker (a4)", "call desk/click", "ok", Value::Null),
+            Entry::new("human", "invite", "minted", Value::Null),
+        ];
+        let agents = recent_agents(&entries, 2);
+        assert_eq!(agents, vec![("a1".to_string(), "Ops".to_string()), ("a2".to_string(), "Front desk".to_string())]);
+    }
 
     #[test]
     fn rotates_and_tails_across_files() {
