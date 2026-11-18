@@ -154,6 +154,8 @@ fn make_tray() -> hbb_common::ResultType<()> {
     });
     #[cfg(windows)]
     let mut last_click = std::time::Instant::now();
+    #[cfg(windows)]
+    let mut menu_hwnd: isize = 0;
     #[cfg(target_os = "macos")]
     {
         use tao::platform::macos::EventLoopExtMacOS;
@@ -172,24 +174,29 @@ fn make_tray() -> hbb_common::ResultType<()> {
             }
             // We create the icon once the event loop is actually running
             // to prevent issues like https://github.com/tauri-apps/tray-icon/issues/90
+            #[cfg_attr(windows, allow(unused_mut))]
             let mut builder = TrayIconBuilder::new()
                 .with_id(crate::get_app_name().to_lowercase())
-                .with_menu(Box::new(tray_menu.clone()))
                 .with_tooltip(tooltip(0))
                 .with_icon(icon.clone());
+            // On Windows the tray shows its own menu on a right click (show_menu below).
+            #[cfg(not(windows))]
+            {
+                builder = builder.with_menu(Box::new(tray_menu.clone()));
+            }
             #[cfg(target_os = "macos")]
             {
                 builder = builder.with_icon_as_template(true);
             }
-            #[cfg(target_os = "windows")]
-            {
-                // Required since tray-icon 0.17
-                // Fixes #15215, #15222, #15410
-                builder = builder.with_menu_on_left_click(false);
-            }
             let tray = builder.build();
             match tray {
-                Ok(tray) => _tray_icon = Arc::new(Mutex::new(Some(tray))),
+                Ok(tray) => {
+                    #[cfg(windows)]
+                    {
+                        menu_hwnd = tray.window_handle() as isize;
+                    }
+                    _tray_icon = Arc::new(Mutex::new(Some(tray)));
+                }
                 Err(err) => {
                     log::error!("Failed to create tray icon: {}", err);
                 }
@@ -270,9 +277,14 @@ fn make_tray() -> hbb_common::ResultType<()> {
             }
         }
 
-        if let Ok(_event) = tray_channel.try_recv() {
+        while let Ok(_event) = tray_channel.try_recv() {
             #[cfg(target_os = "windows")]
             match _event {
+                TrayEvent::Click {
+                    button: tray_icon::MouseButton::Right,
+                    button_state: tray_icon::MouseButtonState::Up,
+                    ..
+                } if menu_hwnd != 0 => show_menu(&tray_menu, menu_hwnd),
                 TrayEvent::Click {
                     button,
                     button_state,
@@ -282,7 +294,7 @@ fn make_tray() -> hbb_common::ResultType<()> {
                         && button_state == tray_icon::MouseButtonState::Up
                     {
                         if last_click.elapsed() < std::time::Duration::from_secs(1) {
-                            return;
+                            continue;
                         }
                         open_func();
                         last_click = std::time::Instant::now();
@@ -306,6 +318,27 @@ fn make_tray() -> hbb_common::ResultType<()> {
             }
         }
     });
+}
+
+/// Shows the tray menu at the pointer and returns once it closes, having sent the chosen entry's MenuEvent. With
+/// tray-icon's own menu, an entry chosen while another process's window held the foreground (the connection manager's,
+/// after the person's Allow) took effect only at the person's next key press.
+#[cfg(windows)]
+fn show_menu(menu: &tray_icon::menu::Menu, hwnd: isize) {
+    use tray_icon::menu::ContextMenu;
+    use winapi::um::winuser::{GetForegroundWindow, PostMessageW, SetForegroundWindow, WM_NULL};
+    let window = hwnd as winapi::shared::windef::HWND;
+    let opened = std::time::Instant::now();
+    // A menu whose owner is not the foreground window neither closes on a click outside it nor reliably on a choice.
+    let foreground = unsafe { SetForegroundWindow(window) != 0 && GetForegroundWindow() == window };
+    let chose = unsafe { menu.show_context_menu_for_hwnd(hwnd, None) };
+    // Microsoft's documented follow-up to a tray menu: makes the next click on the icon open it again at once.
+    unsafe { PostMessageW(window, WM_NULL, 0, 0) };
+    log::info!(
+        "tray: menu open {} ms, {}; it took the foreground: {foreground}",
+        opened.elapsed().as_millis(),
+        if chose { "an entry chosen" } else { "nothing chosen" }
+    );
 }
 
 #[cfg(windows)]
