@@ -936,12 +936,12 @@ mod tests {
         assert!(held["error"].as_str().unwrap().contains("Helper holds"));
         let joins: Vec<String> = journal.tail(20).into_iter().filter(|e| e.what == "join").map(|e| e.outcome).collect();
         assert_eq!(joins, vec!["refused: join_off", "refused: join_paused", "ok", "refused: held"]);
-        assert!(!shared.operator_person_allowed(), "the operator's Accept stays the operator's");
+        assert_eq!(shared.operator_session().map(|(_, person)| person), Some(false), "the operator's Accept stays the operator's");
         assert!(shared.revoke("done"));
         post(port, "/join", "", &json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk-3", "answered_by": "person"})).await;
         let by: Vec<Value> = journal.tail(20).into_iter().filter(|e| e.what == "join" && e.outcome == "ok").map(|e| e.detail["by"].clone()).collect();
         assert_eq!(by, vec![json!("Rig, operator-approved"), json!("Rig, allowed by the person at the PC")]);
-        assert!(shared.operator_person_allowed(), "the PC's notification says who allowed it");
+        assert_eq!(shared.operator_session().map(|(_, person)| person), Some(true), "the PC's notification says who allowed it");
         let _ = std::fs::remove_dir_all(dir);
     }
 

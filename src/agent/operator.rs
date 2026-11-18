@@ -41,10 +41,9 @@ impl Switch for PcSwitch {
     }
 }
 
-/// For the tray: who holds a session the operator started, as "<agent id>\n<title>"; empty when nobody does.
+/// For the tray: who holds a session the operator started, as `session_line` writes it; empty when nobody does.
 pub fn session_text() -> String {
-    let shared = super::shared();
-    shared.operator_owner().map_or(String::new(), |owner| session_line(&owner.agent_id, &owner.title, shared.operator_person_allowed()))
+    super::shared().operator_session().map_or(String::new(), |(owner, person_allowed)| session_line(&owner.agent_id, &owner.title, person_allowed))
 }
 
 /// The person at the PC ended that agent's operator-started session from the tray.
@@ -68,8 +67,7 @@ pub fn notify_starts() {
                 Ok(event) => {
                     if let EventKind::Holder { holder: Holder::Agent, by } = &event.kind {
                         if by == "operator" {
-                            if let Some(owner) = super::shared().operator_owner() {
-                                let person_allowed = super::shared().operator_person_allowed();
+                            if let Some((owner, person_allowed)) = super::shared().operator_session() {
                                 tokio::task::spawn_blocking(move || notify(&owner.title, person_allowed));
                             }
                         }

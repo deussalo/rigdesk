@@ -294,9 +294,9 @@ impl Shared {
         self.state.lock().unwrap().session.as_ref().filter(|s| s.operator).map(|s| s.owner.clone())
     }
 
-    /// Whether the session Rig started was allowed by the person at the PC rather than by the operator.
-    pub fn operator_person_allowed(&self) -> bool {
-        self.state.lock().unwrap().session.as_ref().map_or(false, |s| s.operator && s.person_allowed)
+    /// The same agent, and whether the person at the PC allowed its session rather than the operator, read together.
+    pub fn operator_session(&self) -> Option<(Owner, bool)> {
+        self.state.lock().unwrap().session.as_ref().filter(|s| s.operator).map(|s| (s.owner.clone(), s.person_allowed))
     }
 
     /// The person at the PC ends the operator-started session of `agent_id`; false when that agent holds none.
