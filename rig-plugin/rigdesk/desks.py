@@ -1464,6 +1464,7 @@ class Desks:
             raise DeskRefused(f"{other.title} holds {pc} now")
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via)
+        self.person_answered.discard(ask)
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title)
 
