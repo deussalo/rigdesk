@@ -1056,6 +1056,8 @@ class Desks:
                     self._unsent.get(pc, {}).pop(event_id, None)
                 elif event_id and self._sessions.get(pc) is held:
                     self._unsent.setdefault(pc, {})[event_id] = event
+                elif event_id:
+                    _LOG.warning("rigdesk_message_unsent", f"RigDesk {pc}: a message from the human was never told: the session it was for ended", pc=pc)
             elif (said := words_of(pc, event)) is not None:
                 if kind == "holder" and event.get("by") == "stop" and now_ms() - int(event.get("at_ms") or 0) < STOP_FRESH_MS:
                     await self._interrupt(held)
