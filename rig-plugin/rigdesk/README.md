@@ -217,9 +217,9 @@ Known limits against a RigDesk PC:
   that last used the PC in its tray; the device then refuses any other agent and the invite stays open. Known limits: a device requiring 2FA refuses invites, the session is the desktop only (no
   terminal), an invite spent on a login that then fails needs a new one, any tailnet peer that connects can see that an invite is open (not what it is), and a wrong
   `stock.login_id` is the operator's to catch: Rig has no record of its own that ties an ID to a device, and whoever holds the link and controls the address in that entry can make both tags.
-  A device's invite asks no Accept in Rig and goes past Rig's PC assignment: any agent given the link may join, as a device has no agent shell to guard. If the
-  device's Rig origin changes, its pairing key is replaced, and its invites, open ones included, are redeemable only by
-  the new Rig; the device logs that.
+  A device's invite asks no Accept in Rig and goes past Rig's PC assignment: any agent given the link may join, as a device has no agent shell to guard. The
+  device keeps the first pairing key it fetches. If Rig later answers with a different one, the kept key stays until the person at the device accepts the new one, which
+  revokes any open invite and is logged there; only then can the new Rig redeem its invites.
 * `desk/leave` — ends the session.
 
 ## Agent shell and health (RigDesk PCs)
