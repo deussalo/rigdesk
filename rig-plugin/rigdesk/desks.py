@@ -450,7 +450,7 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
         why = str(event.get("reason") or "the share ended")
         if why == "the agent left":
             return None
-        return f"RigDesk {pc}: your session there ended at {at} ({why}). Desk calls there are refused until you join it again."
+        return f"RigDesk {pc}: your session there ended ({why}). Desk calls there are refused until you join it again."
     if kind == "dropped":
         count = int(event.get("messages") or 0)
         return (f"RigDesk {pc}: {count} of the human's messages were dropped unread at {at}: the PC's queue was full." if count
@@ -1147,7 +1147,7 @@ class Desks:
             elif kind == "holder" and event.get("by") == "quiet" and promised:
                 await self._tell(held, paused_words(pc, int(event.get("at_ms") or 0)), key)
             elif (said := words_of(pc, event)) is not None:
-                await (self._ended(held, said) if kind == "revoked" else self._tell(held, said, key))
+                await (self._ended(held, said, event.get("at_ms")) if kind == "revoked" else self._tell(held, said, key))
         if event_id:
             self._seen[pc] = max(self._seen.get(pc, 0), event_id)
             self._resume_at(pc)
@@ -1252,9 +1252,10 @@ class Desks:
             if self._last.get(pc) != before:
                 await asyncio.to_thread(self._write_state)
 
-    async def _ended(self, held: Held, words: str) -> None:
-        """An agent's session ended without its asking: it is sent nothing, and its next desk call's refusal gives these words."""
-        self._ended_why[(held.agent, held.graph)] = f"{words} (It ended at {_clock(now_ms())}.)"
+    async def _ended(self, held: Held, words: str, at_ms: Any = None) -> None:
+        """An agent's session ended without its asking: it is sent nothing, and its next desk call's refusal gives these words and when it
+        ended, by the PC's clock when the PC said so."""
+        self._ended_why[(held.agent, held.graph)] = f"{words} (It ended at {_clock(int(at_ms or now_ms()))}.)"
 
     def ended_why(self, agent: str, graph: str) -> str | None:
         """Why this agent's last session ended without its asking, while it has not joined again."""
