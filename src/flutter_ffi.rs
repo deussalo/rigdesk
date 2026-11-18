@@ -3205,6 +3205,46 @@ pub mod server_side {
         hbb_common::password_security::approve_mode() != hbb_common::password_security::ApproveMode::Password
     }
 
+    /// RigDesk: keeps Rig's public key, which invites made here must be redeemed with.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_invitePairKey(env: JNIEnv, _class: JClass, key: JString) -> jboolean {
+        let mut env = env;
+        let paired = env.get_string(&key).map_or(false, |key| base::invite::pair(&String::from(key)));
+        jboolean::from(paired)
+    }
+
+    /// RigDesk: a new invite as JSON, `{link, until_ms}` or `{error}`.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_inviteMint(env: JNIEnv, _class: JClass) -> jstring {
+        let res = match base::invite::mint() {
+            Ok(minted) => serde_json::json!(minted),
+            Err(error) => serde_json::json!({ "error": error }),
+        };
+        env.new_string(res.to_string()).unwrap_or_default().into_raw()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_inviteRevoke(_env: JNIEnv, _class: JClass) -> jboolean {
+        jboolean::from(base::invite::revoke())
+    }
+
+    /// RigDesk: `{open: {until_ms}|null, holder: {agent, title}|null, refused: {at_ms, reason}|null}`.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_inviteState(env: JNIEnv, _class: JClass) -> jstring {
+        let res = serde_json::json!(base::invite::state());
+        env.new_string(res.to_string()).unwrap_or_default().into_raw()
+    }
+
+    /// RigDesk: ends the session of the agent using this device by invite.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_inviteEnd(_env: JNIEnv, _class: JClass) -> jboolean {
+        let conn = base::invite::holder_conn();
+        if let Some(conn) = conn {
+            crate::ui_cm_interface::close(conn);
+        }
+        jboolean::from(conn.is_some())
+    }
+
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_isServiceClipboardEnabled(
         env: JNIEnv,

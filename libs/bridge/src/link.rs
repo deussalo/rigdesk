@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc as std_mpsc, Arc, Mutex};
+use std::sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use base::message_proto::{
@@ -129,6 +129,8 @@ pub struct Link {
     carried: AtomicBool,
     /// Hangs up the adopted session running now (`hang_up`).
     hang: AtomicBool,
+    /// An invite the device made: the session login presents it in place of the password.
+    invite: OnceLock<crate::invite::Invite>,
 }
 
 fn now_ms() -> u64 {
@@ -183,7 +185,12 @@ impl Link {
             swap: Notify::new(),
             carried: AtomicBool::new(false),
             hang: AtomicBool::new(false),
+            invite: OnceLock::new(),
         })
+    }
+
+    pub fn set_invite(&self, invite: crate::invite::Invite) {
+        self.invite.get_or_init(|| invite);
     }
 
     /// An ad-hoc join's one session: a one-time password stops working when its connection closes, so the connection is
@@ -371,7 +378,13 @@ impl Link {
                     }),
                     ..Default::default()
                 };
-                return Ok(Some(self.login(&hash, option, None)));
+                let mut login = self.login(&hash, option, None);
+                if let Some(invite) = self.invite.get() {
+                    let request = login.mut_login_request();
+                    request.password = Default::default();
+                    request.rig_invite = MessageField::some(invite.proof(&self.username, &hash));
+                }
+                return Ok(Some(login));
             }
             Some(message::Union::LoginResponse(res)) => match res.union {
                 Some(login_response::Union::Error(e)) => bail!("login refused by the PC: {e}"),

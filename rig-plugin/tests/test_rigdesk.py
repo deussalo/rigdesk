@@ -508,6 +508,59 @@ def test_connect_dials_a_pc_not_ours_only_once_the_operator_approves_and_leaves_
     asyncio.run(run())
 
 
+def test_an_invite_link_dials_the_device_with_rigs_key_and_no_password_and_names_the_calling_agent() -> None:
+    import json
+    import os
+    import stat
+    from rigdesk import adhoc, desks as desks_module
+    from rigdesk.desks import DeskRefused, IdServer, RigdeskSettings
+
+    link = "rigdesk://id.105517719/" + "a" * 32 + "#" + "b" * 32
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            dialed, claim = Path(state) / "dialed", Path(state) / "claim"
+            fake = Path(state) / "bridge"
+            fake.write_text(f"""#!/bin/sh
+echo "$*" >> {dialed}
+[ "$1" = --pair-key ] && {{ echo x > "$2"; echo PUBLICKEY; exit 0; }}
+while [ $# -gt 0 ]; do [ "$1" = --invite-file ] && cp "$2" {claim}; shift; done
+echo "refused: This invite can only be redeemed by Rig"
+exit 3
+""")
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            server = IdServer(host="rd.example.com", key_file=str(Path(state) / "hbbs.pub"))
+            settings = RigdeskSettings(pcs={}, bridge_bin=str(fake), id_server=server)
+            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            secrets_dir = desks_module.SECRETS
+            desks_module.SECRETS = Path(state) / "secrets"
+            try:
+                try:
+                    await desks.join(link, "a1", "g", "n", "Builder")
+                except DeskRefused as refused:
+                    assert "no pairing key" in str(refused), refused
+                else:
+                    raise AssertionError("an invite was redeemed with no pairing key")
+                assert not dialed.exists()
+                assert await desks.pair_key() == "PUBLICKEY"
+                try:
+                    await desks.join(link, "a1", "g", "n", "Builder")
+                except DeskRefused as refused:
+                    said = str(refused)
+                else:
+                    raise AssertionError("a refused invite joined")
+            finally:
+                desks_module.SECRETS = secrets_dir
+            argv = dialed.read_text().splitlines()[-1]
+            assert "--id 105517719 --id-server rd.example.com" in argv and "--once" in argv and "--pair-key-file" in argv, argv
+            assert "--password-file" not in argv and "b" * 32 not in argv, argv
+            assert json.loads(claim.read_text()) == {"grant": "a" * 32, "secret": "b" * 32, "agent_id": "a1", "agent_title": "Builder"}
+            assert "can only be redeemed by Rig" in said and "b" * 32 not in said, said
+            assert os.listdir(Path(state) / "secrets") == ["invite-pair.key"] and desks.entries() == () and desks.held_by("a1", "g") is None
+
+    asyncio.run(run())
+
+
 def test_a_connect_ask_that_lapses_is_withdrawn_from_the_operator_and_its_agent_told() -> None:
     from rigdesk import desks as desks_module
 
