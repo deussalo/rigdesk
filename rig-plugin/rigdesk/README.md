@@ -208,12 +208,16 @@ Known limits against a RigDesk PC:
 * `desk/join(link)` with a device's invite, `rigdesk://id.<RustDesk ID>/<grant>#<secret>` — the person at RigDesk on
   Android made it, and it needs no password. The device needs an entry in Rig's settings with `stock.peer`, its tailnet
   name or address: Rig dials only the PCs set up there, over the tailnet, and never an ID server, since a link can name
-  any ID and a device registers on none. The login carries a signature by Rig's pairing key over the invite, that
-  login's challenge and the agent Rig names. The device, which fetched the public half from the `pair_key` route, checks it and spends the invite on the
-  first login that passes, so the first agent owns the session; it shows that agent and can end it. The invite lapses
+  any ID and a device registers on none. A PC dialed must first show it holds the invite: its greeting carries a tag
+  keyed by the hash of the link's secret, over that connection's challenge and Rig's tailnet address, so a PC cannot
+  pass on another's greeting. A PC that shows none gets nothing of the invite. The login then carries a signature by Rig's pairing key over the invite, that
+  login's challenge and the agent Rig names. The device, which fetched the public half from the `pair_key` route, checks it, spends the invite on the
+  first login that passes and confirms it with a second tag, without which Rig does not count the login as joined. So the first agent owns the session; the device shows that agent and can end it. The invite lapses
   after 15 minutes unclaimed. The person can instead make it for one agent, by its id on the device or from the agents
   that last used the PC in its tray; the device then refuses any other agent and the invite stays open. Known limits: a device requiring 2FA refuses invites, the session is the desktop only (no
-  terminal), and an invite spent on a login that then fails needs a new one.
+  terminal), an invite spent on a login that then fails needs a new one, any tailnet peer that connects can see that an invite is open (not what it is), and someone
+  who holds the link and also controls a PC set up in Rig's settings can make both tags, because only the link's secret vouches for the device: that PC could then pose as the device to Rig
+  and take one login's proof to the real device.
 * `desk/leave` — ends the session.
 
 ## Agent shell and health (RigDesk PCs)

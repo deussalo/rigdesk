@@ -576,6 +576,100 @@ exit 3
     asyncio.run(run())
 
 
+def _invite_tools(state: Path, said: str, settings: dict) -> tuple[Desks, SimpleNamespace, Path, list]:
+    """Desks and a tool call as the plugin's tools get them, with a bridge that records its arguments and answers `said`."""
+    import stat
+    from rigdesk.desks import PAIR_KEY, SECRETS, RigdeskSettings
+
+    dialed, fake = state / "dialed", state / "bridge"
+    fake.write_text(f'#!/bin/sh\necho "$*" >> {dialed}\necho "{said}"\nexit 3\n')
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    SECRETS.mkdir(mode=0o700)
+    (SECRETS / PAIR_KEY).write_text("x")
+    asked: list = []
+
+    async def confirm(*given: object) -> str:
+        asked.append(given)
+        return "open"
+
+    async def caller_title() -> str:
+        return "Builder"
+    shaped = RigdeskSettings(bridge_bin=str(fake), **settings)
+    desks = Desks(SimpleNamespace(state_dir=state, settings=lambda _shape: shaped, report=lambda *_: None, forget=lambda *_: None, confirm=confirm))  # type: ignore[arg-type]
+    place = SimpleNamespace(agent="a1", seat=SeatId(GraphName("g"), NodeId("n")))
+    call = SimpleNamespace(contract=SimpleNamespace(place=place), graph="g", node="n", kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"),
+                           refused=lambda code, words, *_: {"refused": code, "said": words})
+    return desks, call, dialed, asked
+
+
+def _with_invite_tools(body) -> None:
+    from rigdesk import adhoc, desks as desks_module
+
+    async def reached(_host: str, _port: int = 0) -> bool:
+        return True
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            secrets_dir, answers = desks_module.SECRETS, adhoc.answers
+            desks_module.SECRETS, adhoc.answers = Path(state) / "secrets", reached  # type: ignore[assignment]
+            try:
+                await body(Path(state))
+            finally:
+                desks_module.SECRETS, adhoc.answers = secrets_dir, answers
+
+    asyncio.run(run())
+
+
+INVITE_LINK = "rigdesk://id.105517719/" + "a" * 32 + "#" + "b" * 32
+OUR_PCS = {"dell": DeskPc(url="https://dell.tail1234.ts.net", token_file="/dev/null"), "deus": DeskPc(url="https://deus.tail1234.ts.net", token_file="/dev/null")}
+
+
+def test_a_made_up_invite_for_an_id_no_pc_is_set_up_for_dials_nothing_and_asks_nobody() -> None:
+    from rigdesk import JoinInput, _join
+    from rigdesk.desks import IdServer
+
+    async def body(state: Path) -> None:
+        server = IdServer(host="rd.example.com", key_file=str(state / "hbbs.pub"))
+        desks, call, dialed, asked = _invite_tools(state, "refused: Offline", {"pcs": {}, "id_server": server})
+        answer = await _join(desks, call, JoinInput(link=INVITE_LINK))  # type: ignore[arg-type]
+        assert answer["refused"] and "stock.peer" in answer["said"] and "b" * 32 not in answer["said"], answer
+        assert not dialed.exists(), dialed.read_text()
+        assert asked == [] and desks.entries() == () and desks.held_by("a1", "g") is None
+
+    _with_invite_tools(body)
+
+
+def test_an_invite_no_pc_shows_it_holds_tries_only_our_pcs_and_never_a_public_or_id_server() -> None:
+    from rigdesk import JoinInput, _join
+    from rigdesk.desks import ConnectServer, IdServer
+
+    async def body(state: Path) -> None:
+        server = IdServer(host="rd.example.com", key_file=str(state / "hbbs.pub"))
+        connect = ConnectServer(host="rd.example.com", key="A" * 44)
+        desks, call, dialed, asked = _invite_tools(state, "refused: Offline", {"pcs": OUR_PCS, "id_server": server, "connect_server": connect})
+        answer = await _join(desks, call, JoinInput(link=INVITE_LINK))  # type: ignore[arg-type]
+        lines = dialed.read_text().splitlines()
+        assert len(lines) == 2 and all("--peer" in line and "--login-id 105517719" in line and "--invite-file" in line for line in lines), lines
+        assert not any("--id-server" in line or "--id " in line for line in lines), lines
+        assert "dell, deus did not show it holds this invite" in answer["said"] and "lapsed" in answer["said"], answer
+        assert asked == [] and desks.entries() == ()
+
+    _with_invite_tools(body)
+
+
+def test_connecting_to_a_pc_not_ours_still_waits_for_the_operators_accept() -> None:
+    from rigdesk import ConnectInput, _connect
+
+    async def body(state: Path) -> None:
+        desks, call, dialed, asked = _invite_tools(state, "refused: Offline", {"pcs": OUR_PCS})
+        answer = await _connect(desks, call, ConnectInput(id="105517719", password="hunter2-secret", why="to fix the printer"))  # type: ignore[arg-type]
+        desks.connect_dropped(answer["ask"])
+        assert answer["joined"] is False and answer["state"] == "open" and len(asked) == 1, answer
+        assert "--id-server" not in dialed.read_text(), dialed.read_text()
+
+    _with_invite_tools(body)
+
+
 def test_a_connect_ask_that_lapses_is_withdrawn_from_the_operator_and_its_agent_told() -> None:
     from rigdesk import desks as desks_module
 

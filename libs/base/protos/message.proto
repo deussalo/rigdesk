@@ -342,6 +342,8 @@ message CursorPosition {
 message Hash {
   string salt = 1;
   string challenge = 2;
+  // RigDesk: shows the dialer this device holds the open invite (see base::invite).
+  bytes rig_invite_device = 100;
 }
 
 enum ClipboardFormat {
@@ -1100,5 +1102,7 @@ message Message {
     OSLogin os_login = 34;
     AgentRequest agent_request = 40;
     AgentState agent_state = 41;
+    // RigDesk: the device checked the invite this login presented (see base::invite).
+    bytes rig_invite_accepted = 42;
   }
 }

@@ -1522,6 +1522,7 @@ impl Connection {
         self.ip = addr.ip().to_string();
         let mut msg_out = Message::new();
         msg_out.set_hash(self.hash.clone());
+        self.rig_invite_hello(&mut msg_out, addr);
         self.send(msg_out).await;
         self.get_api_server();
         let mut audit = json!({

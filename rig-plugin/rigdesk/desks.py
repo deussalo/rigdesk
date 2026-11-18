@@ -1910,9 +1910,11 @@ class Desks:
             if outside:
                 raise ConnectAsk(target.id, outside[0].words, tuple(tried))
             if isinstance(password, Invited):
-                answered = f"{', '.join(tried)} did not take it as {target.id}" if tried else "no such PC answered"
+                answered = (f"{', '.join(tried)} did not show it holds this invite as {target.id}, so nothing of the invite was sent there: the invite may have lapsed, "
+                            "been used or been revoked, or the device may run a RigDesk too old to show it" if tried else "no such PC answered")
                 raise DeskRefused(f"{target.id} was not reached: an invite is redeemed only over the tailnet, from a PC set up in Rig's settings, and {answered}. "
-                                  f"The operator sets the device up under plugins.rigdesk.pcs with stock.peer, its tailnet name or address; the invite stays open until it lapses{unasked}")
+                                  f"If the device is not set up yet, the operator adds it under plugins.rigdesk.pcs with stock.peer, its tailnet name or address; "
+                                  f"an invite still open stays open until it lapses{unasked}")
             raise DeskRefused(f"{target.id} could not be reached")
         assert kept.process is not None
         kept_password = None if isinstance(password, Invited) else str(password_file)
