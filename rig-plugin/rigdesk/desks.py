@@ -416,7 +416,7 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
         by = event.get("by", "")
         if by == "unblock":
             return f"RigDesk {pc}: the human resumed you at {at}. Carry on there by yourself; look first, the screen may have changed."
-        if by not in ("share", "operator", "quiet"):
+        if by == "hand to agent":
             return f"RigDesk {pc}: the human handed input back to you at {at}. Carry on there by yourself; look first, the screen may have changed."
     if kind == "mcp":
         return (f"RigDesk {pc}: the human turned MCP back on at {at}; the MCP servers running there are offered to you again as they are found."
