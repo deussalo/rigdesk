@@ -251,7 +251,8 @@ work), and while blocked it refuses every call.
   each standing grant is listed by the agent's title with its unassign.
 * A stock PC's row names the file its saved password is kept in, never the password, and a field replaces it
   (`POST /x/rigdesk/password {pc, password}`): the new one goes into that same file (0600), settings are unchanged, and
-  its rigdesk-bridge restarts at once to log in with it. Use it when the row is down with "Wrong Password" because the
+  its rigdesk-bridge restarts at once to log in with it. An agent holding the PC loses its session with the restart and is
+  told, queued for its next turn. Use it when the row is down with "Wrong Password" because the
   PC's permanent RustDesk password changed. A RigDesk PC keeps no password: Rig reaches it with its token.
 * A row among each owning agent's holds, beside its shell and sub-agents: its PC, the PC's state or who holds input, and how long it has been joined; the row opens RigDesk.
 * An up PC's row shows its health verdict, free space per volume, RAM, CPU, Windows build and uptime; opened, the newest

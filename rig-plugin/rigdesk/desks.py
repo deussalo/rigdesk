@@ -752,18 +752,28 @@ class Desks:
         replace_file(path, value.encode(), new_mode=0o600)
 
     async def set_password(self, pc: str, password: str) -> str:
-        """Replaces a stock PC's saved password in the file its entry names, and restarts its rigdesk-bridge so it logs in with it now."""
+        """Replaces a stock PC's saved password in the file its entry names, and restarts its rigdesk-bridge so it logs in with it now. A session an
+        agent holds there ends with the bridge, and the agent is told."""
         link = self._pcs.get(pc)
         if link is None or pc in self._adhoc:
             raise DeskRefused(f"no PC named {pc} is set up in Rig's settings")
-        if link.spec.stock is None:
+        stock = link.spec.stock
+        if stock is None:
             raise DeskRefused(f"{pc} is a RigDesk PC: Rig reaches it with its token, so it keeps no password")
-        path = link.spec.stock.password_file
+        path = stock.password_file
         await asyncio.to_thread(self._replaced_secret, Path(path).expanduser(), password)
-        if link.remote is not None:
-            link.remote.cancel()
-            await asyncio.gather(link.remote, return_exceptions=True)
-        link.remote = TASKS.spawn(f"rigdesk-bridge-{pc}", self._remote(link, link.spec.stock))
+        old = link.remote
+        if old is not None:
+            old.cancel()
+            await asyncio.gather(old, return_exceptions=True)
+        held = self._sessions.pop(pc, None)
+        if held is not None:
+            await asyncio.to_thread(self._write_state)
+            await self._ended(held, f"RigDesk {pc}: the operator replaced its saved password, which restarts its bridge, so your session there ended. "
+                                    "desk/join or desk/request it again.")
+        # A settings change that replaced the link, or another call, started the bridge already, and it reads the new file.
+        if self._pcs.get(pc) is link and link.remote is old:
+            link.remote = TASKS.spawn(f"rigdesk-bridge-{pc}", self._remote(link, stock))
         _LOG.info("rigdesk_password_set", f"RigDesk {pc}: the operator replaced its saved password, and its rigdesk-bridge restarted", pc=pc)
         return path
 

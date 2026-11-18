@@ -594,6 +594,12 @@ def test_the_operator_replaces_a_stock_pcs_saved_password_and_its_bridge_logs_in
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
             desks = Desks(SimpleNamespace(state_dir=Path(state), report=lambda *_: None))  # type: ignore[arg-type]
+            told: list[str] = []
+
+            async def tell(_held: Held, words: str, _key: str, _timing: str = "steer") -> bool:
+                told.append(words)
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
             password, started = Path(state) / "phone.password", Path(state) / "started"
             password.write_text("old-password")
             bridge = Path(state) / "bridge"
@@ -606,8 +612,13 @@ def test_the_operator_replaces_a_stock_pcs_saved_password_and_its_bridge_logs_in
             link.remote = asyncio.get_running_loop().create_task(desks._remote(link, stock))
             try:
                 await _until(lambda: started.exists() and started.read_text() == "old-password\n")
-                assert await desks.set_password("moto-g57", "new-password") == str(password)
+                desks._sessions["moto-g57"] = Held("moto-g57", "agent_a", "g", "n", "A", "s", 0)
+                both = await asyncio.gather(desks.set_password("moto-g57", "new-password"), desks.set_password("moto-g57", "new-password"))
+                assert both == [str(password), str(password)]
                 await _until(lambda: started.read_text() == "old-password\nnew-password\n")
+                await asyncio.sleep(0.2)
+                assert started.read_text() == "old-password\nnew-password\n", "two calls at once started two bridges"
+                assert "moto-g57" not in desks._sessions and len(told) == 1 and "session there ended" in told[0], told
                 assert password.read_text() == "new-password" and password.stat().st_mode & 0o777 == 0o600
                 rows = {row["name"]: row for row in desks.pcs()}
                 assert rows["moto-g57"]["password_file"] == str(password) and rows["deus"]["password_file"] is None
