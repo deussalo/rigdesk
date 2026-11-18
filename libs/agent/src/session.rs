@@ -9,7 +9,7 @@ use crate::events::{EventKind, Events};
 use crate::now_ms;
 
 /// How long the human's input must pause before input goes back to the agent by itself.
-pub const QUIET_MS: u64 = 3_000;
+pub const QUIET_MS: u64 = 5_000;
 /// How long an invite the person at the PC made waits to be claimed.
 pub const INVITE_FOR_MS: u64 = 15 * 60_000;
 
@@ -61,7 +61,7 @@ impl Refusal {
             }
             Refusal::Blocked { since_ms } => format!("the human blocked the agent at {}; nothing runs until they unblock it", clock(*since_ms)),
             Refusal::HumanHolds { since_ms } => format!(
-                "the human is using the PC (since {}); reads still work, and actions work again once their input pauses for {} s: look again, then retry",
+                "the person is using the PC (since {}); reads still work; you will be notified when they have been inactive for more than {} seconds",
                 clock(*since_ms),
                 QUIET_MS / 1000
             ),

@@ -101,7 +101,7 @@ client sign this text too before you run the line with it on.
 >
 > **You are told and you can end it.** When such a session starts, a notification names the agent, and while it runs
 > the RigDesk tray icon names it with *End the agent's session*. Your own mouse and keyboard always go first: while you
-> use the computer, the agent's actions are refused until you pause for 3 seconds. Every action the agent takes is
+> use the computer, the agent's actions are refused until you pause for 5 seconds. Every action the agent takes is
 > logged on this computer.
 >
 > *Pause sessions started from Rig*, in RigDesk's security settings behind the admin PIN, refuses new sessions until it
@@ -221,8 +221,8 @@ PIN-locked settings): an invite obeys the same switch as the operator's Accept, 
   it. A viewer's share link never asks. Closing the switch above revokes an open invite. The check is made when the
   agent joins: a shell grant given after that leaves the invited agent's session running.
 - **Your input goes first.** Any mouse or keyboard input, from a viewer or at the PC itself, reaches the PC at once,
-  and the agent's actions are refused ("the human is using the PC …", reads still work) until that input pauses for
-  3 seconds; then the agent may act again by itself.
+  and the agent's actions are refused ("the person is using the PC …", reads still work) until that input pauses for
+  5 seconds; then the agent may act again by itself, and an agent that was refused meanwhile is told so.
 - **Stop** (big, red) blocks the agent, reads included, and cuts its turn short. It turns into a green **Resume**,
   which lets the agent act again.
 - **Message** opens a box with a still of the current screen. Clip a region, mark it up with pen, arrow, box or
