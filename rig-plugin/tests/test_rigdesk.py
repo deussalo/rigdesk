@@ -1122,6 +1122,29 @@ def test_a_stock_pc_is_asked_through_its_bridge_and_its_allow_answers_the_ask_wi
     asyncio.run(run())
 
 
+def test_a_stock_pcs_bridge_can_prove_its_knock_with_rigs_pairing_key() -> None:
+    from rigdesk.desks import PAIR_KEY, SECRETS, StockRemote
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state), report=lambda *_: None))  # type: ignore[arg-type]
+            argv, bridge = Path(state) / "argv", Path(state) / "bridge"
+            bridge.write_text(f"#!/bin/sh\necho \"$@\" > {argv}\nexec sleep 60\n")
+            bridge.chmod(0o700)
+            desks._bridge_bin = str(bridge)
+            stock = StockRemote(peer="moto-g57.tail1234.ts.net")
+            link = desks._pcs["moto-g57"] = PcLink("moto-g57", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
+            link.remote = asyncio.get_running_loop().create_task(desks._remote(link, stock))
+            try:
+                await _until(lambda: argv.exists() and argv.read_text().strip())
+                assert f"--pair-key-file {(SECRETS / PAIR_KEY).expanduser()}" in argv.read_text()
+            finally:
+                link.remote.cancel()
+                await asyncio.gather(link.remote, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_a_message_whose_session_ended_while_it_was_told_is_not_kept_for_the_pcs_next_agent() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:

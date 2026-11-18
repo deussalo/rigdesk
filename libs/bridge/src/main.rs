@@ -11,11 +11,13 @@
 //!                  [--port 21120] [--journal <file>] [--name "Rig agent"] [--once] [--login-id <ID, with --peer>]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
 //!                  [--mcp-server http://<host>[:port][/path] [--mcp-token-file <file>]]...
-//!                  [--invite-file <file> --pair-key-file <file>, with --once, --peer and --login-id]
+//!                  [--pair-key-file <file>]
+//!                  [--invite-file <file>, with --pair-key-file, --once, --peer and --login-id]
 //!   rigdesk-bridge --pair-key <file>
 //!
 //! `--invite-file` redeems an invite the device made, with Rig's pairing key, in place of a password (see `invite`);
 //! `--pair-key` makes that key if the file has none and prints its public half, which the device keeps.
+//! `--pair-key-file` alone proves a knock with that key to a device that asks for the proof (see `knock`).
 //! With no `--password-file`, only a connection the person at the PC allows on Rig's `POST /offer` carries a session (see
 //! `knock`); with one, such a connection carries the session the same way, and the password serves unattended access.
 //! Each `--mcp-server` names an MCP server on the PC's own address (a phone's native tools, say), offered to the holding
@@ -52,6 +54,7 @@ struct Args {
     servers: Vec<Remote>,
     once: bool,
     invite: Option<(PathBuf, PathBuf)>,
+    pair_key: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -103,10 +106,11 @@ fn parse_args() -> Result<Args, String> {
         (None, None) => None,
         _ => return Err("--viewer-port and --viewer-password-file go together".into()),
     };
+    let pair_key = pair_key_file.clone();
     let invite = match (invite_file, pair_key_file) {
         (Some(file), Some(key)) if once && password_file.is_none() && peer.is_some() && login_id.is_some() => Some((file, key)),
-        (None, None) => None,
-        _ => return Err("--invite-file and --pair-key-file go together, with --once, --peer and --login-id and no --password-file".into()),
+        (None, _) => None,
+        _ => return Err("--invite-file goes with --pair-key-file, --once, --peer and --login-id and no --password-file".into()),
     };
     if login_id.is_some() && peer.is_none() {
         return Err("--login-id goes with --peer".into());
@@ -140,6 +144,7 @@ fn parse_args() -> Result<Args, String> {
         servers,
         once,
         invite,
+        pair_key,
     })
 }
 
@@ -237,7 +242,7 @@ fn main() {
             }
         }
         let found = (!args.servers.is_empty()).then(|| Found::remote(args.servers));
-        let knocker = knock::Knocker::new(link.clone(), shared.clone(), tokio::runtime::Handle::current());
+        let knocker = knock::Knocker::new(link.clone(), shared.clone(), tokio::runtime::Handle::current(), args.pair_key);
         let api = Api::hosted(shared, Arc::new(desk::RemoteDesk::new(link)), Arc::new(journal), &bearer, found);
         api.operator_joins(knocker);
         match api.serve(args.port).await {

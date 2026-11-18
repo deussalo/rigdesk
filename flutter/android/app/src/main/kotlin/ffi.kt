@@ -29,7 +29,7 @@ object FFI {
     external fun onClipboardUpdate(clips: ByteBuffer)
     external fun isServiceClipboardEnabled(): Boolean
     external fun cmLoginRes(connId: Int, res: Boolean): Boolean
-    external fun clickApproves(): Boolean
+    external fun rigKnockProved(connId: Int): Boolean
     external fun invitePairKey(key: String): Boolean
     external fun inviteMint(): String
     external fun inviteMintFor(agent: String): String

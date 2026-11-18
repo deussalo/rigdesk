@@ -76,6 +76,8 @@ use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
 
 mod rig_invite;
+#[cfg(target_os = "android")]
+mod rig_knock;
 mod trusted_devices;
 
 const FAILURE_IDX_ID_WHITELIST: usize = 2;
@@ -754,6 +756,10 @@ impl Connection {
                 Some(data) = rx_from_cm.recv() => {
                     match data {
                         ipc::Data::Authorize => {
+                            #[cfg(target_os = "android")]
+                            if !conn.rig_knock_may_authorize() {
+                                continue;
+                            }
                             conn.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
                             conn.trusted_device = None;
                             conn.require_2fa.take();
@@ -1250,6 +1256,8 @@ impl Connection {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         crate::agent::viewer::leave(id);
         base::invite::left(id);
+        #[cfg(target_os = "android")]
+        base::rig_knock::left(id);
         conn.on_close("End", true).await;
         log::info!("#{} connection loop exited", id);
     }
@@ -1523,6 +1531,8 @@ impl Connection {
         let mut msg_out = Message::new();
         msg_out.set_hash(self.hash.clone());
         self.rig_invite_hello(&mut msg_out, addr);
+        #[cfg(target_os = "android")]
+        self.rig_knock_hello(&mut msg_out);
         self.send(msg_out).await;
         self.get_api_server();
         let mut audit = json!({
@@ -2383,6 +2393,10 @@ impl Connection {
     }
 
     fn try_start_cm(&mut self, peer_id: String, name: String, authorized: bool) {
+        #[cfg(target_os = "android")]
+        let Some((peer_id, name)) = self.rig_knock_listed_as(peer_id, name, authorized) else {
+            return;
+        };
         self.send_to_cm(ipc::Data::Login {
             id: self.inner.id(),
             is_file_transfer: self.file_transfer.is_some(),
@@ -2933,6 +2947,10 @@ impl Connection {
             }
             if lr.rig_invite.is_some() {
                 return self.rig_invite_login(lr).await;
+            }
+            #[cfg(target_os = "android")]
+            if base::rig_knock::must_prove(&lr) {
+                return self.rig_knock_login(lr).await;
             }
             match lr.union {
                 Some(login_request::Union::FileTransfer(ft)) => {

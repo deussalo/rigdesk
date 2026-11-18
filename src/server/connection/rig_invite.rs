@@ -68,6 +68,8 @@ impl Connection {
         if !self.send_logon_response_and_keep_alive().await {
             return false;
         }
+        #[cfg(target_os = "android")]
+        base::rig_knock::mark_proved(self.inner.id);
         self.try_start_cm(lr.my_id, format!("{} (Rig agent)", holder.title), self.authorized);
         true
     }

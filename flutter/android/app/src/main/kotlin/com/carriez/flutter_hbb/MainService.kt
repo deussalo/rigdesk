@@ -955,7 +955,7 @@ class MainService : Service() {
     }
 
     /// RigDesk: a Rig agent asks to join, while the operator is asked in Rig too: Allow and Deny answer it from the
-    /// notification itself, as the app's own dialog does, and only where the approve mode takes clicks.
+    /// notification itself, as the app's own dialog does. Allow is there only for a knock that proved Rig's paired key.
     private fun rigRequestNotification(clientID: Int, username: String) {
         val builder = NotificationCompat.Builder(this, notificationChannel)
             .setSmallIcon(R.mipmap.ic_stat_logo)
@@ -968,7 +968,7 @@ class MainService : Service() {
             .setColor(ContextCompat.getColor(this, R.color.primary))
             // With the activity gone nothing cancels it when the request ends.
             .setTimeoutAfter(10 * 60 * 1000L)
-        if (FFI.clickApproves()) {
+        if (FFI.rigKnockProved(clientID)) {
             builder.addAction(0, "Allow", rigRequestIntent(clientID, true))
         }
         builder.addAction(0, "Deny", rigRequestIntent(clientID, false))
@@ -991,6 +991,9 @@ class MainService : Service() {
         if (clientID < 0) return
         if (!FFI.cmLoginRes(clientID, allow)) {
             Log.w(logTag, "the Rig request $clientID could not be answered from its notification")
+        } else if (allow) {
+            // With the app closed nothing else starts it: the dialog's Accept does, and a login that is in at once.
+            startCapture()
         }
         cancelNotification(clientID)
     }

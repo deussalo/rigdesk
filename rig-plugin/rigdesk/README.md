@@ -172,6 +172,9 @@ Known limits against a RigDesk PC:
   the agent keeps its hold and its next action dials in with the password, as unattended access. How the answer is bound: it counts only when it comes on that PC's own `/events` stream under Rig's bearer,
   names that request and carries the 128-bit nonce Rig made for it, which goes to the PC alone and never to the agent;
   and only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
+  RigDesk on Android takes passwords only, so it shows Allow only for a knock signed with Rig's pairing key over that connection's
+  greeting and Rig's address, which the bridge makes with `--pair-key-file`. A phone not paired refuses the knock, and the operator answers in Rig.
+  A login there calling itself Rig with no proof is refused; with the right password it is an ordinary session, listed as "Remote session".
   Known limits:
   * a stock PC whose RustDesk approves by password only shows no Accept, so only the operator can answer;
   * on a stock PC, Accept fully authorizes the login that asked, so the person sees it connected at once, for up to 30 s if no agent then claims it;

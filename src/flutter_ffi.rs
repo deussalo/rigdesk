@@ -3184,12 +3184,12 @@ pub mod server_side {
         return env.new_string(res).unwrap_or_default().into_raw();
     }
 
-    /// RigDesk: a Rig agent's request answered from its notification, as the app's dialog answers it; Accept only where
-    /// the approve mode takes clicks, as the dialog shows it.
+    /// RigDesk: a Rig agent's request answered from its notification, as the app's dialog answers it; Allow only for a
+    /// knock that proved Rig's paired key on this connection.
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_cmLoginRes(_env: JNIEnv, _class: JClass, conn_id: jni::sys::jint, res: jboolean) -> jboolean {
         let res = res != 0;
-        if res && !click_approves() {
+        if res && !base::rig_knock::proved(conn_id) {
             return jboolean::from(false);
         }
         super::cm_login_res(conn_id, res);
@@ -3197,12 +3197,8 @@ pub mod server_side {
     }
 
     #[no_mangle]
-    pub unsafe extern "system" fn Java_ffi_FFI_clickApproves(_env: JNIEnv, _class: JClass) -> jboolean {
-        jboolean::from(click_approves())
-    }
-
-    fn click_approves() -> bool {
-        hbb_common::password_security::approve_mode() != hbb_common::password_security::ApproveMode::Password
+    pub unsafe extern "system" fn Java_ffi_FFI_rigKnockProved(_env: JNIEnv, _class: JClass, conn_id: jni::sys::jint) -> jboolean {
+        jboolean::from(base::rig_knock::proved(conn_id))
     }
 
     /// RigDesk: keeps Rig's public key, which invites made here must be redeemed with.

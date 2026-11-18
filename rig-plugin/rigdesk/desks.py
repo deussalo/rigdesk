@@ -824,7 +824,7 @@ class Desks:
         argv = [str(Path(self._bridge_bin).expanduser()) if "/" in self._bridge_bin else self._bridge_bin,
                 *self._route(stock), *([] if stock.password_file is None else ["--password-file", str(Path(stock.password_file).expanduser())]),
                 "--token-file", str(Path(link.spec.token_file).expanduser()), "--port", str(urlsplit(link.spec.url).port),
-                "--journal", str(self._dir / f"bridge-{link.name}.journal")]
+                "--journal", str(self._dir / f"bridge-{link.name}.journal"), "--pair-key-file", str((SECRETS / PAIR_KEY).expanduser())]
         if stock.viewer_port is not None and stock.viewer_password_file is not None:
             argv += ["--viewer-port", str(stock.viewer_port), "--viewer-password-file", str(Path(stock.viewer_password_file).expanduser())]
         for server in stock.mcp_servers:

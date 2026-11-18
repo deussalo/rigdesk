@@ -5,13 +5,26 @@
 //! connection they accepted carries the session (`Link::adopt`), so no password is used, and none need be kept; when it
 //! ends, the agent holding the session is told. `POST /offer/end` takes the prompt away, since the PC drops it with the
 //! connection.
+//!
+//! RigDesk Android shows its Allow only to a knock proved with Rig's pairing key. Its greeting asks for that with a nonce
+//! of this connection, and the knock then carries Rig's signature (see `base::rig_knock`). A stock PC asks for nothing
+//! and gets nothing.
 
+use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use base::message_proto::{login_response, message, misc, Message, OptionMessage};
-use hbb_common::protobuf::Message as _;
-use hbb_common::tcp::FramedStream;
-use hbb_common::tokio::{self, runtime::Handle, task::AbortHandle};
+use base::{
+    message_proto::{login_response, message, misc, Hash, Message, OptionMessage, RigKnock},
+    rig_knock,
+};
+use hbb_common::{
+    log,
+    protobuf::{Message as _, MessageField},
+    sodiumoxide::crypto::sign,
+    tcp::FramedStream,
+    tokio::{self, runtime::Handle, task::AbortHandle},
+};
 use rigdesk_agent::operator::{Closed, Offer, Switch};
 use rigdesk_agent::{EventKind, Shared};
 
@@ -53,19 +66,50 @@ pub struct Allowed {
     pub peer_info: Message,
 }
 
+/// What a knock proves itself with, for the agent it is made for.
+struct Proof {
+    key_file: PathBuf,
+    agent_id: String,
+    agent_title: String,
+}
+
+impl Proof {
+    fn knock(&self, key: &sign::SecretKey, device: &str, hash: &Hash, dialer: IpAddr) -> RigKnock {
+        let login = rig_knock::Login { device, salt: &hash.salt, challenge: &hash.challenge, nonce: &hash.rig_knock_nonce, dialer };
+        RigKnock {
+            signature: sign::sign_detached(&login.message(&self.agent_id, &self.agent_title), key).to_bytes().to_vec().into(),
+            agent_id: self.agent_id.clone(),
+            agent_title: self.agent_title.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// The login with the proof in it. Without a usable key it goes unproved, and the device refuses it in its own words.
+    async fn added_to(&self, mut login: Message, device: &str, hash: &Hash, dialer: IpAddr) -> Message {
+        let file = self.key_file.clone();
+        match tokio::task::spawn_blocking(move || crate::invite::read_key(&file)).await {
+            Ok(Ok((_, key))) => login.mut_login_request().rig_knock = MessageField::some(self.knock(&key, device, hash, dialer)),
+            Ok(Err(e)) => log::warn!("the knock goes without Rig's proof: {e}"),
+            Err(e) => log::warn!("the knock goes without Rig's proof: {e}"),
+        }
+        login
+    }
+}
+
 /// The bridge's side of `/offer`: one prompt at a time, the latest ask's.
 pub struct Knocker {
     link: Arc<Link>,
     shared: Arc<Shared>,
     runtime: Handle,
+    pair_key: Option<PathBuf>,
     shown: Mutex<Option<(String, AbortHandle)>>,
     /// The ask whose allowed connection the link took last.
     allowed: Arc<Mutex<Option<String>>>,
 }
 
 impl Knocker {
-    pub fn new(link: Arc<Link>, shared: Arc<Shared>, runtime: Handle) -> Arc<Self> {
-        Arc::new(Knocker { link, shared, runtime, shown: Mutex::new(None), allowed: Arc::default() })
+    pub fn new(link: Arc<Link>, shared: Arc<Shared>, runtime: Handle, pair_key: Option<PathBuf>) -> Arc<Self> {
+        Arc::new(Knocker { link, shared, runtime, pair_key, shown: Mutex::new(None), allowed: Arc::default() })
     }
 }
 
@@ -79,8 +123,9 @@ impl Switch for Knocker {
         let (link, shared, taken) = (self.link.clone(), self.shared.clone(), self.allowed.clone());
         let name = format!("{} (Rig agent)", offer.owner.title);
         let ask = offer.ask.clone();
+        let proof = self.pair_key.clone().map(|key_file| Proof { key_file, agent_id: offer.owner.agent_id.clone(), agent_title: offer.owner.title.clone() });
         let task = self.runtime.spawn(async move {
-            let (answer, shown, allowed) = knock(&link, &name).await;
+            let (answer, shown, allowed) = knock(&link, &name, proof.as_ref()).await;
             let adopted = allowed.is_some();
             if let Some(allowed) = allowed {
                 *taken.lock().unwrap() = Some(offer.ask.clone());
@@ -134,17 +179,17 @@ fn hang_up_unclaimed(link: &Link, shared: &Shared, taken: &Mutex<Option<String>>
 }
 
 /// One knock: the prompt is shown, and its person's answer read; whether the PC showed it; on Allow, the connection.
-pub async fn knock(link: &Link, name: &str) -> (Answer, bool, Option<Allowed>) {
+async fn knock(link: &Link, name: &str, proof: Option<&Proof>) -> (Answer, bool, Option<Allowed>) {
     let mut stream = match link.dial().await {
         Ok(stream) => stream,
         Err(e) => return (Answer::Lapsed(format!("cannot reach the PC at {}: {e}", link.label())), false, None),
     };
-    let (answer, shown, peer_info) = answered(link, name, &mut stream).await;
+    let (answer, shown, peer_info) = answered(link, name, proof, &mut stream).await;
     let allowed = peer_info.filter(|_| answer == Answer::Allowed).map(|peer_info| Allowed { stream, peer_info });
     (answer, shown, allowed)
 }
 
-async fn answered(link: &Link, name: &str, stream: &mut FramedStream) -> (Answer, bool, Option<Message>) {
+async fn answered(link: &Link, name: &str, proof: Option<&Proof>, stream: &mut FramedStream) -> (Answer, bool, Option<Message>) {
     let mut waiting = false;
     loop {
         let bytes = match stream.next_timeout(READ_TIMEOUT_MS).await {
@@ -154,6 +199,10 @@ async fn answered(link: &Link, name: &str, stream: &mut FramedStream) -> (Answer
         };
         let Ok(msg) = Message::parse_from_bytes(&bytes) else { continue };
         let login = matches!(msg.union, Some(message::Union::LoginResponse(_))).then(|| msg.clone());
+        let asks_proof = match &msg.union {
+            Some(message::Union::Hash(hash)) if !hash.rig_knock_nonce.is_empty() => Some(hash.clone()),
+            _ => None,
+        };
         let reply = match on_message(link, name, msg) {
             Step::Send(reply) => reply,
             Step::Waiting => {
@@ -162,6 +211,10 @@ async fn answered(link: &Link, name: &str, stream: &mut FramedStream) -> (Answer
             }
             Step::Done(answer) => return (answer, waiting, login),
             Step::Nothing => continue,
+        };
+        let reply = match (asks_proof, proof) {
+            (Some(hash), Some(proof)) => proof.added_to(reply, link.username(), &hash, stream.local_addr().ip()).await,
+            _ => reply,
         };
         if let Err(e) = stream.send(&reply).await {
             return (Answer::Lapsed(format!("connection error: {e}")), waiting, None);
@@ -208,7 +261,8 @@ fn on_message(link: &Link, name: &str, msg: Message) -> Step {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base::message_proto::{Hash, LoginResponse, Misc, PeerInfo};
+    use base::message_proto::{LoginResponse, Misc, PeerInfo};
+    use hbb_common::base64::{engine::general_purpose::STANDARD, Engine};
 
     fn link() -> Arc<Link> {
         let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
@@ -246,6 +300,60 @@ mod tests {
         shared.revoke("left");
         assert!(hang_up_unclaimed(&link, &shared, &taken, "desk_1"));
         assert!(taken.lock().unwrap().is_none());
+    }
+
+    /// What a device on loopback gets from a knock, after greeting it with `hash`, and the address the knock came from.
+    async fn login_after_greeting(hash: Hash, proof: Option<&Proof>) -> (base::message_proto::LoginRequest, IpAddr) {
+        let listener = hbb_common::tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
+        let link = Link::new(crate::link::Route::direct(&addr.to_string()), String::new(), "Rig agent".into(), shared);
+        let device = async {
+            let (socket, dialer) = listener.accept().await.unwrap();
+            let mut device = FramedStream::from(socket, dialer);
+            let mut greeting = Message::new();
+            greeting.set_hash(hash);
+            device.send(&greeting).await.unwrap();
+            loop {
+                let bytes = device.next_timeout(5_000).await.expect("the bridge hung up").unwrap();
+                if let Some(login) = Message::parse_from_bytes(&bytes).ok().filter(Message::has_login_request) {
+                    return (login.login_request().clone(), dialer.ip());
+                }
+            }
+        };
+        tokio::select! {
+            login = device => login,
+            _ = knock(&link, "a1 (Rig agent)", proof) => panic!("the knock ended before the device had its login"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_knock_proves_itself_only_to_a_device_that_asks_and_only_for_that_connection() {
+        let dir = std::env::temp_dir().join(format!("rigdesk-knock-proof-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_file = dir.join("pair.key");
+        let public = STANDARD.decode(crate::invite::pair_key(&key_file).unwrap()).unwrap();
+        let public = sign::PublicKey::from_slice(&public).unwrap();
+        let proof = Proof { key_file: key_file.clone(), agent_id: "agent_a".into(), agent_title: "Builder".into() };
+        let greeting = Hash { salt: "s".into(), challenge: "c".into(), rig_knock_nonce: b"nonce".to_vec().into(), ..Default::default() };
+
+        let (login, dialer) = login_after_greeting(greeting.clone(), Some(&proof)).await;
+        assert!(login.password.is_empty());
+        let knocked = login.rig_knock.clone().into_option().expect("the device asked for the proof");
+        assert_eq!((knocked.agent_id.as_str(), knocked.agent_title.as_str()), ("agent_a", "Builder"));
+        let signature = sign::Signature::from_bytes(&knocked.signature).unwrap();
+        let mut signed = rig_knock::Login { device: &login.username, salt: "s", challenge: "c", nonce: b"nonce", dialer };
+        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder"), &public));
+        signed.nonce = b"another connection";
+        assert!(!sign::verify_detached(&signature, &signed.message("agent_a", "Builder"), &public));
+
+        let stock = Hash { rig_knock_nonce: Default::default(), ..greeting.clone() };
+        assert!(login_after_greeting(stock, Some(&proof)).await.0.rig_knock.is_none(), "a stock PC asks for no proof");
+        assert!(login_after_greeting(greeting.clone(), None).await.0.rig_knock.is_none(), "no key configured");
+        let keyless = Proof { key_file: dir.join("none"), agent_id: "agent_a".into(), agent_title: "Builder".into() };
+        assert!(login_after_greeting(greeting, Some(&keyless)).await.0.rig_knock.is_none(), "the key file is not there yet");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

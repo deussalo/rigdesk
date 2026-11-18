@@ -666,7 +666,7 @@ class ServerModel with ChangeNotifier {
         ),
         actions: [
           dialogButton("Dismiss", onPressed: cancel, isOutline: true),
-          if (approveMode != 'password')
+          if (approveMode != 'password' || client.isRigKnock)
             dialogButton("Accept", onPressed: submit),
         ],
         onSubmit: submit,
@@ -830,6 +830,9 @@ class Client {
   bool incomingVoiceCall = false;
 
   RxInt unreadChatMessageCount = 0.obs;
+
+  // RigDesk: Android lists a login waiting under Rig's id only once it proved Rig's paired key, and answers it in Rust.
+  bool get isRigKnock => isAndroid && !authorized && peerId == 'rig';
 
   Client(this.id, this.authorized, this.isFileTransfer, this.isViewCamera,
       this.name, this.peerId, this.keyboard, this.clipboard, this.audio);
