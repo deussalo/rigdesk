@@ -39,6 +39,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
+import java.util.Collections
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import org.json.JSONException
@@ -137,6 +138,12 @@ class MainService : Service() {
                     }
                 } catch (e: JSONException) {
                     e.printStackTrace()
+                }
+            }
+            "remove_connection" -> {
+                val id = arg1.toIntOrNull() ?: return
+                if (rigRequests.contains(id)) {
+                    cancelNotification(id)
                 }
             }
             "update_voice_call_state" -> {
@@ -259,6 +266,9 @@ class MainService : Service() {
         agentStop = AgentStop(this).also { it.start() }
         rigInvite = RigInvite(this).also { it.start() }
     }
+
+    /// RigDesk: the connections whose Rig agent request is on the notifications.
+    private val rigRequests: MutableSet<Int> = Collections.synchronizedSet(HashSet())
 
     private var agentStop: AgentStop? = null
     private var rigInvite: RigInvite? = null
@@ -966,12 +976,13 @@ class MainService : Service() {
             .setContentTitle("$username is trying to join this device")
             .setContentText("Allow it here, or the operator answers in Rig.")
             .setColor(ContextCompat.getColor(this, R.color.primary))
-            // With the activity gone nothing cancels it when the request ends.
+            // Only if the request's end never reaches this service.
             .setTimeoutAfter(10 * 60 * 1000L)
         if (FFI.clickApproves()) {
             builder.addAction(0, "Allow", rigRequestIntent(clientID, true))
         }
         builder.addAction(0, "Deny", rigRequestIntent(clientID, false))
+        rigRequests.add(clientID)
         notificationManager.notify(getClientNotifyID(clientID), builder.build())
     }
 
@@ -1031,6 +1042,7 @@ class MainService : Service() {
     }
 
     fun cancelNotification(clientID: Int) {
+        rigRequests.remove(clientID)
         notificationManager.cancel(getClientNotifyID(clientID))
     }
 

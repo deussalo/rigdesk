@@ -1554,6 +1554,13 @@ pub mod connection_manager {
         }
 
         fn remove_connection(&self, id: i32, close: bool) {
+            // RigDesk: the service takes a Rig agent's request off the notifications, with or without a UI to do it.
+            #[cfg(target_os = "android")]
+            if let Err(e) =
+                call_main_service_set_by_name("remove_connection", Some(&id.to_string()), None)
+            {
+                log::debug!("call_main_service_set_by_name fail,{}", e);
+            }
             self.push_event(
                 "on_client_remove",
                 &[("id", &id.to_string()), ("close", &close.to_string())],
