@@ -9,6 +9,39 @@ import 'package:http/testing.dart';
 const _host = AgentHost(url: 'http://127.0.0.1:21120', token: 't0k', name: 'deus');
 
 void main() {
+  test('plain http carries the token only to loopback and the tailnet, and an unreadable address is refused', () {
+    for (final url in ['http://127.0.0.1:21120', 'http://localhost:1', 'http://100.64.0.1:1', 'http://100.127.255.255', 'http://pc.tailfae3b0.ts.net',
+        'https://example.com', 'https://10.0.2.2:1']) {
+      expect(plainHttpTo(url), isNull, reason: url);
+    }
+    for (final (url, to) in [('http://10.0.2.2:1', '10.0.2.2'), ('http://100.064.0.1:1', '100.064.0.1'), ('http://my_box.example', 'my_box.example'),
+        ('http://100.128.0.1', '100.128.0.1'), ('http://127.0.0.2', '127.0.0.2'), ('HTTP://example.com', 'example.com'), ('http://', 'http://'), ('http://[', 'http://[')]) {
+      expect(plainHttpTo(url), to, reason: url);
+    }
+  });
+
+  test('a refused host gets no request, and the person is told why', () async {
+    var requests = 0;
+    final told = <String>[];
+    final frames = <String>[];
+    final bridge = AgentBridge(const AgentHost(url: 'http://my_box.example:1', token: 't0k', name: 'deus'),
+        client: MockClient((request) async {
+          requests++;
+          return http.Response('{}', 200);
+        }),
+        onState: frames.add,
+        onTrouble: told.add);
+    bridge.start();
+    await Future<void>.delayed(Duration.zero);
+    for (final verb in ['share', 'stop', 'note', 'frame']) {
+      await bridge.ask(verb);
+    }
+    bridge.close();
+    expect(requests, 0);
+    expect(told, hasLength(5));
+    expect(told, everyElement(startsWith('Refused: plain http to my_box.example')));
+  });
+
   test('share mints a link on the agent host naming the PC as Rig knows it',
       () async {
     final asked = <String>[];
