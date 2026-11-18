@@ -123,6 +123,8 @@ class StockRemote(Shape):
                                                                                  "by direct IP over the tailnet (peer) or by its RustDesk ID through the ID server (id)."})
     peer: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$")] | None, Field(description="The PC on the tailnet: its MagicDNS name or 100.x address, with :port if not 21118.")] = None
     id: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{6,32}$")] | None, Field(description="The PC's RustDesk ID, digits without spaces, for a PC registered with the id_server instead of on the tailnet.")] = None
+    login_id: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{6,32}$")] | None, Field(description="With peer: the RustDesk ID this device shows, digits without spaces. "
+                                                                                                                   "An invite the device makes is redeemed only through the entry naming its ID.")] = None
     password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the PC's RustDesk permanent password, for unattended access. "
                                                        "Unset, an agent joins only when the person at the PC presses Allow on desk/request's prompt there.")] = None
     viewer_port: Annotated[int | None, Field(ge=1, le=65535, description="Where the bridge relays its session to RigDesk GUIs, on loopback (publish it with tailscale serve --tcp); unset, no GUI can attach.")] = None
@@ -133,6 +135,8 @@ class StockRemote(Shape):
     def _viewer_whole(self) -> StockRemote:
         if (self.peer is None) == (self.id is None):
             raise ValueError("a stock PC has a peer (direct IP over the tailnet) or an id (through the ID server), not both")
+        if self.login_id is not None and self.peer is None:
+            raise ValueError("login_id goes with peer; a PC reached through the ID server is named by id")
         if (self.viewer_port is None) != (self.viewer_password_file is None):
             raise ValueError("viewer_port and viewer_password_file go together")
         return self
@@ -1743,6 +1747,29 @@ class Desks:
                 if settings.connect_server is None else
                 adhoc.Route(("--id", target.id, "--id-server", settings.connect_server.host, "--key-file", str(key_file)), f"the ID server {settings.connect_server.host}")]
 
+    @staticmethod
+    def _invite_route(target: adhoc.Target, settings: RigdeskSettings, busy: dict[str, str]) -> adhoc.Route:
+        """The one address an invite goes to: the entry declaring the link's ID, whose node the tailnet vouches for. A link can name any ID, so no other PC
+        is connected to at all, and without such an entry nothing is."""
+        named = {name: pc.stock.peer for name, pc in settings.pcs.items() if pc.stock is not None and pc.stock.peer is not None and pc.stock.login_id == target.id}
+        if len(named) != 1:
+            found = f"{', '.join(sorted(named))} all declare it, so which device it is cannot be told" if named else "no entry declares it"
+            raise DeskRefused(f"{target.id} was not dialed: an invite is redeemed only through the entry in Rig's settings that declares the device's RustDesk ID, and {found}. "
+                              f"The operator sets stock.login_id to {target.id} on that device's entry under plugins.rigdesk.pcs, beside its stock.peer; "
+                              "an invite still open stays open until it lapses")
+        name, peer = next(iter(named.items()))
+        if name in busy:
+            raise DeskRefused(f"{busy[name]} holds {name} now, so its invite was not redeemed; an invite still open stays open until it lapses")
+        assert peer is not None
+        return adhoc.Route(("--peer", peer, "--login-id", target.id), f"{name} over the tailnet", name)
+
+    @staticmethod
+    def _invite_refusal(target: adhoc.Target, route: adhoc.Route, said: adhoc.Outcome) -> str:
+        if said != ("refused", adhoc.NOT_THIS_PC):
+            return adhoc.refusal(target, route, said)
+        return (f"{route.rigdesk} did not show it holds this invite as {target.id}, so nothing of the invite was sent there: the invite may have lapsed, been used or been revoked, "
+                f"the device may run a RigDesk too old to show it, or stock.login_id on {route.rigdesk} may name another device")
+
     async def connect(self, given_id: str, password: str, agent: str, graph: str, node: str, title: str, approved: bool = False) -> tuple[Held, str]:
         """Joins a PC by its RustDesk ID and a password, with no settings entry: our RigDesk PCs that answer are tried first over the tailnet
         under that ID (one that is not it says so before it looks at the password), then the public ID server, or the server the ID names.
@@ -1869,14 +1896,10 @@ class Desks:
         key_file = Path(await asyncio.to_thread(self._keep_secret, secret, "key", target.key or (server.key if server is not None else adhoc.PUBLIC_KEY))).expanduser()
         kept.files = (password_file, token_file, key_file)
         busy = {pc: held.title for pc, held in self._sessions.items() if pc in settings.pcs and held.agent != agent}
-        routes = await self._adhoc_routes(target, settings, key_file, set(busy))
+        routes = [self._invite_route(target, settings, busy)] if isinstance(password, Invited) else await self._adhoc_routes(target, settings, key_file, set(busy))
         # Only our own PCs are dialed unasked; any other waits for the operator's approval, and once given, ours are not tried again.
         outside = [] if approved else [route for route in routes if route.rigdesk is None]
-        if isinstance(password, Invited):
-            # Anyone can write a link naming any ID, and whoever answers an ID server for it would get the login and the agent: a device registers
-            # nowhere, so only our own PCs on the tailnet are dialed, with no approval asked.
-            routes = [route for route in routes if route.rigdesk is not None]
-        else:
+        if not isinstance(password, Invited):
             routes = [route for route in routes if (route.rigdesk is None) == approved]
         unasked = "".join(f"; {pc} was not tried, as {holder} holds it" for pc, holder in sorted(busy.items()))
         bridge = str(Path(settings.bridge_bin).expanduser()) if "/" in settings.bridge_bin else settings.bridge_bin
@@ -1902,6 +1925,8 @@ class Desks:
                 break
             await self._stopped(process)
             kept.process = None
+            if isinstance(password, Invited):
+                raise DeskRefused(self._invite_refusal(target, route, said))
             if route.rigdesk is not None and (said[0] == "failed" or said[1] == adhoc.NOT_THIS_PC):
                 tried.append(route.rigdesk)
                 continue
@@ -1909,12 +1934,6 @@ class Desks:
         else:
             if outside:
                 raise ConnectAsk(target.id, outside[0].words, tuple(tried))
-            if isinstance(password, Invited):
-                answered = (f"{', '.join(tried)} did not show it holds this invite as {target.id}, so nothing of the invite was sent there: the invite may have lapsed, "
-                            "been used or been revoked, or the device may run a RigDesk too old to show it" if tried else "no such PC answered")
-                raise DeskRefused(f"{target.id} was not reached: an invite is redeemed only over the tailnet, from a PC set up in Rig's settings, and {answered}. "
-                                  f"If the device is not set up yet, the operator adds it under plugins.rigdesk.pcs with stock.peer, its tailnet name or address; "
-                                  f"an invite still open stays open until it lapses{unasked}")
             raise DeskRefused(f"{target.id} could not be reached")
         assert kept.process is not None
         kept_password = None if isinstance(password, Invited) else str(password_file)

@@ -548,11 +548,11 @@ exit 3
                 try:
                     await desks.join(link, "a1", "g", "n", "Builder")
                 except DeskRefused as refused:
-                    assert "stock.peer" in str(refused) and "b" * 32 not in str(refused), refused
+                    assert "stock.login_id" in str(refused) and "b" * 32 not in str(refused), refused
                 else:
                     raise AssertionError("an invite joined a device no PC in settings is")
                 assert len(dialed.read_text().splitlines()) == 1, "an invite was dialed through an ID server"
-                entry = DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=StockRemote(peer=peer))
+                entry = DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=StockRemote(peer=peer, login_id="105517719"))
                 settings = RigdeskSettings(pcs={"phone": entry}, bridge_bin=str(fake), id_server=server)
                 try:
                     await desks.join(link, "a1", "g", "n", "Builder")
@@ -603,66 +603,94 @@ def _invite_tools(state: Path, said: str, settings: dict) -> tuple[Desks, Simple
 
 
 def _with_invite_tools(body) -> None:
-    from rigdesk import adhoc, desks as desks_module
-
-    async def reached(_host: str, _port: int = 0) -> bool:
-        return True
+    from rigdesk import desks as desks_module
 
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
-            secrets_dir, answers = desks_module.SECRETS, adhoc.answers
-            desks_module.SECRETS, adhoc.answers = Path(state) / "secrets", reached  # type: ignore[assignment]
+            secrets_dir = desks_module.SECRETS
+            desks_module.SECRETS = Path(state) / "secrets"
             try:
                 await body(Path(state))
             finally:
-                desks_module.SECRETS, adhoc.answers = secrets_dir, answers
+                desks_module.SECRETS = secrets_dir
 
     asyncio.run(run())
 
 
 INVITE_LINK = "rigdesk://id.105517719/" + "a" * 32 + "#" + "b" * 32
-OUR_PCS = {"dell": DeskPc(url="https://dell.tail1234.ts.net", token_file="/dev/null"), "deus": DeskPc(url="https://deus.tail1234.ts.net", token_file="/dev/null")}
 
 
-def test_a_made_up_invite_for_an_id_no_pc_is_set_up_for_dials_nothing_and_asks_nobody() -> None:
+async def _two_pcs_up(body) -> None:
+    """Calls body with settings for two stock PCs listening on loopback, the device 105517719 and another, and the connections each has taken."""
+    from rigdesk.desks import ConnectServer, IdServer, StockRemote
+
+    taken = {"phone": 0, "other": 0}
+
+    def counting(name: str):
+        def accepted(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            taken[name] += 1
+            writer.close()
+        return accepted
+    phone, other = [await asyncio.start_server(counting(name), "127.0.0.1", 0) for name in taken]
+    peers = [f"127.0.0.1:{server.sockets[0].getsockname()[1]}" for server in (phone, other)]
+    pcs = {"phone": DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=StockRemote(peer=peers[0], login_id="105517719")),
+           "other": DeskPc(url="http://127.0.0.1:21121", token_file="/dev/null", stock=StockRemote(peer=peers[1], login_id="999888777"))}
+    settings = {"pcs": pcs, "id_server": IdServer(host="rd.example.com", key_file="/dev/null"), "connect_server": ConnectServer(host="rd.example.com", key="A" * 44)}
+    try:
+        await body(settings, peers[0], taken)
+    finally:
+        for server in (phone, other):
+            server.close()
+            await server.wait_closed()
+
+
+def test_an_invite_for_an_id_no_entry_declares_connects_to_nothing_and_asks_nobody() -> None:
     from rigdesk import JoinInput, _join
-    from rigdesk.desks import IdServer
 
     async def body(state: Path) -> None:
-        server = IdServer(host="rd.example.com", key_file=str(state / "hbbs.pub"))
-        desks, call, dialed, asked = _invite_tools(state, "refused: Offline", {"pcs": {}, "id_server": server})
-        answer = await _join(desks, call, JoinInput(link=INVITE_LINK))  # type: ignore[arg-type]
-        assert answer["refused"] and "stock.peer" in answer["said"] and "b" * 32 not in answer["said"], answer
-        assert not dialed.exists(), dialed.read_text()
-        assert asked == [] and desks.entries() == () and desks.held_by("a1", "g") is None
+        async def with_pcs(settings: dict, _peer: str, taken: dict[str, int]) -> None:
+            desks, call, dialed, asked = _invite_tools(state, "refused: Offline", settings)
+            answer = await _join(desks, call, JoinInput(link="rigdesk://id.123123123/" + "a" * 32 + "#" + "b" * 32))  # type: ignore[arg-type]
+            assert answer["refused"] and "stock.login_id" in answer["said"] and "b" * 32 not in answer["said"], answer
+            assert not dialed.exists() and taken == {"phone": 0, "other": 0}, taken
+            assert asked == [] and desks.entries() == () and desks.held_by("a1", "g") is None
+        await _two_pcs_up(with_pcs)
 
     _with_invite_tools(body)
 
 
-def test_an_invite_no_pc_shows_it_holds_tries_only_our_pcs_and_never_a_public_or_id_server() -> None:
+def test_an_invite_goes_only_to_the_entry_declaring_its_id() -> None:
     from rigdesk import JoinInput, _join
-    from rigdesk.desks import ConnectServer, IdServer
 
     async def body(state: Path) -> None:
-        server = IdServer(host="rd.example.com", key_file=str(state / "hbbs.pub"))
-        connect = ConnectServer(host="rd.example.com", key="A" * 44)
-        desks, call, dialed, asked = _invite_tools(state, "refused: Offline", {"pcs": OUR_PCS, "id_server": server, "connect_server": connect})
-        answer = await _join(desks, call, JoinInput(link=INVITE_LINK))  # type: ignore[arg-type]
-        lines = dialed.read_text().splitlines()
-        assert len(lines) == 2 and all("--peer" in line and "--login-id 105517719" in line and "--invite-file" in line for line in lines), lines
-        assert not any("--id-server" in line or "--id " in line for line in lines), lines
-        assert "dell, deus did not show it holds this invite" in answer["said"] and "lapsed" in answer["said"], answer
-        assert asked == [] and desks.entries() == ()
+        async def with_pcs(settings: dict, peer: str, taken: dict[str, int]) -> None:
+            desks, call, dialed, asked = _invite_tools(state, "refused: Offline", settings)
+            answer = await _join(desks, call, JoinInput(link=INVITE_LINK))  # type: ignore[arg-type]
+            lines = dialed.read_text().splitlines()
+            assert len(lines) == 1 and f"--peer {peer} --login-id 105517719" in lines[0] and "--invite-file" in lines[0], lines
+            assert "--id-server" not in lines[0], lines
+            assert taken["other"] == 0, taken
+            assert "phone did not show it holds this invite" in answer["said"] and "stock.login_id on phone" in answer["said"], answer
+            assert asked == [] and desks.entries() == ()
+        await _two_pcs_up(with_pcs)
 
     _with_invite_tools(body)
 
 
 def test_connecting_to_a_pc_not_ours_still_waits_for_the_operators_accept() -> None:
-    from rigdesk import ConnectInput, _connect
+    from rigdesk import ConnectInput, _connect, adhoc
+
+    async def reached(_host: str, _port: int = 0) -> bool:
+        return True
 
     async def body(state: Path) -> None:
-        desks, call, dialed, asked = _invite_tools(state, "refused: Offline", {"pcs": OUR_PCS})
-        answer = await _connect(desks, call, ConnectInput(id="105517719", password="hunter2-secret", why="to fix the printer"))  # type: ignore[arg-type]
+        pcs = {"dell": DeskPc(url="https://dell.tail1234.ts.net", token_file="/dev/null")}
+        desks, call, dialed, asked = _invite_tools(state, "refused: Offline", {"pcs": pcs})
+        answers, adhoc.answers = adhoc.answers, reached  # type: ignore[assignment]
+        try:
+            answer = await _connect(desks, call, ConnectInput(id="105517719", password="hunter2-secret", why="to fix the printer"))  # type: ignore[arg-type]
+        finally:
+            adhoc.answers = answers
         desks.connect_dropped(answer["ask"])
         assert answer["joined"] is False and answer["state"] == "open" and len(asked) == 1, answer
         assert "--id-server" not in dialed.read_text(), dialed.read_text()
