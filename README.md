@@ -251,7 +251,7 @@ under `plugins.rigdesk.pcs` as `{name: {url, token_file, client}}`. See [rig-plu
 | `POST /mcp` | MCP JSON-RPC. `X-Desk-Session` carries the session token |
 | `GET /events` | SSE, resumable with `Last-Event-ID`: claimed, holder, revoked, message, dropped, action |
 | `GET /attachments/<id>`, `POST /attachments/<id>/ack` | images sent with human messages |
-| `POST /leave` | the owning agent ends its session |
+| `POST /leave` | the owning agent ends its session; a share link or invite still open stays open for whoever it was made for |
 | `GET /log?n=N` | the action log |
 | `GET /frame?display=N` | a PNG of the screen now, for the bearer's holder (the viewer's note, Rig's screenshot on demand); journaled |
 | `POST /viewer/note` | bridge only: `{text, pngs, key?}`, the human's message to the owning agent; a note sent again with a `key` already sent to the same agent answers the first event (`replayed: true`) and is not told twice. Keys are forgotten when the bridge restarts, so a note replayed across a restart is told again |

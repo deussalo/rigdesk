@@ -8,7 +8,7 @@
 //!   GET  /events           - SSE, resumable with Last-Event-ID
 //!   GET  /attachments/<id> - an image from a human message, owner session only
 //!   POST /attachments/<id>/ack - mark messages delivered up to the message that image belongs to
-//!   POST /leave            - the owning agent ends its session
+//!   POST /leave            - the owning agent ends its session; an open link or invite stays open
 //!   POST /debug/mint, /debug/viewer/<hand|human|block|unblock> - only with RIGDESK_AGENT_DEBUG_MINT set, for CI
 //!   POST /viewer/mint, /viewer/<hand|human|stop|block|unblock|revoke> - only from `Api::hosted`, where no RigDesk viewer
 //!        carries the human's buttons (a stock RustDesk PC driven from the Rig host), so the bearer's holder presses them
@@ -739,7 +739,7 @@ impl Api {
         let Some(owner) = self.owner_from(request) else {
             return text(StatusCode::FORBIDDEN, "leave needs the owner's session token");
         };
-        let left = self.shared.revoke("the agent left");
+        let left = self.shared.leave();
         self.journal.record(&Entry::new(owner.who(), "leave", if left { "ok" } else { "no session" }, json!({})));
         json_response(StatusCode::OK, &json!({"left": left}))
     }
