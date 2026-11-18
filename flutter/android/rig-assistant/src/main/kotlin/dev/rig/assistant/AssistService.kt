@@ -60,10 +60,10 @@ class LinkService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Link.start(this)
         val refused = Config.refusedAddress(this)
-        val words = refused ?: "Connected to Rig while the phone is on"
+        val words = refused ?: "Keeps the link to Rig while the phone is on"
         val shown = builder(refused != null).setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle(if (refused != null) "Rig Assistant is not connected" else "Rig Assistant")
-            .setContentText(words).setStyle(Notification.BigTextStyle().bigText(words)).setOngoing(true)
+            .setContentText(words).setStyle(Notification.BigTextStyle().bigText(words)).setOngoing(true).setOnlyAlertOnce(true)
             .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, SetupActivity::class.java), PendingIntent.FLAG_IMMUTABLE)).build()
         try {
             if (Build.VERSION.SDK_INT >= 34) startForeground(ID, shown, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)

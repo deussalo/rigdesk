@@ -62,6 +62,7 @@ class SetupActivity : Activity() {
         column.addView(Button(this).apply {
             text = "Save and connect"
             setOnClickListener {
+                pairRefusal = ""
                 prefs.edit().putString("url", url.text.toString().trim()).putString("token", token.text.toString().trim())
                     .putString("phone", phone.text.toString().trim()).apply()
                 LinkService.start(this@SetupActivity)
