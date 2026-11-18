@@ -613,12 +613,14 @@ def test_the_operator_replaces_a_stock_pcs_saved_password_and_its_bridge_logs_in
             try:
                 await _until(lambda: started.exists() and started.read_text() == "old-password\n")
                 desks._sessions["moto-g57"] = Held("moto-g57", "agent_a", "g", "n", "A", "s", 0)
+                desks._unsent["moto-g57"] = {5: {"kind": "message", "text": "for agent_a"}}
                 both = await asyncio.gather(desks.set_password("moto-g57", "new-password"), desks.set_password("moto-g57", "new-password"))
                 assert both == [str(password), str(password)]
                 await _until(lambda: started.read_text() == "old-password\nnew-password\n")
                 await asyncio.sleep(0.2)
                 assert started.read_text() == "old-password\nnew-password\n", "two calls at once started two bridges"
                 assert "moto-g57" not in desks._sessions and len(told) == 1 and "session there ended" in told[0], told
+                assert "moto-g57" not in desks._unsent, "a message for the ended session would go to the PC's next agent"
                 assert password.read_text() == "new-password" and password.stat().st_mode & 0o777 == 0o600
                 rows = {row["name"]: row for row in desks.pcs()}
                 assert rows["moto-g57"]["password_file"] == str(password) and rows["deus"]["password_file"] is None
