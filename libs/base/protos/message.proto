@@ -86,6 +86,15 @@ message LoginRequest {
   string avatar = 17;
   bytes trusted_device_v2_token = 18;
   bool trusted_device_v2_supported = 19;
+  RigInvite rig_invite = 100;
+}
+
+// RigDesk: an invite the person at the device made, redeemed with Rig's paired key in place of a password.
+message RigInvite {
+  string grant = 1;
+  bytes signature = 2;
+  string agent_id = 3;
+  string agent_title = 4;
 }
 
 message Terminal {

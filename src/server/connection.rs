@@ -75,6 +75,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
 
+mod rig_invite;
 mod trusted_devices;
 
 const FAILURE_IDX_ID_WHITELIST: usize = 2;
@@ -1248,6 +1249,7 @@ impl Connection {
         }
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         crate::agent::viewer::leave(id);
+        base::invite::left(id);
         conn.on_close("End", true).await;
         log::info!("#{} connection loop exited", id);
     }
@@ -2927,6 +2929,9 @@ impl Connection {
             self.reset_session_scope_for_login();
             if !self.check_id_whitelist().await {
                 return false;
+            }
+            if lr.rig_invite.is_some() {
+                return self.rig_invite_login(lr).await;
             }
             match lr.union {
                 Some(login_request::Union::FileTransfer(ft)) => {
