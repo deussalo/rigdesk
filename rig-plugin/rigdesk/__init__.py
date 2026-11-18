@@ -717,6 +717,7 @@ class PcRow(View):
     shell: PcShellRow | None = Field(description="A RigDesk PC's agent shell: its switch and who may use it; null for a stock PC.")
     health: PcHealthRow | None = Field(description="A RigDesk PC's health; null for a stock PC.")
     adhoc: dict[str, str] | None = Field(default=None, description="A PC an agent joined by RustDesk ID and password: id, and via, how it was reached; null otherwise.")
+    password_file: str | None = Field(default=None, description="Where a stock PC's saved password is kept, which POST password replaces; never the password. Null for a RigDesk PC.")
 
 
 class ListenerRow(View):
@@ -1016,6 +1017,32 @@ async def post_pc(request: Request[AddParams]) -> PcAdded | RefusedOutcome:
     return PcAdded(name=body.name, entry=added.model_dump(mode="json", exclude_none=True))
 
 
+class PasswordBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", defer_build=True)
+    pc: PcName
+    password: RustdeskPassword
+
+
+class PasswordParams(Params):
+    body: PasswordBody
+
+
+class PasswordSet(View):
+    password_file: str = Field(description="The file now holding it, the one the PC's entry names; its rigdesk-bridge restarted to log in with it.")
+
+
+@endpoint(PasswordParams, OPERATOR)
+async def post_password(request: Request[PasswordParams]) -> PasswordSet | RefusedOutcome:
+    """Replaces a stock PC's saved password, its permanent RustDesk password, in the file its settings entry names, and restarts its rigdesk-bridge
+    with it; settings are unchanged, and the password never reaches them or any answer."""
+    body = request.params.body
+    try:
+        path = await request.host().live(Desks).set_password(body.pc, body.password)
+    except DeskRefused as refused:
+        return request.refused(REFUSED, str(refused))
+    return PasswordSet(password_file=path)
+
+
 CONTRIBUTION = ContributionDescriptor(
     id=ID, release="0.1.0", live=Live(Desks, Desks.settle, Desks.end), settings=RigdeskSettings, states=REPORTED,
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
@@ -1024,5 +1051,5 @@ CONTRIBUTION = ContributionDescriptor(
     provisions=(provider(REQUEST_CONFIRMED, _request_confirmed), provider(CONNECT_CONFIRMED, _connect_confirmed)),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
-            RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "screenshot", post_screenshot),
+            RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "password", post_password), RouteContribution("POST", "screenshot", post_screenshot),
             RouteContribution("POST", "shell_grant", post_shell_grant), RouteContribution("GET", "health", get_health), RouteContribution("GET", "shell_ran", get_shell_ran)))

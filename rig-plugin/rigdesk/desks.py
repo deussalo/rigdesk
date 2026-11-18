@@ -744,6 +744,29 @@ class Desks:
         token_file = await asyncio.to_thread(self._keep_secret, name, "token", secrets.token_urlsafe(32))
         return DeskPc(url=f"http://127.0.0.1:{port}", token_file=token_file, client=client, stock=StockRemote(id=rustdesk_id, password_file=password_file))
 
+    @staticmethod
+    def _replaced_secret(path: Path, value: str) -> None:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.exists():
+            path.chmod(0o600)
+        replace_file(path, value.encode(), new_mode=0o600)
+
+    async def set_password(self, pc: str, password: str) -> str:
+        """Replaces a stock PC's saved password in the file its entry names, and restarts its rigdesk-bridge so it logs in with it now."""
+        link = self._pcs.get(pc)
+        if link is None or pc in self._adhoc:
+            raise DeskRefused(f"no PC named {pc} is set up in Rig's settings")
+        if link.spec.stock is None:
+            raise DeskRefused(f"{pc} is a RigDesk PC: Rig reaches it with its token, so it keeps no password")
+        path = link.spec.stock.password_file
+        await asyncio.to_thread(self._replaced_secret, Path(path).expanduser(), password)
+        if link.remote is not None:
+            link.remote.cancel()
+            await asyncio.gather(link.remote, return_exceptions=True)
+        link.remote = TASKS.spawn(f"rigdesk-bridge-{pc}", self._remote(link, link.spec.stock))
+        _LOG.info("rigdesk_password_set", f"RigDesk {pc}: the operator replaced its saved password, and its rigdesk-bridge restarted", pc=pc)
+        return path
+
     # --- rigdesk-bridge, for a stock PC ---
 
     def _remote_log(self, name: str) -> Any:
@@ -1593,6 +1616,7 @@ class Desks:
                          "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id"), "assigned": self.granted(name),
                          "shell": None if link.spec.stock is not None else {"switch": link.shell, "granted": self.shell_granted(name)},
                          "health": self._health_row(name, link), "adhoc": self._adhoc_row(name),
+                         "password_file": None if link.spec.stock is None or name in self._adhoc else link.spec.stock.password_file,
                          "mcp": {"allowed": link.spec.mcp, "on": link.mcp_on, "why": link.mcp_why,
                                  "servers": [{"name": server.name, "key": server.key, "says": server.says, "tools": [tool["name"] for tool in server.tools],
                                               "since_ms": server.since_ms, "failing": link.server_faults.get(server.name, (None,))[0],
