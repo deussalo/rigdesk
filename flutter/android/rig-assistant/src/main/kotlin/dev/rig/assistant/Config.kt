@@ -31,11 +31,12 @@ class Config private constructor(val origin: String, val token: String, val phon
         private fun storedUrl(ctx: Context): String = prefs(ctx).getString("url", "").orEmpty().trim().trimEnd('/')
 
         /** The host a bearer token sent to this address would cross unencrypted (plain http outside loopback and the tailnet), or null.
-         *  The phone's one rule for every bearer it holds: Rig Assistant's and the Rig bridge's (AgentStop). */
+         *  The phone's one rule for every bearer it holds: Rig Assistant's and the Rig bridge's (AgentStop). It fails closed: java.net.URL,
+         *  which dials, accepts hosts URI rejects (an underscore, a space in the path), so an http address URI cannot read is refused whole. */
         fun plainHttpTo(url: String): String? {
-            val uri = try { URI.create(url) } catch (e: IllegalArgumentException) { return null }
-            val host = uri.host ?: return null
-            return if (uri.scheme == "http" && !privateHost(host)) host else null
+            if (!url.lowercase(Locale.ROOT).startsWith("http://")) return null
+            val host = try { URI.create(url).host } catch (e: IllegalArgumentException) { null } ?: return url
+            return if (privateHost(host)) null else host
         }
 
         /** Why Rig's token must not go to this address, whichever way it got here, or null. */
