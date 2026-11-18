@@ -24,7 +24,6 @@ import ffi.FFI
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
-import java.net.URI
 import java.net.URL
 import java.text.DateFormat
 import java.util.Date
@@ -213,12 +212,8 @@ class RigInvite(private val service: MainService) {
     /** Rig's public pairing key, or why it could not be had. A redirect is refused: the answer must come from the address the person set up. */
     private fun fetchKey(): Fetched {
         val (config, why) = Config.load(service)
-        if (config == null) return Fetched(null, "Rig Assistant is $why")
+        if (config == null) return Fetched(null, "Rig Assistant: $why")
         return try {
-            val address = URI(config.origin)
-            if (address.scheme != "https" && !Config.privateHost(address.host)) {
-                return Fetched(null, "Rig's address is plain http to ${address.host}, so its token was not sent: use https, or its Tailscale address")
-            }
             val http = (URL(config.origin + PAIR_KEY_ROUTE).openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 setRequestProperty("Authorization", "Bearer ${config.token}")

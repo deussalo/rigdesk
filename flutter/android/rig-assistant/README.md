@@ -25,6 +25,9 @@ The short path, with nothing else set up first:
    **Pair**. Android's default-assistant screen opens next: choose RigDesk.
 3. Hold Home. The first time, allow the microphone; the sheet opens again, listening.
 
+Rig's address must be https, or http only to loopback or the tailnet (100.64.0.0/10 or a name ending in `.ts.net`), however it
+was entered. With any other http address the phone sends no token and does not connect, and its notification and setup screen say why and what to change.
+
 Everything else is asked for when an agent first needs it: a tool refused for a missing switch posts one notification
 naming what it is for, and tapping it opens the screen that turns it on.
 

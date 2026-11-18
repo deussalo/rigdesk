@@ -62,6 +62,7 @@ class SetupActivity : Activity() {
             setOnClickListener {
                 prefs.edit().putString("url", url.text.toString().trim()).putString("token", token.text.toString().trim())
                     .putString("phone", phone.text.toString().trim()).apply()
+                LinkService.start(this@SetupActivity)
                 Link.redial()
             }
         })
@@ -130,6 +131,7 @@ class SetupActivity : Activity() {
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Pair") { _, _ ->
                 Config.prefs(this).edit().putString("url", origin).putString("token", token).putString("phone", phone).apply()
+                LinkService.start(this)
                 Link.redial()
                 recreate()
                 if (!isAssistant()) startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
