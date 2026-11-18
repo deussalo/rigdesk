@@ -639,6 +639,23 @@ def test_the_operator_replaces_a_stock_pcs_saved_password_and_its_bridge_logs_in
     asyncio.run(run())
 
 
+def test_a_message_whose_session_ended_while_it_was_told_is_not_kept_for_the_pcs_next_agent() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
+            link = desks._pcs["deus"] = PcLink("deus", PCS["deus"], state="up")
+            desks._sessions["deus"] = Held("deus", "agent_a", "g", "n", "A", "s", 0)
+
+            async def message(*_args: object) -> bool:
+                desks._sessions.pop("deus")
+                return False
+            desks._message = message  # type: ignore[method-assign]
+            await desks._event(link, {"type": "message", "id": 7, "text": "for agent_a"})
+            assert "deus" not in desks._unsent, "a message for the ended session would go to the PC's next agent"
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

@@ -1054,7 +1054,7 @@ class Desks:
             if kind == "message":
                 if await self._message(link, held, event, key):
                     self._unsent.get(pc, {}).pop(event_id, None)
-                elif event_id:
+                elif event_id and self._sessions.get(pc) is held:
                     self._unsent.setdefault(pc, {})[event_id] = event
             elif (said := words_of(pc, event)) is not None:
                 if kind == "holder" and event.get("by") == "stop" and now_ms() - int(event.get("at_ms") or 0) < STOP_FRESH_MS:
