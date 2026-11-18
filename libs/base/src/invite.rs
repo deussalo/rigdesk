@@ -3,6 +3,10 @@
 //! The link holds a grant and a secret, and the device keeps only the secret's hash. The login presents Rig's signature
 //! over the grant, that hash, this connection's salt and challenge and the agent Rig names, so neither the secret nor
 //! Rig's key crosses the wire, and someone holding the link without the key has nothing to present.
+//!
+//! The signature is only ever sent to the device that made the invite. Its greeting carries a tag keyed by the secret's
+//! hash over this connection's challenge and the dialer's address, so another PC cannot pass on the real device's
+//! greeting, and it confirms a redeemed login with a second tag. Only the link's holder and the device can make these.
 
 use crate::{config::keys::OPTION_RIG_INVITE_KEY, message_proto::RigInvite};
 use hbb_common::{
@@ -11,14 +15,16 @@ use hbb_common::{
     get_time,
     rand::{thread_rng, RngCore},
     sha2::{Digest, Sha256},
-    sodiumoxide::crypto::sign,
+    sodiumoxide::crypto::{auth, sign},
 };
 use lazy_static::lazy_static;
 use serde_derive::Serialize;
-use std::sync::Mutex;
+use std::{net::IpAddr, sync::Mutex};
 
 const LIFETIME_MS: i64 = 15 * 60 * 1000;
 const PROOF_DOMAIN: &str = "rigdesk-invite-v1";
+const DEVICE_DOMAIN: &str = "rigdesk-invite-device-v1";
+const ACCEPTED_DOMAIN: &str = "rigdesk-invite-accepted-v1";
 
 /// What Rig signs for one login.
 pub struct Claim<'a> {
@@ -56,6 +62,58 @@ pub fn secret_hash(secret: &str) -> [u8; 32] {
     Sha256::digest(secret.as_bytes()).into()
 }
 
+/// What one connection's greeting says: the device it speaks for and the challenge it set.
+pub struct Greeting<'a> {
+    pub device_id: &'a str,
+    pub salt: &'a str,
+    pub challenge: &'a str,
+}
+
+impl Greeting<'_> {
+    fn message(&self, domain: &str, last: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let fields: [&[u8]; 5] = [domain.as_bytes(), self.device_id.as_bytes(), self.salt.as_bytes(), self.challenge.as_bytes(), last];
+        for field in fields {
+            out.extend_from_slice(&(field.len() as u64).to_le_bytes());
+            out.extend_from_slice(field);
+        }
+        out
+    }
+
+    fn for_dialer(&self, dialer: IpAddr) -> Vec<u8> {
+        // A dual-stack socket reports an IPv4 peer in its mapped form, and the other end knows the plain one.
+        let dialer = match dialer {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(dialer, IpAddr::V4),
+            v4 => v4,
+        };
+        self.message(DEVICE_DOMAIN, dialer.to_string().as_bytes())
+    }
+}
+
+fn tag(secret_hash: &[u8; 32], message: &[u8]) -> Vec<u8> {
+    auth::authenticate(message, &auth::Key(*secret_hash)).0.to_vec()
+}
+
+fn tag_is_good(secret_hash: &[u8; 32], message: &[u8], given: &[u8]) -> bool {
+    auth::Tag::from_slice(given).map_or(false, |given| auth::verify(&given, message, &auth::Key(*secret_hash)))
+}
+
+pub fn device_tag(secret_hash: &[u8; 32], greeting: &Greeting, dialer: IpAddr) -> Vec<u8> {
+    tag(secret_hash, &greeting.for_dialer(dialer))
+}
+
+pub fn device_tag_is_good(secret_hash: &[u8; 32], greeting: &Greeting, dialer: IpAddr, given: &[u8]) -> bool {
+    tag_is_good(secret_hash, &greeting.for_dialer(dialer), given)
+}
+
+pub fn accepted_tag(secret_hash: &[u8; 32], greeting: &Greeting, signature: &[u8]) -> Vec<u8> {
+    tag(secret_hash, &greeting.message(ACCEPTED_DOMAIN, signature))
+}
+
+pub fn accepted_tag_is_good(secret_hash: &[u8; 32], greeting: &Greeting, signature: &[u8], given: &[u8]) -> bool {
+    tag_is_good(secret_hash, &greeting.message(ACCEPTED_DOMAIN, signature), given)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     NotPaired,
@@ -87,6 +145,9 @@ pub struct Holder {
     pub title: String,
     #[serde(skip)]
     conn: i32,
+    /// Sent to Rig with the login's answer: the device checked this login's invite.
+    #[serde(skip)]
+    pub accepted: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -186,7 +247,14 @@ impl Invites {
         if open.agent.as_ref().map_or(false, |agent| *agent != invite.agent_id) {
             return Err(Refusal::ForOtherAgent);
         }
-        Ok(Holder { agent: invite.agent_id.clone(), title: invite.agent_title.clone(), conn: login.conn })
+        let greeting = Greeting { device_id: login.device_id, salt: login.salt, challenge: login.challenge };
+        let accepted = accepted_tag(&open.secret_hash, &greeting, &invite.signature);
+        Ok(Holder { agent: invite.agent_id.clone(), title: invite.agent_title.clone(), conn: login.conn, accepted })
+    }
+
+    fn device_tag(&mut self, greeting: &Greeting, dialer: IpAddr, now_ms: i64) -> Option<Vec<u8>> {
+        self.lapse(now_ms);
+        self.open.as_ref().map(|open| device_tag(&open.secret_hash, greeting, dialer))
     }
 
     fn state(&mut self, now_ms: i64) -> State {
@@ -268,6 +336,11 @@ pub fn redeem(login: &Login) -> Result<Holder, Refusal> {
 
 pub fn left(conn: i32) {
     INVITES.lock().unwrap().left(conn);
+}
+
+/// For a new connection's greeting: the tag that shows the dialer this device holds the open invite, if one is open.
+pub fn open_device_tag(greeting: &Greeting, dialer: IpAddr) -> Option<Vec<u8>> {
+    INVITES.lock().unwrap().device_tag(greeting, dialer, get_time())
 }
 
 #[cfg(test)]
@@ -373,6 +446,44 @@ mod tests {
         assert!(invites.mint(DEVICE, None, NOW).is_err());
         invites.left(7);
         assert!(invites.mint(DEVICE, None, NOW).is_ok());
+    }
+
+    #[test]
+    fn only_the_device_holding_the_open_invite_can_show_it_to_this_dialer() {
+        let greeting = Greeting { device_id: DEVICE, salt: "salt", challenge: "challenge" };
+        let rig: IpAddr = "100.64.0.1".parse().unwrap();
+        let other_pc: IpAddr = "100.64.0.2".parse().unwrap();
+        let mut invites = Invites::default();
+        assert_eq!(invites.device_tag(&greeting, rig, NOW), None);
+
+        let (_, secret) = parts(&invites.mint(DEVICE, None, NOW).unwrap().link);
+        let held = secret_hash(&secret);
+        let tag = invites.device_tag(&greeting, rig, NOW).unwrap();
+        assert!(device_tag_is_good(&held, &greeting, rig, &tag));
+        assert!(device_tag_is_good(&held, &greeting, "::ffff:100.64.0.1".parse().unwrap(), &tag));
+        assert!(!device_tag_is_good(&held, &greeting, other_pc, &tag), "a tag made for another dialer was passed on");
+        assert!(!device_tag_is_good(&secret_hash("another invite"), &greeting, rig, &tag));
+        let other_login = Greeting { challenge: "another", ..greeting };
+        assert!(!device_tag_is_good(&held, &other_login, rig, &tag));
+        assert!(!device_tag_is_good(&held, &greeting, rig, b"short"));
+
+        assert_eq!(invites.device_tag(&greeting, rig, NOW + LIFETIME_MS), None, "a lapsed invite is not shown");
+    }
+
+    #[test]
+    fn a_redeemed_login_is_confirmed_for_that_signature_alone() {
+        let (public, secret) = sign::gen_keypair();
+        let mut invites = Invites::default();
+        let link = invites.mint(DEVICE, None, NOW).unwrap().link;
+        let (_, link_secret) = parts(&link);
+        let invite = invite(&link, &secret, "salt", "challenge", "agent_a");
+        let holder = invites.redeem(Some(&public), &login(&invite), NOW).unwrap();
+
+        let greeting = Greeting { device_id: DEVICE, salt: "salt", challenge: "challenge" };
+        let held = secret_hash(&link_secret);
+        assert!(accepted_tag_is_good(&held, &greeting, &invite.signature, &holder.accepted));
+        assert!(!accepted_tag_is_good(&held, &greeting, b"another signature", &holder.accepted));
+        assert!(!accepted_tag_is_good(&secret_hash("another invite"), &greeting, &invite.signature, &holder.accepted));
     }
 
     #[test]

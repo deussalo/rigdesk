@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use base::{
-    invite::{secret_hash, Claim},
+    invite::{accepted_tag_is_good, device_tag_is_good, secret_hash, Claim, Greeting},
     message_proto::{Hash, RigInvite},
 };
 use hbb_common::{
@@ -58,6 +58,10 @@ pub fn pair_key(path: &Path) -> Result<String, String> {
     Ok(STANDARD.encode(public.0))
 }
 
+fn greeting<'a>(device_id: &'a str, hash: &'a Hash) -> Greeting<'a> {
+    Greeting { device_id, salt: &hash.salt, challenge: &hash.challenge }
+}
+
 impl Invite {
     /// `file` holds `{grant, secret, agent_id, agent_title}`, from the link and from Rig's own record of the agent.
     pub fn load(file: &Path, key_file: &Path) -> Result<Self, String> {
@@ -79,6 +83,16 @@ impl Invite {
 
     pub fn display_name(&self) -> String {
         format!("{} (Rig agent)", self.agent_title)
+    }
+
+    /// Whether the PC that sent this greeting, to us at `dialer`, holds this invite as `device_id`.
+    pub fn held_by(&self, device_id: &str, hash: &Hash, dialer: std::net::IpAddr) -> bool {
+        device_tag_is_good(&self.secret_hash, &greeting(device_id, hash), dialer, &hash.rig_invite_device)
+    }
+
+    /// Whether the device confirmed the login that carried `signature`.
+    pub fn accepted(&self, device_id: &str, hash: &Hash, signature: &[u8], tag: &[u8]) -> bool {
+        accepted_tag_is_good(&self.secret_hash, &greeting(device_id, hash), signature, tag)
     }
 
     pub fn proof(&self, device_id: &str, hash: &Hash) -> RigInvite {

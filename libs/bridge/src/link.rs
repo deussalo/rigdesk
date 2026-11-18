@@ -72,6 +72,19 @@ struct State {
     info: Option<PeerInfo>,
 }
 
+/// What a RigDesk PC answers a login under an ID not its own; the plugin takes it to mean "try the next PC".
+const NOT_THE_INVITED_DEVICE: &str = "Offline";
+
+/// One connection's redemption of an invite.
+#[derive(Default)]
+struct InviteLogin {
+    /// Our address on this connection, which is the dialer the device sees.
+    dialer: Option<std::net::IpAddr>,
+    /// The greeting the proof answered and the proof's signature.
+    sent: Option<(Hash, Vec<u8>)>,
+    accepted: bool,
+}
+
 /// How the bridge reaches the PC.
 #[derive(Clone, Debug)]
 pub enum Route {
@@ -131,6 +144,7 @@ pub struct Link {
     hang: AtomicBool,
     /// An invite the device made: the session login presents it in place of the password.
     invite: OnceLock<crate::invite::Invite>,
+    invite_login: Mutex<InviteLogin>,
 }
 
 fn now_ms() -> u64 {
@@ -186,6 +200,7 @@ impl Link {
             carried: AtomicBool::new(false),
             hang: AtomicBool::new(false),
             invite: OnceLock::new(),
+            invite_login: Mutex::new(InviteLogin::default()),
         })
     }
 
@@ -325,6 +340,9 @@ impl Link {
             }
             None => self.dial().await?,
         };
+        if self.invite.get().is_some() {
+            *self.invite_login.lock().unwrap() = InviteLogin { dialer: Some(stream.local_addr().ip()), ..Default::default() };
+        }
         let mut idle_check = tokio::time::interval(Duration::from_secs(5));
         // next_timeout restarts with every select! round, so the idle tick alone would keep a dead link looking alive.
         let mut heard = std::time::Instant::now();
@@ -362,12 +380,32 @@ impl Link {
         }
     }
 
+    /// Nothing of an invite goes to a PC that has not shown it holds it: any PC can answer a dial under any ID, and could
+    /// otherwise take the proof to the real device.
+    fn check_invite_holder(&self, hash: &Hash) -> ResultType<()> {
+        let Some(invite) = self.invite.get() else { return Ok(()) };
+        let dialer = self.invite_login.lock().unwrap().dialer;
+        if !dialer.is_some_and(|dialer| invite.held_by(&self.username, hash, dialer)) {
+            bail!("login refused by the PC: {NOT_THE_INVITED_DEVICE}");
+        }
+        Ok(())
+    }
+
+    fn on_invite_accepted(&self, tag: &[u8]) {
+        let Some(invite) = self.invite.get() else { return };
+        let mut login = self.invite_login.lock().unwrap();
+        if login.sent.as_ref().is_some_and(|(hash, signature)| invite.accepted(&self.username, hash, signature, tag)) {
+            login.accepted = true;
+        }
+    }
+
     fn on_message(&self, msg: Message, tx: &mpsc::UnboundedSender<Message>) -> ResultType<Option<Message>> {
         if self.to_viewers.receiver_count() > 0 && self.relayed(&msg) {
             let _ = self.to_viewers.send(ToViewer::Message(Arc::new(msg.clone())));
         }
         match msg.union {
             Some(message::Union::Hash(hash)) => {
+                self.check_invite_holder(&hash)?;
                 let (image_quality, custom_fps) = self.quality();
                 let option = OptionMessage {
                     image_quality: image_quality.into(),
@@ -387,13 +425,19 @@ impl Link {
                 if let Some(invite) = self.invite.get() {
                     let request = login.mut_login_request();
                     request.password = Default::default();
-                    request.rig_invite = MessageField::some(invite.proof(&self.username, &hash));
+                    let proof = invite.proof(&self.username, &hash);
+                    self.invite_login.lock().unwrap().sent = Some((hash, proof.signature.to_vec()));
+                    request.rig_invite = MessageField::some(proof);
                 }
                 return Ok(Some(login));
             }
+            Some(message::Union::RigInviteAccepted(tag)) => self.on_invite_accepted(&tag),
             Some(message::Union::LoginResponse(res)) => match res.union {
                 Some(login_response::Union::Error(e)) => bail!("login refused by the PC: {e}"),
                 Some(login_response::Union::PeerInfo(pi)) => {
+                    if self.invite.get().is_some() && !self.invite_login.lock().unwrap().accepted {
+                        bail!("login refused by the PC: it did not confirm the invite");
+                    }
                     log::info!("logged in to {} ({} {}, RustDesk {})", self.addr, pi.hostname, pi.platform, pi.version);
                     let mut state = self.state.lock().unwrap();
                     state.peer = Some(Peer {
@@ -470,6 +514,7 @@ impl Link {
         match &msg.union {
             Some(message::Union::Hash(_) | message::Union::LoginResponse(_) | message::Union::TestDelay(_)) => false,
             Some(message::Union::SignedId(_) | message::Union::PublicKey(_)) => false,
+            Some(message::Union::RigInviteAccepted(_)) => false,
             Some(message::Union::ScreenshotResponse(res)) => !self.shots.lock().unwrap().contains_key(&res.sid),
             Some(message::Union::Misc(m)) => !matches!(m.union, Some(misc::Union::CloseReason(_))),
             _ => true,
@@ -694,6 +739,7 @@ fn rand_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base::invite;
 
     #[test]
     fn with_no_password_kept_an_agent_is_told_only_the_persons_allow_lets_it_in() {
@@ -718,6 +764,111 @@ mod tests {
 
         link.adopt(crate::knock::Allowed { stream: FramedStream::from(client.unwrap(), addr), peer_info: Message::new() });
         assert!(tokio::time::timeout(Duration::from_millis(300), link.session()).await.is_err(), "the new session ended at once");
+    }
+
+    const DEVICE: &str = "105517719";
+    const SECRET: &str = "the invite's secret";
+
+    fn invited_link(peer: &str, name: &str) -> Arc<Link> {
+        let dir = std::env::temp_dir().join(format!("rigdesk-link-invite-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (key, file) = (dir.join("pair.key"), dir.join("invite.json"));
+        crate::invite::pair_key(&key).unwrap();
+        let claim = hbb_common::serde_json::json!({"grant": "g1", "secret": SECRET, "agent_id": "agent_a", "agent_title": "Builder"});
+        std::fs::write(&file, claim.to_string()).unwrap();
+        let invite = crate::invite::Invite::load(&file, &key).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
+        let link = Link::new((Route::direct(peer).0, DEVICE.to_string()), String::new(), "Builder (Rig agent)".into(), shared);
+        link.set_once();
+        link.set_invite(invite);
+        link
+    }
+
+    fn device_greeting(secret: &str, dialer: std::net::IpAddr) -> Hash {
+        let (salt, challenge) = ("salt", "challenge");
+        let said = invite::Greeting { device_id: DEVICE, salt, challenge };
+        let rig_invite_device = invite::device_tag(&invite::secret_hash(secret), &said, dialer).into();
+        Hash { salt: salt.into(), challenge: challenge.into(), rig_invite_device, ..Default::default() }
+    }
+
+    fn message_of(hash: Hash) -> Message {
+        let mut msg = Message::new();
+        msg.set_hash(hash);
+        msg
+    }
+
+    fn logged_in() -> Message {
+        let mut msg = Message::new();
+        msg.mut_login_response().set_peer_info(PeerInfo { hostname: "phone".into(), ..Default::default() });
+        msg
+    }
+
+    #[test]
+    fn a_pc_that_cannot_show_it_holds_the_invite_gets_nothing_of_it() {
+        let rig: std::net::IpAddr = "100.64.0.1".parse().unwrap();
+        let other_pc: std::net::IpAddr = "100.64.0.2".parse().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let link = invited_link("100.64.0.9", "refused");
+        link.invite_login.lock().unwrap().dialer = Some(rig);
+
+        let bare = Hash { salt: "salt".into(), challenge: "challenge".into(), ..Default::default() };
+        let greetings = [bare, device_greeting("another invite", rig), device_greeting(SECRET, other_pc)];
+        for greeting in greetings {
+            let refused = link.on_message(message_of(greeting), &tx).err().expect("the proof went to a PC that showed nothing");
+            assert_eq!(refused.to_string(), "login refused by the PC: Offline");
+        }
+        assert!(link.invite_login.lock().unwrap().sent.is_none());
+    }
+
+    #[test]
+    fn a_login_counts_only_once_the_device_confirms_the_invite() {
+        let rig: std::net::IpAddr = "100.64.0.1".parse().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let link = invited_link("100.64.0.9", "confirm");
+        link.invite_login.lock().unwrap().dialer = Some(rig);
+
+        let reply = link.on_message(message_of(device_greeting(SECRET, rig)), &tx).unwrap().expect("the device gets the login");
+        let proof = reply.login_request().rig_invite.clone().into_option().expect("the login presents the invite");
+        assert_eq!(proof.agent_id, "agent_a");
+
+        let refused = link.on_message(logged_in(), &tx).err().expect("a login no device confirmed counted");
+        assert_eq!(refused.to_string(), "login refused by the PC: it did not confirm the invite");
+        assert!(link.state.lock().unwrap().peer.is_none());
+
+        let said = invite::Greeting { device_id: DEVICE, salt: "salt", challenge: "challenge" };
+        let mut forged = Message::new();
+        forged.set_rig_invite_accepted(invite::accepted_tag(&invite::secret_hash("another invite"), &said, &proof.signature).into());
+        link.on_message(forged, &tx).unwrap();
+        assert!(link.on_message(logged_in(), &tx).is_err(), "a confirmation from another invite counted");
+
+        let mut accepted = Message::new();
+        accepted.set_rig_invite_accepted(invite::accepted_tag(&invite::secret_hash(SECRET), &said, &proof.signature).into());
+        link.on_message(accepted, &tx).unwrap();
+        link.on_message(logged_in(), &tx).unwrap();
+        assert_eq!(link.state.lock().unwrap().peer.as_ref().map(|peer| peer.hostname.as_str()), Some("phone"));
+    }
+
+    #[tokio::test]
+    async fn the_address_rig_dials_from_is_the_one_the_device_sees() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let link = invited_link(&addr.to_string(), "dial");
+        let session = tokio::spawn({
+            let link = link.clone();
+            async move { link.session().await }
+        });
+        let (socket, dialer) = listener.accept().await.unwrap();
+        let mut device = FramedStream::from(socket, dialer);
+        device.send(&message_of(device_greeting(SECRET, dialer.ip()))).await.unwrap();
+        let mut login = None;
+        while login.is_none() {
+            let bytes = device.next_timeout(5_000).await.expect("the bridge hung up").unwrap();
+            login = Message::parse_from_bytes(&bytes).ok().filter(Message::has_login_request);
+        }
+        assert!(login.unwrap().login_request().rig_invite.is_some());
+        session.abort();
     }
 
     #[test]

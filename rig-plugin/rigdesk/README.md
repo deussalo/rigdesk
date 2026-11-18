@@ -206,14 +206,18 @@ Known limits against a RigDesk PC:
   * Accept dials through the ID server RigDesk's settings name at that moment: if `connect_server` changed after the
     request was filed, that is not the server the request named.
 * `desk/join(link)` with a device's invite, `rigdesk://id.<RustDesk ID>/<grant>#<secret>` — the person at RigDesk on
-  Android made it, and it needs no password and no setup entry. Rig dials the device over the tailnet or through its ID
-  server, and the login carries a signature by Rig's pairing key over the invite, that login's challenge and the agent
-  Rig names. The device, which fetched the public half from the `pair_key` route, checks it and spends the invite on the
-  first login that passes, so the first agent owns the session; it shows that agent and can end it. The invite lapses
+  Android made it, and it needs no password. The device needs an entry in Rig's settings with `stock.peer`, its tailnet
+  name or address, and `stock.login_id`, the RustDesk ID it shows. Rig dials only the entry declaring the link's ID, so with
+  `stock.peer` on the tailnet, the tailnet vouches for the node behind that address; a link can name any ID, and with no such entry nothing is
+  dialed. No other PC and no ID server is contacted. While the invite's session lives, that entry cannot be joined by another agent, since the device names one. The device must first show it holds the invite: its greeting carries a tag
+  keyed by the hash of the link's secret, over that connection's challenge and Rig's tailnet address. Without it, Rig sends nothing of the invite. The login then carries a signature by Rig's pairing key over the invite, that
+  login's challenge and the agent Rig names. The device, which fetched the public half from the `pair_key` route, checks it, spends the invite on the
+  first login that passes and confirms it with a second tag, without which Rig does not count the login as joined. So the first agent owns the session; the device shows that agent and can end it. The invite lapses
   after 15 minutes unclaimed. The person can instead make it for one agent, by its id on the device or from the agents
   that last used the PC in its tray; the device then refuses any other agent and the invite stays open. Known limits: a device requiring 2FA refuses invites, the session is the desktop only (no
-  terminal), and an invite spent on a login that then fails needs a new one. A device's invite asks no Accept in Rig and
-  goes past Rig's PC assignment: any agent given the link may join, as a device has no agent shell to guard. If the
+  terminal), an invite spent on a login that then fails needs a new one, any tailnet peer that connects can see that an invite is open (not what it is), and a wrong
+  `stock.login_id` is the operator's to catch: Rig has no record of its own that ties an ID to a device, and whoever holds the link and controls the address in that entry can make both tags.
+  A device's invite asks no Accept in Rig and goes past Rig's PC assignment: any agent given the link may join, as a device has no agent shell to guard. If the
   device's Rig origin changes, its pairing key is replaced, and its invites, open ones included, are redeemable only by
   the new Rig; the device logs that.
 * `desk/leave` — ends the session.

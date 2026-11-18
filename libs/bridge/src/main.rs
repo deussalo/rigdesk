@@ -11,7 +11,7 @@
 //!                  [--port 21120] [--journal <file>] [--name "Rig agent"] [--once] [--login-id <ID, with --peer>]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
 //!                  [--mcp-server http://<host>[:port][/path] [--mcp-token-file <file>]]...
-//!                  [--invite-file <file> --pair-key-file <file>, with --once]
+//!                  [--invite-file <file> --pair-key-file <file>, with --once, --peer and --login-id]
 //!   rigdesk-bridge --pair-key <file>
 //!
 //! `--invite-file` redeems an invite the device made, with Rig's pairing key, in place of a password (see `invite`);
@@ -104,9 +104,9 @@ fn parse_args() -> Result<Args, String> {
         _ => return Err("--viewer-port and --viewer-password-file go together".into()),
     };
     let invite = match (invite_file, pair_key_file) {
-        (Some(file), Some(key)) if once && password_file.is_none() => Some((file, key)),
+        (Some(file), Some(key)) if once && password_file.is_none() && peer.is_some() && login_id.is_some() => Some((file, key)),
         (None, None) => None,
-        _ => return Err("--invite-file and --pair-key-file go together, with --once and no --password-file".into()),
+        _ => return Err("--invite-file and --pair-key-file go together, with --once, --peer and --login-id and no --password-file".into()),
     };
     if login_id.is_some() && peer.is_none() {
         return Err("--login-id goes with --peer".into());

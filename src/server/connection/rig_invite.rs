@@ -1,8 +1,21 @@
 use super::{sleep, Config, Connection, FailureScope, SEND_TIMEOUT_VIDEO};
-use base::{invite, message_proto::LoginRequest};
-use std::time::Duration;
+use base::{
+    invite,
+    message_proto::{LoginRequest, Message},
+};
+use std::{net::SocketAddr, time::Duration};
 
 impl Connection {
+    /// RigDesk: while an invite is open, the greeting shows this dialer that this device holds it. Rig sends its proof
+    /// to nothing else.
+    pub(super) fn rig_invite_hello(&self, greeting: &mut Message, dialer: SocketAddr) {
+        let device_id = Config::get_id();
+        let said = invite::Greeting { device_id: &device_id, salt: &self.hash.salt, challenge: &self.hash.challenge };
+        if let Some(tag) = invite::open_device_tag(&said, dialer.ip()) {
+            greeting.mut_hash().rig_invite_device = tag.into();
+        }
+    }
+
     /// RigDesk: a login presenting an invite the person at this device made, proved with Rig's paired key. It stands in
     /// for the password and the click, because the person already said yes by making the invite. It opens a plain
     /// desktop session and never gets around privacy mode or a 2FA requirement.
@@ -49,6 +62,9 @@ impl Connection {
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.try_start_cm_ipc();
+        let mut accepted = Message::new();
+        accepted.set_rig_invite_accepted(holder.accepted.clone().into());
+        self.send(accepted).await;
         if !self.send_logon_response_and_keep_alive().await {
             return false;
         }
