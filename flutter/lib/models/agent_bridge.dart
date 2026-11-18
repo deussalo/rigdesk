@@ -29,6 +29,18 @@ String? plainHttpTo(String url) {
   return privateHost(host) ? null : host;
 }
 
+/// A redirect answered to a request carrying the agent host's token: never followed, whatever its target.
+class RedirectRefused implements Exception {
+  final int status;
+  const RedirectRefused(this.status);
+
+  @override
+  String toString() => 'Refused: the agent host answered with a redirect (HTTP $status). A request carrying its token '
+      'never follows one, so nothing went to the other address. Set the agent host\'s final address.';
+}
+
+const _redirects = {301, 302, 303, 307, 308};
+
 /// Where the agent host for one PC is: the rigdesk-bridge on the Rig host that keeps the agent's own session to the
 /// PC. The viewer shows the PC itself; this carries the agent panel's buttons and the agent's state.
 class AgentHost {
@@ -100,6 +112,24 @@ class AgentBridge {
     return Uri.parse('${host.url}$path');
   }
 
+  /// Every request to the agent host: it carries the token, so a redirect ends it.
+  Future<http.StreamedResponse> _send(String method, String path,
+      {Map<String, String> headers = const {}, String? body}) async {
+    final request = http.Request(method, _at(path))
+      ..followRedirects = false
+      ..headers.addAll({..._auth, ...headers});
+    if (body != null) request.body = body;
+    final answer = await _client.send(request);
+    if (_redirects.contains(answer.statusCode)) {
+      unawaited(answer.stream.drain<void>().catchError((_) {}));
+      throw RedirectRefused(answer.statusCode);
+    }
+    return answer;
+  }
+
+  Future<http.Response> _read(String method, String path, {Map<String, String> headers = const {}, String? body}) async =>
+      http.Response.fromStream(await _send(method, path, headers: headers, body: body));
+
   void start() {
     final why = host.refused;
     if (why == null) {
@@ -133,9 +163,7 @@ class AgentBridge {
           });
           break;
         case 'frame':
-          final shot = await _client
-              .get(_at('/frame?display=$display'), headers: _auth)
-              .timeout(const Duration(seconds: 20));
+          final shot = await _read('GET', '/frame?display=$display').timeout(const Duration(seconds: 20));
           if (shot.statusCode != 200) throw 'the agent host gave no frame: ${shot.body}';
           _emit(frame: shot.bodyBytes);
           break;
@@ -154,15 +182,13 @@ class AgentBridge {
           _emit();
       }
     } catch (e) {
-      onTrouble(host.refused ?? 'RigDesk agent host: $e');
+      onTrouble(host.refused ?? (e is RedirectRefused ? '$e' : 'RigDesk agent host: $e'));
       if (verb == 'frame') _emit(note: 'no still of the screen: $e');
     }
   }
 
   Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> body) async {
-    final answer = await _client
-        .post(_at(path),
-            headers: {..._auth, 'Content-Type': 'application/json'}, body: jsonEncode(body))
+    final answer = await _read('POST', path, headers: {'Content-Type': 'application/json'}, body: jsonEncode(body))
         .timeout(const Duration(seconds: 20));
     if (answer.statusCode != 200) throw '${answer.statusCode} ${answer.body}';
     final j = jsonDecode(answer.body);
@@ -234,9 +260,7 @@ class AgentBridge {
     var wait = 1;
     while (!_closed) {
       try {
-        final health = await _client
-            .get(_at('/health'), headers: _auth)
-            .timeout(const Duration(seconds: 15));
+        final health = await _read('GET', '/health').timeout(const Duration(seconds: 15));
         if (health.statusCode != 200) throw 'the agent host answered ${health.statusCode}';
         final j = jsonDecode(health.body) as Map<String, dynamic>;
         final boot = (j['boot'] ?? '') as String;
@@ -246,9 +270,7 @@ class AgentBridge {
         }
         _standing(j['standing']);
         _emit();
-        final request = http.Request('GET', _at('/events'))
-          ..headers.addAll({..._auth, 'Accept': 'text/event-stream', 'Last-Event-ID': '$_lastEvent'});
-        final stream = await _client.send(request);
+        final stream = await _send('GET', '/events', headers: {'Accept': 'text/event-stream', 'Last-Event-ID': '$_lastEvent'});
         if (stream.statusCode != 200) throw 'the agent host answered ${stream.statusCode}';
         wait = 1;
         _down = false;
@@ -268,7 +290,7 @@ class AgentBridge {
         }
       } catch (e) {
         if (_closed) return;
-        if (!_down) onTrouble('RigDesk agent host unreachable: $e');
+        if (!_down) onTrouble(e is RedirectRefused ? '$e' : 'RigDesk agent host unreachable: $e');
         _down = true;
       }
       await Future.delayed(Duration(seconds: wait));

@@ -20,6 +20,24 @@ void main() {
     }
   });
 
+  test('no request follows a redirect, and the person is told it was refused', () async {
+    final asked = <http.BaseRequest>[];
+    final told = <String>[];
+    final bridge = AgentBridge(_host,
+        client: MockClient((request) async {
+          asked.add(request);
+          return http.Response('', 302, headers: {'location': 'http://127.0.0.1:1/elsewhere'});
+        }),
+        onState: (_) {},
+        onTrouble: told.add);
+    await bridge.ask('stop');
+    await bridge.ask('frame');
+    bridge.close();
+    expect(asked.map((r) => r.url.path), ['/viewer/stop', '/frame']);
+    expect(asked.every((r) => !r.followRedirects), isTrue);
+    expect(told.where((t) => t.startsWith('Refused: the agent host answered with a redirect (HTTP 302)')), hasLength(2));
+  });
+
   test('a refused host gets no request, and the person is told why', () async {
     var requests = 0;
     final told = <String>[];
