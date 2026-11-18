@@ -218,7 +218,8 @@ PIN-locked settings): an invite obeys the same switch as the operator's Accept, 
   its user, and could mint an invite through the tray's IPC itself. So on a PC where any agent holds a shell grant,
   `desk/join` with an invite claims nothing until the operator accepts it in Rig; the PC's `/health` says whether the
   open link is an invite (`invite_open`). On any other PC an invite needs no Accept in Rig: the person at the PC made
-  it. A viewer's share link never asks. Closing the switch above revokes an open invite.
+  it. A viewer's share link never asks. Closing the switch above revokes an open invite. The check is made when the
+  agent joins: a shell grant given after that leaves the invited agent's session running.
 - **Your input goes first.** Any mouse or keyboard input, from a viewer or at the PC itself, reaches the PC at once,
   and the agent's actions are refused ("the human is using the PC …", reads still work) until that input pauses for
   3 seconds; then the agent may act again by itself.

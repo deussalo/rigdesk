@@ -212,7 +212,10 @@ Known limits against a RigDesk PC:
   first login that passes, so the first agent owns the session; it shows that agent and can end it. The invite lapses
   after 15 minutes unclaimed. The person can instead make it for one agent, by its id on the device or from the agents
   that last used the PC in its tray; the device then refuses any other agent and the invite stays open. Known limits: a device requiring 2FA refuses invites, the session is the desktop only (no
-  terminal), and an invite spent on a login that then fails needs a new one.
+  terminal), and an invite spent on a login that then fails needs a new one. A device's invite asks no Accept in Rig and
+  goes past Rig's PC assignment: any agent given the link may join, as a device has no agent shell to guard. If the
+  device's Rig origin changes, its pairing key is replaced, and its invites, open ones included, are redeemable only by
+  the new Rig; the device logs that.
 * `desk/leave` — ends the session.
 
 ## Agent shell and health (RigDesk PCs)

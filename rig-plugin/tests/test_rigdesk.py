@@ -512,7 +512,7 @@ def test_an_invite_link_dials_the_device_with_rigs_key_and_no_password_and_names
     import json
     import os
     import stat
-    from rigdesk import adhoc, desks as desks_module
+    from rigdesk import desks as desks_module
     from rigdesk.desks import DeskRefused, IdServer, RigdeskSettings
 
     link = "rigdesk://id.105517719/" + "a" * 32 + "#" + "b" * 32
@@ -809,6 +809,7 @@ def test_the_pcs_journal_is_told_a_join_was_the_persons_and_not_the_operators() 
                 nonce = next(body["nonce"] for path, body in posted if path == "/offer" and body["ask"] == "desk_3")
                 await desks._event(link, {"type": "offer", "ask": "desk_3", "nonce": nonce, "answer": "deny"})
                 await _until(lambda: refused == ["desk_3"])
+                assert "desk_3" not in desks.person_answered, "a Deny at the PC was counted as the person's answer"
             finally:
                 await prompts.end_all(desks)
                 await desks._http.close()
