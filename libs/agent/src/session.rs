@@ -436,7 +436,6 @@ impl Shared {
         true
     }
 
-    /// The human or the operator ends the share: the session, and any link or invite still open.
     pub fn revoke(&self, reason: &str) -> bool {
         let mut state = self.state.lock().unwrap();
         state.grant = None;
@@ -570,7 +569,7 @@ mod tests {
         let link = shared.mint();
         let token = shared.claim(&link.grant, &link.secret, owner("a1")).unwrap();
         assert!(shared.block());
-        assert!(shared.leave());
+        assert!(shared.revoke("the agent left"));
         let again = shared.mint();
         let token2 = shared.claim(&again.grant, &again.secret, owner("a1")).unwrap();
         assert_ne!(token, token2);
@@ -602,7 +601,7 @@ mod tests {
         assert_eq!(shared.operator_owner(), None, "a link session is not the operator's");
         assert_eq!(shared.join_operator(owner("a1")), Err(crate::operator::Refused::Held(owner("a2"))));
         assert!(shared.block());
-        assert!(shared.leave());
+        assert!(shared.revoke("the agent left"));
         assert!(matches!(shared.join_operator(owner("a2")), Err(crate::operator::Refused::Blocked { .. })));
         assert!(shared.admit(&by_link, true).is_err());
     }
