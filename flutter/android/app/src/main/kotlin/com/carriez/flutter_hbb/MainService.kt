@@ -983,6 +983,16 @@ class MainService : Service() {
     /// RigDesk: a Rig agent asks to join, while the operator is asked in Rig too: Allow and Deny answer it from the
     /// notification itself, as the app's own dialog does. Allow is there only for a knock that proved Rig's paired key.
     private fun rigRequestNotification(clientID: Int, username: String) {
+        val openApp = rigRequestOpenApp(clientID)
+        // Android 15 shows only the public version while this device's screen is being shared, with no buttons: it hides
+        // the request and its Allow from whoever watches, so this says where to answer without naming the agent.
+        val whileHidden = NotificationCompat.Builder(this, notificationChannel)
+            .setSmallIcon(R.mipmap.ic_stat_logo)
+            .setContentTitle("A Rig agent is trying to join this device")
+            .setContentText("Open RigDesk to answer, or the operator answers in Rig.")
+            .setContentIntent(openApp)
+            .setColor(ContextCompat.getColor(this, R.color.primary))
+            .build()
         val builder = NotificationCompat.Builder(this, notificationChannel)
             .setSmallIcon(R.mipmap.ic_stat_logo)
             .setOngoing(false)
@@ -991,6 +1001,8 @@ class MainService : Service() {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setContentTitle("$username is trying to join this device")
             .setContentText("Allow it here, or the operator answers in Rig.")
+            .setContentIntent(openApp)
+            .setPublicVersion(whileHidden)
             .setColor(ContextCompat.getColor(this, R.color.primary))
             // Only if the request's end never reaches this service.
             .setTimeoutAfter(10 * 60 * 1000L)
@@ -1000,6 +1012,16 @@ class MainService : Service() {
         builder.addAction(0, "Deny", rigRequestIntent(clientID, false))
         rigRequests.add(clientID)
         notificationManager.notify(getClientNotifyID(clientID), builder.build())
+    }
+
+    private fun rigRequestOpenApp(clientID: Int): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+            action = Intent.ACTION_MAIN
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE else FLAG_UPDATE_CURRENT
+        return PendingIntent.getActivity(this, getClientNotifyID(clientID), intent, flags)
     }
 
     private fun rigRequestIntent(clientID: Int, allow: Boolean): PendingIntent {

@@ -599,6 +599,13 @@ class ServerModel with ChangeNotifier {
         .updateConnIdOfKey(MessageKey(client.peerId, client.id));
   }
 
+  Future<void> showWaitingRigRequests() async {
+    await updateClientState();
+    for (final client in _clients.where((c) => c.isRigKnock && !c.disconnected)) {
+      showLoginDialog(client);
+    }
+  }
+
   void showLoginDialog(Client client) {
     showClientDialog(
       client,
