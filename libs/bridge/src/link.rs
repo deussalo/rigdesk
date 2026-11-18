@@ -311,8 +311,13 @@ impl Link {
         // A hang-up that arrived as the last session ended on its own is not for this one.
         self.hang.store(false, Ordering::SeqCst);
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-        let adopted = self.adopted.lock().unwrap().take();
-        self.carried.store(adopted.is_some(), Ordering::SeqCst);
+        // Under the lock hang_up takes, so a hang-up never finds the adopted connection gone and `carried` still the last session's.
+        let adopted = {
+            let mut slot = self.adopted.lock().unwrap();
+            let adopted = slot.take();
+            self.carried.store(adopted.is_some(), Ordering::SeqCst);
+            adopted
+        };
         let mut stream = match adopted {
             Some(allowed) => {
                 self.on_message(allowed.peer_info, &tx)?;
@@ -513,7 +518,8 @@ impl Link {
     /// Hangs up the connection adopted last, whether it waits or carries the session now; nothing else is touched.
     pub fn hang_up(&self) {
         self.last_use_ms.store(0, Ordering::SeqCst);
-        if self.adopted.lock().unwrap().take().is_none() && self.carried.load(Ordering::SeqCst) {
+        let mut adopted = self.adopted.lock().unwrap();
+        if adopted.take().is_none() && self.carried.load(Ordering::SeqCst) {
             self.hang.store(true, Ordering::SeqCst);
             self.swap.notify_one();
         }
