@@ -1430,6 +1430,63 @@ def test_no_request_carrying_a_token_follows_a_redirect() -> None:
     asyncio.run(run())
 
 
+def test_a_real_server_gives_the_operator_rigs_pairing_key_and_refuses_a_missing_or_wrong_bearer() -> None:
+    import base64
+    import subprocess
+    import sys
+    import time
+    import urllib.error
+    import urllib.request
+
+    import core
+    checkout = Path(core.__file__).resolve().parent.parent
+    sys.path.insert(0, str(checkout / "scripts"))
+    from fixture_home import free_port, isolated_env
+
+    key, operator = base64.b64encode(bytes(range(32))).decode(), "operator-bearer-for-this-test"
+    with tempfile.TemporaryDirectory() as held:
+        root, port = Path(held) / "rig", free_port()
+        env = isolated_env(root, port, "rigdesk-pair-key-test-absent.service") | {"RIG_ACCESS_TOKEN": operator}
+        bridge = Path(held) / "bridge"
+        bridge.write_text(f'#!/bin/sh\n[ "$1" = --pair-key ] && [ -n "$2" ] && echo {key}\n')
+        bridge.chmod(0o755)
+        (root / "home" / "settings.json").write_text(json.dumps({"plugins": {"rigdesk": {"bridge_bin": str(bridge)}}}))
+        rig = [sys.executable, str(checkout / "rig")]
+        with (root / "server.log").open("wb") as log:
+            server = subprocess.Popen([*rig, "serve", "--port", str(port)], cwd=checkout, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+
+        def asked(path: str, bearer: str | None) -> tuple[int, str]:
+            headers = {} if bearer is None else {"Authorization": f"Bearer {bearer}"}
+            try:
+                with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers), timeout=20) as answer:
+                    return answer.status, answer.read().decode()
+            except urllib.error.HTTPError as refused:
+                return refused.code, refused.read().decode()
+
+        try:
+            # `rig serve` on a spare port queues for a dev slot for up to 600 s, and both slots being busy is normal.
+            deadline = time.monotonic() + 660
+            while True:
+                try:
+                    asked("/api/contributions/status", operator)
+                    break
+                except OSError:
+                    assert server.poll() is None and time.monotonic() < deadline, (root / "server.log").read_text()[-2000:]
+                    time.sleep(0.2)
+            added = subprocess.run([*rig, "plugin", "add", str(Path(__file__).resolve().parent.parent / "rigdesk")], cwd=checkout, capture_output=True, text=True, env=env, timeout=60)
+            assert added.returncode == 0, added.stdout + added.stderr
+            route = "/api/contributions/rigdesk/routes/pair_key"
+            status, body = asked(route, operator)
+            assert status == 200, (status, body)
+            assert json.loads(body)["key"] == key and len(base64.b64decode(json.loads(body)["key"], validate=True)) == 32, body
+            for bearer in (None, "not-the-operators-bearer"):
+                status, body = asked(route, bearer)
+                assert status in (401, 403) and key not in body, (bearer, status, body)
+        finally:
+            server.terminate()
+            server.wait(20)
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
