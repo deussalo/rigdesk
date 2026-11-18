@@ -22,10 +22,12 @@ def test_a_link_names_its_pc_by_name_or_tailnet_host() -> None:
     assert "not a RigDesk share link" in str(pc_of_link("https://example.com", PCS))
 
 
-def test_the_agent_hears_of_no_holder_change_and_not_of_its_own_leave() -> None:
-    for holder, by in (("human", "viewer input"), ("agent", "quiet"), ("agent", "unblock"), ("blocked", "block"), ("agent", "share"), ("agent", "operator"),
-                       ("blocked", "stop"), ("agent", "hand")):
+def test_the_agent_hears_only_of_a_holder_change_that_lets_it_carry_on_and_not_of_its_own_leave() -> None:
+    for holder, by in (("human", "viewer input"), ("agent", "quiet"), ("blocked", "block"), ("agent", "share"), ("agent", "operator"), ("blocked", "stop")):
         assert words_of("deus", {"type": "holder", "holder": holder, "by": by, "at_ms": 0}) is None, by
+    resumed = str(words_of("deus", {"type": "holder", "holder": "agent", "by": "unblock", "at_ms": 0}))
+    handed = str(words_of("deus", {"type": "holder", "holder": "agent", "by": "hand to agent", "at_ms": 0}))
+    assert "resumed you" in resumed and "handed input back to you" in handed and all("Carry on there by yourself" in said for said in (resumed, handed))
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
     assert "session there ended" in str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the human ended the share", "at_ms": 0}))
 

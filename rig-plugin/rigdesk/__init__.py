@@ -179,7 +179,7 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
         return _refused(call, failed)
     return {"pc": held.pc, "joined": True, "said": (f"You own {held.pc}'s session and hold its input. desk/<tool> acts there; the human sees each call live. "
                                                     "Their own input goes first: while they use the PC your actions are refused, and work again once they pause "
-                                                    "for 3 s. If they press Stop, your turn is cut short and every call is refused until they resume you.")}
+                                                    "for 3 s. If they press Stop, your turn is cut short and every call is refused until they resume you; you are told when they do.")}
 
 
 async def _ask_invite(desks: Desks, call: Call, pc: str, link: str, title: str) -> Answer:

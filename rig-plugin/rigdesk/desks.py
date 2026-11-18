@@ -409,9 +409,15 @@ def _clock(at_ms: int) -> str:
 
 
 def words_of(pc: str, event: dict[str, Any]) -> str | None:
-    """What the owning agent is told of one event from its PC; None for one it is not told of. A holder change is told by the PC's refusal
-    of its next call, and an ended session by the plugin's (Desks._ended)."""
+    """What the owning agent is told of one event from its PC; None for one it is not told of. Only a holder change that lets it carry on now
+    is told; any other is told by the PC's refusal of its next call, and an ended session by the plugin's (Desks._ended)."""
     kind, at = event.get("type"), _clock(int(event.get("at_ms") or now_ms()))
+    if kind == "holder" and event.get("holder") == "agent":
+        by = event.get("by", "")
+        if by == "unblock":
+            return f"RigDesk {pc}: the human resumed you at {at}. Carry on there by yourself; look first, the screen may have changed."
+        if by not in ("share", "operator", "quiet"):
+            return f"RigDesk {pc}: the human handed input back to you at {at}. Carry on there by yourself; look first, the screen may have changed."
     if kind == "mcp":
         return (f"RigDesk {pc}: the human turned MCP back on at {at}; the MCP servers running there are offered to you again as they are found."
                 if event.get("on") else
