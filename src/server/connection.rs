@@ -4158,6 +4158,8 @@ impl Connection {
                             request.sid.clone(),
                             tx,
                         );
+                        // Android: a refresh rebuilds the capturer, losing the last frame a still screen depends on.
+                        #[cfg(not(target_os = "android"))]
                         self.refresh_video_display(Some(request.display as usize));
                     }
                 }
