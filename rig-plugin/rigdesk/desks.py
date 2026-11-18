@@ -1190,7 +1190,7 @@ class Desks:
 
     async def _ended(self, held: Held, words: str) -> None:
         """An agent's session ended without its asking: it is sent nothing, and its next desk call's refusal gives these words."""
-        self._ended_why[(held.agent, held.graph)] = words
+        self._ended_why[(held.agent, held.graph)] = f"{words} (It ended at {_clock(now_ms())}.)"
 
     def ended_why(self, agent: str, graph: str) -> str | None:
         """Why this agent's last session ended without its asking, while it has not joined again."""
