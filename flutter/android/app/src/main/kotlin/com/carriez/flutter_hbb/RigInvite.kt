@@ -182,7 +182,12 @@ class RigInvite(private val service: MainService) {
     private fun adopt(fetched: Fetched) {
         pairWhy = fetched.why
         pairAgainAtMs = if (fetched.key == null) System.currentTimeMillis() + PAIR_RETRY_MS else 0L
-        val key = fetched.key ?: return
+        val key = fetched.key
+        if (key == null) {
+            // The offer came from a setup that no longer answers, so it is not left to be accepted.
+            offeredKey = null
+            return
+        }
         val kept = keptKey()
         offeredKey = when {
             kept.isEmpty() -> {
@@ -302,6 +307,8 @@ class RigInvite(private val service: MainService) {
                 key = "unpaired:$pairWhy"
                 words = pairWhy
                 builder.setContentTitle("Rig invites are off")
+                    .setOngoing(false)
+                    .setDeleteIntent(null)
             }
             else -> {
                 val last = remembered().firstOrNull()
