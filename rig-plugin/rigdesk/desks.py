@@ -63,6 +63,7 @@ def _call_limit_s(tool: str, arguments: dict[str, Any]) -> float:
     asked = arguments.get("timeout_s") if tool == "shell" else None
     return CALL_LIMIT_S + (asked if isinstance(asked, int) and 0 < asked <= SHELL_LIMIT_S else 60 if tool == "shell" else 0)
 FILES_KEPT = 300
+PAUSE_PROMISED = "you will be notified when they have been inactive"
 STOP_FRESH_MS = 60_000  # a Stop replayed after Rig was away is not acted on: the turn it meant is long gone
 REMOTE_LOG_BYTES = 4 * 1024 * 1024
 HEALTH_EVERY_S = 30.0
@@ -216,6 +217,8 @@ class Held:
     since_ms: int
     via: Literal["link", "assigned", "adhoc"] = "link"
     used_ms: int = 0
+    # A desk call was refused while the person used the PC: the PC's refusal promised a notice once they are inactive (PAUSE_PROMISED).
+    refused_human: bool = False
 
 
 class DeskRefused(Exception):
@@ -433,6 +436,11 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
         return (f"RigDesk {pc}: {count} of the human's messages were dropped unread at {at}: the PC's queue was full." if count
                 else f"RigDesk {pc}: events from the PC were missed while Rig was away; ask the human to repeat anything they sent.")
     return None
+
+
+def paused_words(pc: str, at_ms: int) -> str:
+    return (f"RigDesk {pc}: the person is no longer using the PC, so input came back to you at {_clock(at_ms or now_ms())}. "
+            "Carry on there by yourself; look first, the screen may have changed.")
 
 
 def message_words(pc: str, text: str, images: list[tuple[str, Path | None]]) -> str:
@@ -1079,6 +1087,9 @@ class Desks:
             prompts.answered(self, link, event)
         if held is not None and (kind != "revoked" or held.agent == event.get("agent_id")):
             key = f"{self._boots.get(pc, '')}:{event_id}" if event_id else f"{self._boots.get(pc, '')}:gap:{now_ms()}"
+            promised = held.refused_human
+            if kind == "holder" and event.get("holder") != "human":
+                held.refused_human = False
             if kind == "message":
                 if await self._message(link, held, event, key):
                     self._unsent.get(pc, {}).pop(event_id, None)
@@ -1088,6 +1099,8 @@ class Desks:
                     _LOG.warning("rigdesk_message_unsent", f"RigDesk {pc}: a message from the human was never told: the session it was for ended", pc=pc)
             elif kind == "holder" and event.get("by") == "stop" and now_ms() - int(event.get("at_ms") or 0) < STOP_FRESH_MS:
                 await self._interrupt(held)
+            elif kind == "holder" and event.get("by") == "quiet" and promised:
+                await self._tell(held, paused_words(pc, int(event.get("at_ms") or 0)), key)
             elif (said := words_of(pc, event)) is not None:
                 await (self._ended(held, said) if kind == "revoked" else self._tell(held, said, key))
         if event_id:
@@ -1394,7 +1407,29 @@ class Desks:
             raise DeskRefused(words) from failed
         if link.server_faults.pop(server.name, None) is not None:
             self._revision += 1
-        return await self._answered(held.pc, f"{server.name}-{tool}", result) | {"server": server.name}
+        answered = await self._answered(held.pc, f"{server.name}-{tool}", result)
+        await self._keep_promise(link, held, answered)
+        return answered | {"server": server.name}
+
+    async def _keep_promise(self, link: PcLink, held: Held, answered: dict[str, Any]) -> None:
+        """Marks a session whose call the PC refused with its promise of a notice, kept across a restart. The hand-back comes on another stream and may
+        already have passed, so the PC is asked now: input no longer the person's keeps the promise here, and the mark stops the event telling it twice."""
+        if held.refused_human or not answered["is_error"] or PAUSE_PROMISED not in answered["text"]:
+            return
+        held.refused_human = True
+        await asyncio.to_thread(self._write_state)
+        try:
+            async with self._client().get(f"{link.spec.url}/health", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=PROBE_LIMIT_S)) as reply:
+                standing = (await reply.json(content_type=None)).get("standing") if reply.status == 200 else None
+        except (aiohttp.ClientError, TimeoutError, ValueError, AttributeError):
+            return
+        if not isinstance(standing, dict) or standing.get("holder") == "human" or not held.refused_human:
+            return
+        held.refused_human = False
+        await asyncio.to_thread(self._write_state)
+        if standing.get("holder") == "agent" and self._sessions.get(held.pc) is held:
+            since = int(standing.get("since_ms") or 0)
+            await self._tell(held, paused_words(held.pc, since), f"{self._boots.get(held.pc, '')}:paused:{since}")
 
     async def _answered(self, pc: str, what: str, result: dict[str, Any]) -> dict[str, Any]:
         """An MCP tool result as the agent reads it: text joined, images kept here as files, any other block as its JSON."""
@@ -1641,7 +1676,9 @@ class Desks:
             reply = await answer.json()
         if "error" in reply:
             raise DeskRefused(f"{held.pc}: {reply['error'].get('message', 'error')}")
-        return await self._answered(held.pc, tool, reply.get("result", {}))
+        answered = await self._answered(held.pc, tool, reply.get("result", {}))
+        await self._keep_promise(link, held, answered)
+        return answered
 
     async def viewer(self, pc: str, verb: str) -> dict[str, Any]:
         """The human's share and holder buttons for a stock PC, which has no RigDesk viewer: Rig's page stands in for it."""
