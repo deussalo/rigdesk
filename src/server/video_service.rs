@@ -1501,6 +1501,9 @@ fn check_qos(
     Ok(())
 }
 
+#[cfg(target_os = "android")]
+const NO_CAPTURE: &str = "This phone is not sharing its screen, so no picture is coming: screen capture has not been allowed in RigDesk there. The person at the phone can tap Start service in RigDesk and allow it.";
+
 // A still Android screen sends no frame, so a screenshot waiting on it takes the last one.
 #[cfg(target_os = "android")]
 fn answer_screenshot_from_last_frame(c: &mut CapturerInfo, key: (VideoSource, usize)) {
@@ -1508,6 +1511,11 @@ fn answer_screenshot_from_last_frame(c: &mut CapturerInfo, key: (VideoSource, us
         return;
     }
     let Some(scrap::Frame::PixelBuffer(f)) = c.last_frame() else {
+        if scrap::is_capture_allowed() == Some(false) {
+            if let Some(screenshot) = SCREENSHOTS.lock().unwrap().remove(&key) {
+                std::thread::spawn(move || handle_screenshot(screenshot, NO_CAPTURE.to_owned(), 0, 0, vec![]));
+            }
+        }
         return;
     };
     let Some(screenshot) = SCREENSHOTS.lock().unwrap().remove(&key) else {
