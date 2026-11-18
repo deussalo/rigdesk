@@ -428,6 +428,15 @@ impl Shared {
         true
     }
 
+    /// The owning agent ends its own session. A link or invite still open was made for whoever gets it next, so it stays open.
+    pub fn leave(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let Some(session) = state.session.take() else { return false };
+        self.events.push(EventKind::Revoked { agent_id: session.owner.agent_id, reason: "the agent left".into() });
+        true
+    }
+
+    /// The human or the operator ends the share: the session, and any link or invite still open.
     pub fn revoke(&self, reason: &str) -> bool {
         let mut state = self.state.lock().unwrap();
         state.grant = None;
@@ -561,7 +570,7 @@ mod tests {
         let link = shared.mint();
         let token = shared.claim(&link.grant, &link.secret, owner("a1")).unwrap();
         assert!(shared.block());
-        assert!(shared.revoke("the agent left"));
+        assert!(shared.leave());
         let again = shared.mint();
         let token2 = shared.claim(&again.grant, &again.secret, owner("a1")).unwrap();
         assert_ne!(token, token2);
@@ -593,9 +602,21 @@ mod tests {
         assert_eq!(shared.operator_owner(), None, "a link session is not the operator's");
         assert_eq!(shared.join_operator(owner("a1")), Err(crate::operator::Refused::Held(owner("a2"))));
         assert!(shared.block());
-        assert!(shared.revoke("the agent left"));
+        assert!(shared.leave());
         assert!(matches!(shared.join_operator(owner("a2")), Err(crate::operator::Refused::Blocked { .. })));
         assert!(shared.admit(&by_link, true).is_err());
+    }
+
+    #[test]
+    fn leaving_keeps_a_link_made_for_someone_else() {
+        let shared = Shared::new(Events::new(64));
+        let open = shared.mint();
+        let token = shared.join_operator(owner("a2")).unwrap();
+        assert!(shared.leave());
+        assert!(!shared.leave(), "nothing left to leave");
+        assert_eq!(shared.admit(&token, true), Err(Refusal::NoSession));
+        assert!(shared.standing().link_open);
+        assert!(shared.claim(&open.grant, &open.secret, owner("a1")).is_ok(), "the link copied before a2 joined still works after it left");
     }
 
     #[test]

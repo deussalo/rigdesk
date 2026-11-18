@@ -607,7 +607,7 @@ mod tests {
         let link = shared.mint();
         shared.claim(&link.grant, &link.secret, owner.clone()).unwrap();
         assert!(shared.block());
-        shared.revoke("the agent left");
+        shared.leave();
         assert_eq!(lane.serve(&owner, run).unwrap_err().code(), "blocked", "a block outlives the session");
 
         let journal = Journal::open(dir.join("actions.jsonl"), 1 << 20).tail(10);
