@@ -32,6 +32,7 @@ object FFI {
     external fun clickApproves(): Boolean
     external fun invitePairKey(key: String): Boolean
     external fun inviteMint(): String
+    external fun inviteMintFor(agent: String): String
     external fun inviteRevoke(): Boolean
     external fun inviteState(): String
     external fun inviteEnd(): Boolean
