@@ -32,7 +32,7 @@ impl Connection {
             device_id: &device_id,
             salt: &self.hash.salt,
             challenge: &self.hash.challenge,
-            conn: self.inner.id(),
+            conn: self.inner.id,
         };
         let holder = match invite::redeem(&login) {
             Ok(holder) => holder,
