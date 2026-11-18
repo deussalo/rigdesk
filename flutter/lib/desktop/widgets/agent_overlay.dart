@@ -389,6 +389,7 @@ class _AgentHostDialogState extends State<AgentHostDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final refused = _host.refused;
     return AlertDialog(
       title: Text('agent host for ${widget.peer}'),
       content: SizedBox(
@@ -398,9 +399,12 @@ class _AgentHostDialogState extends State<AgentHostDialog> {
           children: [
             TextField(
                 controller: _url,
-                decoration: const InputDecoration(
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
                     labelText: 'url',
-                    helperText: 'rigdesk-bridge for this PC')),
+                    helperText: 'rigdesk-bridge for this PC',
+                    errorText: refused,
+                    errorMaxLines: 4)),
             TextField(
                 controller: _token,
                 obscureText: true,
@@ -419,7 +423,7 @@ class _AgentHostDialogState extends State<AgentHostDialog> {
             child: const Text('cancel')),
         ElevatedButton(
             onPressed: () {
-              if (_host.isComplete) Navigator.of(context).pop(_host);
+              if (_host.isComplete && refused == null) Navigator.of(context).pop(_host);
             },
             child: const Text('save')),
       ],

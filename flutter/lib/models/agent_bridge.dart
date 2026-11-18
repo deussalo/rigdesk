@@ -4,6 +4,31 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+/// Loopback or the tailnet (100.64.0.0/10, *.ts.net), where http is already encrypted by WireGuard or stays on this
+/// device. The same rule as Rig Assistant's Config.privateHost on Android.
+bool privateHost(String given) {
+  final host = given.toLowerCase();
+  if (host == 'localhost' || host == '127.0.0.1' || host.endsWith('.ts.net')) return true;
+  final parts = host.split('.');
+  if (parts.length != 4) return false;
+  final numbers = <int>[];
+  for (final part in parts) {
+    final number = int.tryParse(part);
+    if (number == null || '$number' != part || number < 0 || number > 255) return false;
+    numbers.add(number);
+  }
+  return numbers[0] == 100 && numbers[1] >= 64 && numbers[1] <= 127;
+}
+
+/// The host a bearer token sent to this address would cross unencrypted, or null. An http address with no host that
+/// can be read is refused whole.
+String? plainHttpTo(String url) {
+  if (!url.toLowerCase().startsWith('http://')) return null;
+  final host = Uri.tryParse(url)?.host ?? '';
+  if (host.isEmpty) return url;
+  return privateHost(host) ? null : host;
+}
+
 /// Where the agent host for one PC is: the rigdesk-bridge on the Rig host that keeps the agent's own session to the
 /// PC. The viewer shows the PC itself; this carries the agent panel's buttons and the agent's state.
 class AgentHost {
@@ -34,6 +59,15 @@ class AgentHost {
       (url.startsWith('http://') || url.startsWith('https://')) &&
       token.isNotEmpty &&
       RegExp(r'^[A-Za-z0-9.-]{1,253}$').hasMatch(name);
+
+  /// Why this host is not connected to, for the person to see; null when it may be.
+  String? get refused {
+    final to = plainHttpTo(url);
+    return to == null
+        ? null
+        : 'Refused: plain http to $to would send the agent host\'s token unencrypted, so RigDesk does not connect to it. '
+            'Use its https address, or its Tailscale address (100.x.y.z or a name ending in .ts.net).';
+  }
 }
 
 /// The agent panel's link to one agent host: its /viewer routes for the human's buttons, and its /events stream
@@ -59,7 +93,23 @@ class AgentBridge {
 
   Map<String, String> get _auth => {'Authorization': 'Bearer ${host.token}'};
 
-  void start() => unawaited(_follow());
+  /// Every request's address: none is made to a refused host.
+  Uri _at(String path) {
+    final why = host.refused;
+    if (why != null) throw why;
+    return Uri.parse('${host.url}$path');
+  }
+
+  void start() {
+    final why = host.refused;
+    if (why == null) {
+      unawaited(_follow());
+    } else {
+      scheduleMicrotask(() {
+        if (!_closed) onTrouble(why);
+      });
+    }
+  }
 
   void close() {
     _closed = true;
@@ -84,7 +134,7 @@ class AgentBridge {
           break;
         case 'frame':
           final shot = await _client
-              .get(Uri.parse('${host.url}/frame?display=$display'), headers: _auth)
+              .get(_at('/frame?display=$display'), headers: _auth)
               .timeout(const Duration(seconds: 20));
           if (shot.statusCode != 200) throw 'the agent host gave no frame: ${shot.body}';
           _emit(frame: shot.bodyBytes);
@@ -104,14 +154,14 @@ class AgentBridge {
           _emit();
       }
     } catch (e) {
-      onTrouble('RigDesk agent host: $e');
+      onTrouble(host.refused ?? 'RigDesk agent host: $e');
       if (verb == 'frame') _emit(note: 'no still of the screen: $e');
     }
   }
 
   Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> body) async {
     final answer = await _client
-        .post(Uri.parse('${host.url}$path'),
+        .post(_at(path),
             headers: {..._auth, 'Content-Type': 'application/json'}, body: jsonEncode(body))
         .timeout(const Duration(seconds: 20));
     if (answer.statusCode != 200) throw '${answer.statusCode} ${answer.body}';
@@ -185,7 +235,7 @@ class AgentBridge {
     while (!_closed) {
       try {
         final health = await _client
-            .get(Uri.parse('${host.url}/health'), headers: _auth)
+            .get(_at('/health'), headers: _auth)
             .timeout(const Duration(seconds: 15));
         if (health.statusCode != 200) throw 'the agent host answered ${health.statusCode}';
         final j = jsonDecode(health.body) as Map<String, dynamic>;
@@ -196,7 +246,7 @@ class AgentBridge {
         }
         _standing(j['standing']);
         _emit();
-        final request = http.Request('GET', Uri.parse('${host.url}/events'))
+        final request = http.Request('GET', _at('/events'))
           ..headers.addAll({..._auth, 'Accept': 'text/event-stream', 'Last-Event-ID': '$_lastEvent'});
         final stream = await _client.send(request);
         if (stream.statusCode != 200) throw 'the agent host answered ${stream.statusCode}';
