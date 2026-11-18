@@ -6,14 +6,14 @@
 //! RigDesk GUIs, which dial the bridge instead of the PC. The connection opens when the agent first acts or a GUI
 //! attaches, and closes after a quiet spell with no GUI, so the PC shows a RustDesk session only while it is in use.
 //!
-//!   rigdesk-bridge --peer <tailnet name or 100.x address[:port]> --password-file <file> --token-file <file>
+//!   rigdesk-bridge --peer <tailnet name or 100.x address[:port]> [--password-file <file>] --token-file <file>
 //!   rigdesk-bridge --id <RustDesk ID> --id-server <hbbs host[:port]> --key-file <hbbs public key file> ...
 //!                  [--port 21120] [--journal <file>] [--name "Rig agent"] [--once] [--login-id <ID, with --peer>]
 //!                  [--viewer-port 21128 --viewer-password-file <file>]
 //!                  [--mcp-server http://<host>[:port][/path] [--mcp-token-file <file>]]...
-//!   rigdesk-bridge --knock --name "<agent> (Rig agent)" <--peer ... or --id ...>
 //!
-//! `--knock` takes no password or token: it shows the PC's own accept prompt and says what its person answered (see `knock`).
+//! With no `--password-file`, only a connection the person at the PC allows on Rig's `POST /offer` carries a session (see
+//! `knock`); with one, such a connection carries the session the same way, and the password serves unattended access.
 //! Each `--mcp-server` names an MCP server on the PC's own address (a phone's native tools, say), offered to the holding
 //! agent as a found server; the `--mcp-token-file` after it holds the bearer that server wants.
 //! The passwords and the API bearer are read from files (0600) so they never sit on a command line.
@@ -38,7 +38,7 @@ const EVENT_RING: usize = 512;
 
 struct Args {
     route: (link::Route, String),
-    password_file: PathBuf,
+    password_file: Option<PathBuf>,
     token_file: PathBuf,
     port: u16,
     journal: Option<PathBuf>,
@@ -46,7 +46,6 @@ struct Args {
     viewer: Option<(u16, PathBuf)>,
     servers: Vec<Remote>,
     once: bool,
-    knock: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -63,7 +62,6 @@ fn parse_args() -> Result<Args, String> {
     let mut viewer_password_file = None;
     let mut servers: Vec<(String, Option<PathBuf>)> = Vec::new();
     let mut once = false;
-    let mut knock = false;
     let mut login_id = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -82,7 +80,6 @@ fn parse_args() -> Result<Args, String> {
             "--viewer-password-file" => viewer_password_file = Some(PathBuf::from(value()?)),
             "--mcp-server" => servers.push((value()?, None)),
             "--once" => once = true,
-            "--knock" => knock = true,
             "--login-id" => login_id = Some(value()?),
             "--mcp-token-file" => match servers.last_mut() {
                 Some((_, file @ None)) => *file = Some(PathBuf::from(value()?)),
@@ -119,15 +116,14 @@ fn parse_args() -> Result<Args, String> {
         .collect::<Result<Vec<_>, String>>()?;
     Ok(Args {
         route,
-        password_file: if knock { password_file.unwrap_or_default() } else { password_file.ok_or("--password-file is required")? },
-        token_file: if knock { token_file.unwrap_or_default() } else { token_file.ok_or("--token-file is required")? },
+        password_file,
+        token_file: token_file.ok_or("--token-file is required")?,
         port,
         journal,
         name,
         viewer,
         servers,
         once,
-        knock,
     })
 }
 
@@ -149,10 +145,8 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if args.knock {
-        std::process::exit(run_knock(args));
-    }
-    let (password, bearer) = match (read_secret(&args.password_file, "password"), read_secret(&args.token_file, "token")) {
+    let password = args.password_file.as_ref().map_or(Ok(String::new()), |file| read_secret(file, "password"));
+    let (password, bearer) = match (password, read_secret(&args.token_file, "token")) {
         (Ok(p), Ok(t)) => (p, t),
         (Err(e), _) | (_, Err(e)) => {
             eprintln!("rigdesk-bridge: {e}");
@@ -198,7 +192,9 @@ fn main() {
             }
         }
         let found = (!args.servers.is_empty()).then(|| Found::remote(args.servers));
+        let knocker = knock::Knocker::new(link.clone(), shared.clone(), tokio::runtime::Handle::current());
         let api = Api::hosted(shared, Arc::new(desk::RemoteDesk::new(link)), Arc::new(journal), &bearer, found);
+        api.operator_joins(knocker);
         match api.serve(args.port).await {
             Ok(port) => {
                 log::info!("rigdesk-bridge: agent API for {what} on 127.0.0.1:{port}");
@@ -211,20 +207,4 @@ fn main() {
         }
         std::future::pending::<()>().await;
     });
-}
-
-fn run_knock(args: Args) -> i32 {
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("rigdesk-bridge: no runtime: {e}");
-            return 1;
-        }
-    };
-    runtime.block_on(async move {
-        let link = link::Link::new(args.route, String::new(), args.name, Arc::new(Shared::new(Events::new(1))));
-        let answer = knock::knock(&link).await;
-        println!("{}", answer.line());
-        if answer == knock::Answer::Allowed { 0 } else { 3 }
-    })
 }

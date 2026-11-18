@@ -121,6 +121,14 @@ pub struct Link {
     /// One session, for an ad-hoc join: opened at once, held while the bridge lives, and the bridge exits when it ends.
     once: AtomicBool,
     logged_in: AtomicBool,
+    /// A connection the person at the PC allowed (`knock`), to carry the next session instead of a password login.
+    adopted: Mutex<Option<crate::knock::Allowed>>,
+    /// Ends the session running now, so the adopted connection takes its place.
+    swap: Notify,
+    /// The session running now is on an adopted connection.
+    carried: AtomicBool,
+    /// Hangs up the adopted session running now (`hang_up`).
+    hang: AtomicBool,
 }
 
 fn now_ms() -> u64 {
@@ -171,6 +179,10 @@ impl Link {
             to_viewers: broadcast::channel(RELAY_BACKLOG).0,
             once: AtomicBool::new(false),
             logged_in: AtomicBool::new(false),
+            adopted: Mutex::new(None),
+            swap: Notify::new(),
+            carried: AtomicBool::new(false),
+            hang: AtomicBool::new(false),
         })
     }
 
@@ -199,7 +211,15 @@ impl Link {
     }
 
     fn wanted(&self) -> bool {
+        if !self.may_dial() {
+            return false;
+        }
         self.once.load(Ordering::SeqCst) || self.viewers.load(Ordering::SeqCst) > 0 || now_ms().saturating_sub(self.last_use_ms.load(Ordering::SeqCst)) < IDLE.as_millis() as u64
+    }
+
+    /// With no password saved, only a connection the person at the PC allowed carries a session.
+    fn may_dial(&self) -> bool {
+        !self.password.is_empty() || self.once.load(Ordering::SeqCst) || self.carried.load(Ordering::SeqCst) || self.adopted.lock().unwrap().is_some()
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -211,6 +231,9 @@ impl Link {
             }
             let started = now_ms();
             let ended = self.session().await;
+            if self.carried.swap(false, Ordering::SeqCst) && !self.may_dial() {
+                self.shared.revoke("the RustDesk session the person at the PC allowed ended; desk/request asks them again");
+            }
             {
                 let mut state = self.state.lock().unwrap();
                 state.out = None;
@@ -278,8 +301,16 @@ impl Link {
     }
 
     async fn session(&self) -> ResultType<()> {
-        let mut stream = self.dial().await?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+        let adopted = self.adopted.lock().unwrap().take();
+        self.carried.store(adopted.is_some(), Ordering::SeqCst);
+        let mut stream = match adopted {
+            Some(allowed) => {
+                self.on_message(allowed.peer_info, &tx)?;
+                allowed.stream
+            }
+            None => self.dial().await?,
+        };
         let mut idle_check = tokio::time::interval(Duration::from_secs(5));
         // next_timeout restarts with every select! round, so the idle tick alone would keep a dead link looking alive.
         let mut heard = std::time::Instant::now();
@@ -300,6 +331,11 @@ impl Link {
                     }
                 }
                 Some(out) = rx.recv() => stream.send(&out).await?,
+                _ = self.swap.notified() => {
+                    if self.adopted.lock().unwrap().is_some() || self.hang.swap(false, Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                }
                 _ = idle_check.tick() => {
                     if !self.wanted() {
                         return Ok(());
@@ -451,6 +487,23 @@ impl Link {
         &self.addr
     }
 
+    /// The connection the person at the PC allowed carries the session from now: any session running is closed for it.
+    pub fn adopt(&self, allowed: crate::knock::Allowed) {
+        *self.adopted.lock().unwrap() = Some(allowed);
+        self.last_use_ms.store(now_ms(), Ordering::SeqCst);
+        self.swap.notify_one();
+        self.demand.notify_one();
+    }
+
+    /// Hangs up the connection adopted last, whether it waits or carries the session now; nothing else is touched.
+    pub fn hang_up(&self) {
+        self.last_use_ms.store(0, Ordering::SeqCst);
+        if self.adopted.lock().unwrap().take().is_none() && self.carried.load(Ordering::SeqCst) {
+            self.hang.store(true, Ordering::SeqCst);
+            self.swap.notify_one();
+        }
+    }
+
     fn on_cursor(&self, x: i32, y: i32) {
         let ours = *self.injected_at.lock().unwrap() == (x, y);
         let after_own = now_ms().saturating_sub(self.injected_ms.load(Ordering::SeqCst)) > OWN_INPUT_SLACK_MS;
@@ -483,6 +536,10 @@ impl Link {
                         return Err(format!("cannot reach the PC at {}: {why}", self.addr));
                     }
                 }
+            }
+            if !self.may_dial() {
+                return Err(format!("no RustDesk session to the PC at {}: Rig keeps no password for it, so only the person at the PC lets an agent in, \
+                                    by Allow on its prompt for desk/request", self.addr));
             }
             if std::time::Instant::now() >= deadline {
                 let last = self.state.lock().unwrap().failure.clone().map(|(why, _)| format!(" (last error: {why})")).unwrap_or_default();
@@ -616,6 +673,15 @@ fn rand_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_no_password_kept_an_agent_is_told_only_the_persons_allow_lets_it_in() {
+        let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
+        let link = Link::new(Route::direct("100.64.0.9"), String::new(), "Rig agent".into(), shared);
+        assert!(!link.wanted(), "nothing dials a PC with no password");
+        let Err(refused) = link.ensure(Duration::from_secs(5)) else { panic!("a session with no password and no Allow") };
+        assert!(refused.contains("only the person at the PC lets an agent in"), "{refused}");
+    }
 
     #[test]
     fn a_bare_address_dials_the_direct_port_and_logs_in_under_it() {

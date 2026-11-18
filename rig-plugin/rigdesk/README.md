@@ -27,7 +27,8 @@ with the PC's permanent password and serves the same agent API on loopback.
 
 On the PC, in RustDesk's settings:
 
-* Security → **Enable direct IP access** (port 21118), and **Use permanent password** with a password set;
+* Security → **Enable direct IP access** (port 21118), and **Use permanent password** with a password set, for
+  unattended access; with no password kept in Rig, an agent joins only by the person's Allow (see `desk/request`);
 * the PC on your tailnet (Tailscale installed and signed in). No public RustDesk server is used.
 
 On the Rig host, put `rigdesk-bridge` on `PATH` (or name it as `bridge_bin`): CI builds it as the
@@ -159,16 +160,19 @@ Known limits against a RigDesk PC:
   Accept answers the request as the operator's Accept (Join once) would, and its Dismiss as Deny; the agent is told the
   person at the PC answered. The first answer wins: when the operator answers first, the prompt is taken off the PC
   within 2 s, and an answer either side gives later changes nothing. A prompt the PC lets lapse is shown again, three
-  times in all. On a stock PC (a phone among them, as a notification with Allow), Rig starts `rigdesk-bridge --knock`
-  for that one request, which logs in with no password, so the PC shows RustDesk's own prompt, and reads the answer from
-  the bridge's output. A RigDesk PC is sent `POST /offer {agent, ask, nonce}` over Rig's bearer and shows the agent in
-  its connection manager; `POST /offer/end {ask}` takes it away. How the answer is bound: it counts only when it comes
-  from that PC (the knock Rig started for it, or that PC's own `/events` stream under Rig's bearer), names that request,
-  and on a RigDesk PC carries the 128-bit nonce Rig made for it, which goes to the PC alone and never to the agent; and
-  only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
+  times in all. Either PC is sent `POST /offer {agent, ask, nonce}` over Rig's bearer; `POST /offer/end {ask}` takes
+  the prompt away. A RigDesk PC shows the agent in its connection manager. A stock PC's rigdesk-bridge (a phone among
+  them, as a notification with Allow) logs in to it with no password, so the PC shows RustDesk's own prompt, and on
+  Allow that very connection carries the agent's session: no password is used, and a stock PC needs none kept in Rig
+  (leave out `password_file`, and only the person's Allow lets an agent in). An allowed connection no agent claims within
+  30 s, as when the operator answered first, is hung up. With no password kept, the agent is told when the allowed
+  connection ends (the person disconnects, or ten idle minutes), and its next `desk/request` asks again; with one kept,
+  the agent keeps its hold and its next action dials in with the password, as unattended access. How the answer is bound: it counts only when it comes on that PC's own `/events` stream under Rig's bearer,
+  names that request and carries the 128-bit nonce Rig made for it, which goes to the PC alone and never to the agent;
+  and only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
   Known limits:
   * a stock PC whose RustDesk approves by password only shows no Accept, so only the operator can answer;
-  * on a stock PC, Accept fully authorizes the login that asked, so the person may briefly see it connected before it closes;
+  * on a stock PC, Accept fully authorizes the login that asked, so the person sees it connected at once, for up to 30 s if no agent then claims it;
   * an agent picks its own title, and the prompt shows it, marked "(Rig agent)": the name says who asks only as far as the title does;
   * a PC that hides its connection manager (`allow-hide-cm`) shows nothing;
   * a request open when Rig restarts is not shown on the PC again;

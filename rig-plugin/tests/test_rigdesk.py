@@ -789,36 +789,33 @@ def test_rigs_answer_first_takes_the_prompt_off_a_rigdesk_pc_and_its_late_allow_
     asyncio.run(run())
 
 
-def test_a_stock_pcs_own_accept_answers_the_ask_and_a_knock_rig_answered_first_is_hung_up() -> None:
+def test_a_stock_pc_is_asked_through_its_bridge_and_its_allow_answers_the_ask_with_no_password_kept() -> None:
     from rigdesk import prompts
     from rigdesk.desks import StockRemote
-    seat = SeatId(GraphName("g"), NodeId("n"))
+    seat, posted = SeatId(GraphName("g"), NodeId("n")), []
 
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
-            asks = _Asks("desk_1", "desk_2")
+            asks = _Asks("desk_1")
             desks = Desks(SimpleNamespace(state_dir=Path(state), confirming=asks.confirming, confirm_answered=asks.confirm_answered))  # type: ignore[arg-type]
 
             async def tell(*_args: object, **_kw: object) -> bool:
                 return True
             desks._tell = tell  # type: ignore[method-assign]
-            bridge, hung = Path(state) / "bridge", Path(state) / "hung"
-            bridge.write_text(f"#!/bin/sh\ntrap 'touch {hung}; exit 1' TERM\necho waiting\n"
-                              "case \"$*\" in *Builder*) echo allowed; exit 0;; esac\nwhile :; do sleep 0.05; done\n")
-            bridge.chmod(0o700)
-            desks._bridge_bin = str(bridge)
-            stock = StockRemote(peer="deus.tail1234.ts.net", password_file="/dev/null")
-            desks._pcs["deus"] = PcLink("deus", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
-            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.05
+            runner = await _offering_pc(desks, posted)
+            bridge = desks._pcs.pop("front")
+            link = desks._pcs["deus"] = PcLink("deus", DeskPc(url=bridge.spec.url, token_file=bridge.spec.token_file, stock=StockRemote(peer="deus.tail1234.ts.net")))
             try:
                 prompts.start(desks, "deus", "desk_1", seat, "a1", "g", "Builder")
-                prompts.start(desks, "deus", "desk_2", seat, "a2", "g", "Tester")
+                await _until(lambda: posted)
+                path, body = posted[0]
+                assert path == "/offer" and body["agent"]["title"] == "Builder"
+                await desks._event(link, {"type": "offer", "ask": "desk_1", "nonce": body["nonce"], "answer": "allow"})
                 await _until(lambda: asks.answered)
-                asks.open.discard("desk_2")
-                await _until(hung.exists)
             finally:
-                prompts.OPEN_EVERY_S = every
                 await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
             assert asks.answered == [(seat, "desk_1", "accept", "rigdesk:deus")] and desks.prompts == {}
 
     asyncio.run(run())
