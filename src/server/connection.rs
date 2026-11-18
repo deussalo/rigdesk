@@ -6422,6 +6422,12 @@ pub fn claim_pending_switch_sides_uuid(id: &str, uuid: &uuid::Uuid) -> bool {
     false
 }
 
+/// RigDesk: an agent's request shown in the connection manager talks to it over the same IPC a connection does.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) async fn start_cm_ipc(rx_to_cm: mpsc::UnboundedReceiver<ipc::Data>, tx_from_cm: mpsc::UnboundedSender<ipc::Data>) -> ResultType<()> {
+    start_ipc(rx_to_cm, tx_from_cm).await
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 // IPC bootstrap summary:
 // - Start CM when missing, then bridge bidirectional messages between this task and CM IPC.

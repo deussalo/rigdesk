@@ -19,6 +19,7 @@ mod desk;
 pub mod enroll;
 mod input;
 pub mod notice;
+pub mod offer;
 pub mod operator;
 mod shell;
 pub mod viewer;

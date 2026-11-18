@@ -28,4 +28,6 @@ object FFI {
     external fun getBuildinOption(key: String): String
     external fun onClipboardUpdate(clips: ByteBuffer)
     external fun isServiceClipboardEnabled(): Boolean
+    external fun cmLoginRes(connId: Int, res: Boolean): Boolean
+    external fun clickApproves(): Boolean
 }

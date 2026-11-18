@@ -71,6 +71,8 @@ pub mod input_service {
 }
 
 mod connection;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) use connection::start_cm_ipc;
 mod login_failure_check;
 pub(crate) mod port_forward_mux;
 pub mod display_service;

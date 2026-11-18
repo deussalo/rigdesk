@@ -1077,7 +1077,9 @@ class _CmControlPanel extends StatelessWidget {
         bind.mainGetBuildinOption(
                 key: kOptionHideElevateButtonInAcceptWindow) !=
             'Y';
-    final showAccept = model.approveMode != 'password';
+    // RigDesk: an agent's request from Rig (src/agent/offer.rs) is the person's to accept whatever the approve mode, which governs remote logins;
+    // no remote login is given an id that high.
+    final showAccept = model.approveMode != 'password' || client.id >= 1000000000;
     return Column(
       mainAxisAlignment: MainAxisAlignment.end,
       children: [

@@ -366,6 +366,9 @@ class MainService : Service() {
                 requestMediaProjection()
             }
         }
+        if (intent?.action == ACT_LOGIN_REQ_NOTIFY) {
+            onRigRequestAnswered(intent)
+        }
         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
     }
 
@@ -930,6 +933,10 @@ class MainService : Service() {
         username: String,
         peerId: String
     ) {
+        if (peerId == RIG_KNOCK_ID) {
+            rigRequestNotification(clientID, username)
+            return
+        }
         val notification = notificationBuilder
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -940,6 +947,45 @@ class MainService : Service() {
             // .addAction(R.drawable.close_red, "close", genLoginRequestPendingIntent(false))
             .build()
         notificationManager.notify(getClientNotifyID(clientID), notification)
+    }
+
+    /// RigDesk: a Rig agent asks to join, while the operator is asked in Rig too: Allow and Deny answer it from the
+    /// notification itself, as the app's own dialog does, and only where the approve mode takes clicks.
+    private fun rigRequestNotification(clientID: Int, username: String) {
+        val builder = NotificationCompat.Builder(this, notificationChannel)
+            .setSmallIcon(R.mipmap.ic_stat_logo)
+            .setOngoing(false)
+            .setAutoCancel(false)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setContentTitle("$username is trying to join this device")
+            .setContentText("Allow it here, or the operator answers in Rig.")
+            .setColor(ContextCompat.getColor(this, R.color.primary))
+        if (FFI.clickApproves()) {
+            builder.addAction(0, "Allow", rigRequestIntent(clientID, true))
+        }
+        builder.addAction(0, "Deny", rigRequestIntent(clientID, false))
+        notificationManager.notify(getClientNotifyID(clientID), builder.build())
+    }
+
+    private fun rigRequestIntent(clientID: Int, allow: Boolean): PendingIntent {
+        val intent = Intent(this, MainService::class.java).apply {
+            action = ACT_LOGIN_REQ_NOTIFY
+            putExtra(EXT_LOGIN_REQ_ID, clientID)
+            putExtra(EXT_LOGIN_REQ_NOTIFY, allow)
+        }
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE else FLAG_UPDATE_CURRENT
+        return PendingIntent.getService(this, clientID * 2 + if (allow) 1 else 0, intent, flags)
+    }
+
+    private fun onRigRequestAnswered(intent: Intent) {
+        val clientID = intent.getIntExtra(EXT_LOGIN_REQ_ID, -1)
+        val allow = intent.getBooleanExtra(EXT_LOGIN_REQ_NOTIFY, false)
+        if (clientID < 0) return
+        if (!FFI.cmLoginRes(clientID, allow)) {
+            Log.w(logTag, "the Rig request $clientID could not be answered from its notification")
+        }
+        cancelNotification(clientID)
     }
 
     private fun onClientAuthorizedNotification(

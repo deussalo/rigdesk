@@ -26,6 +26,8 @@
 //!   GET  /samples?after=ID - the PC's health samples after ID (see `health`); only where the host offers them
 //!   POST /join {agent, ask} - a session the operator accepted in Rig, with no share link (see `operator`): admitted by the
 //!        PC's own switch, refused while another agent holds the session or for a blocked agent; only where the host offers it
+//!   POST /offer {agent, ask, nonce} - while the operator's ask stands, the person at the PC is asked too, in the host's own
+//!        accept prompt; their answer is an `offer` event with that ask and nonce. POST /offer/end {ask} takes the prompt away
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -280,6 +282,8 @@ impl Api {
             ("GET", "/events") => self.events(request),
             ("POST", "/shell") => self.shell(request).await,
             ("POST", "/join") => self.join(request).await,
+            ("POST", "/offer") => self.offer(request).await,
+            ("POST", "/offer/end") => self.offer_end(request).await,
             ("GET", "/samples") => match self.collector.get() {
                 Some(collector) => {
                     let after = query_number(request.uri().query(), "after").unwrap_or(0) as u64;
@@ -538,6 +542,39 @@ impl Api {
         }
     }
 
+    async fn offer(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+        let Some(switch) = self.operator.get().cloned() else {
+            return json_response(StatusCode::NOT_FOUND, &json!({"error": "this PC's RigDesk takes no sessions started from Rig", "code": "no_offer"}));
+        };
+        let Some(body) = Self::body_json(request).await else {
+            return json_response(StatusCode::BAD_REQUEST, &json!({"error": "offer wants a JSON body", "code": "bad_request"}));
+        };
+        let offer = match crate::operator::offer_request(&body) {
+            Ok(offer) => offer,
+            Err(why) => return json_response(StatusCode::BAD_REQUEST, &json!({"error": why, "code": "bad_request"})),
+        };
+        if let Err(closed) = switch.open() {
+            let refused = crate::operator::Refused::Closed(closed);
+            return json_response(StatusCode::FORBIDDEN, &json!({"error": refused.words(), "code": refused.code()}));
+        }
+        let (who, ask) = (offer.owner.who(), offer.ask.clone());
+        match switch.offer(offer) {
+            Ok(()) => {
+                self.journal.record(&Entry::new(who, "offer", "shown", json!({"ask": ask})));
+                json_response(StatusCode::OK, &json!({"shown": true}))
+            }
+            Err(why) => json_response(StatusCode::CONFLICT, &json!({"error": why, "code": "no_prompt"})),
+        }
+    }
+
+    async fn offer_end(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
+        let Some(switch) = self.operator.get().cloned() else {
+            return json_response(StatusCode::NOT_FOUND, &json!({"error": "this PC's RigDesk takes no sessions started from Rig", "code": "no_offer"}));
+        };
+        let ask = Self::body_json(request).await.and_then(|body| body.get("ask").and_then(Value::as_str).map(str::to_owned)).unwrap_or_default();
+        json_response(StatusCode::OK, &json!({"ended": switch.offer_end(&ask)}))
+    }
+
     async fn shell(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
         let Some(lane) = self.lane.get().cloned() else {
             return json_response(StatusCode::NOT_FOUND, &json!({"error": "this PC's RigDesk has no agent shell lane", "code": "no_lane"}));
@@ -716,6 +753,7 @@ async fn journal_holder_changes(mut rx: tokio::sync::broadcast::Receiver<Event>,
                 EventKind::Revoked { agent_id, reason } => journal.record(&Entry::new(reason, "revoke", "ok", json!({"agent_id": agent_id}))),
                 EventKind::Reach { down } => journal.record(&Entry::new("bridge", "reach", down.map_or("up".into(), |why| format!("down: {why}")), Value::Null)),
                 EventKind::Mcp { on } => journal.record(&Entry::new("human", "mcp", if on { "on" } else { "off" }, Value::Null)),
+                EventKind::Offer { ask, answer, .. } => journal.record(&Entry::new("human", "offer", answer, json!({"ask": ask}))),
                 _ => {}
             },
             Err(RecvError::Lagged(missed)) => journal.record(&Entry::new("rigdesk", "journal", format!("missed {missed} events"), Value::Null)),
@@ -845,6 +883,40 @@ mod tests {
         let joins: Vec<String> = journal.tail(20).into_iter().filter(|e| e.what == "join").map(|e| e.outcome).collect();
         assert_eq!(joins, vec!["refused: join_off", "refused: join_paused", "ok", "refused: held"]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    struct Prompting(std::sync::Mutex<Vec<crate::operator::Offer>>);
+    impl crate::operator::Switch for Prompting {
+        fn open(&self) -> Result<(), crate::operator::Closed> {
+            Ok(())
+        }
+        fn offer(&self, offer: crate::operator::Offer) -> Result<(), String> {
+            self.0.lock().unwrap().push(offer);
+            Ok(())
+        }
+        fn offer_end(&self, ask: &str) -> bool {
+            let mut shown = self.0.lock().unwrap();
+            let before = shown.len();
+            shown.retain(|offer| offer.ask != ask);
+            shown.len() != before
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rigs_bearer_shows_an_agents_request_to_the_person_at_the_pc_and_takes_it_away() {
+        let api = Api::new(Arc::new(Shared::new(Events::new(64))), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
+        let switch = Arc::new(Prompting(Default::default()));
+        api.operator_joins(switch.clone());
+        let port = api.serve(0).await.unwrap();
+        let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
+        assert_eq!(post(port, "/offer", "", &json!({"agent": agent, "ask": "desk-1"})).await["code"], json!("bad_request"), "an offer without Rig's nonce");
+        assert_eq!(post(port, "/offer", "", &json!({"agent": agent, "ask": "desk-1", "nonce": "0123456789abcdef"})).await["shown"], json!(true));
+        assert_eq!(switch.0.lock().unwrap()[0].owner.title, "Helper");
+        assert_eq!(post(port, "/offer/end", "", &json!({"ask": "desk-1"})).await["ended"], json!(true));
+        assert_eq!(post(port, "/offer/end", "", &json!({"ask": "desk-1"})).await["ended"], json!(false));
+        let plain = Api::new(Arc::new(Shared::new(Events::new(64))), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
+        let plain = plain.serve(0).await.unwrap();
+        assert_eq!(post(plain, "/offer", "", &json!({"agent": agent, "ask": "desk-1", "nonce": "0123456789abcdef"})).await["code"], json!("no_offer"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
