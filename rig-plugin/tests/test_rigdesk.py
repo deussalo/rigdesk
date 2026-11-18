@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from core.base import now_ms
 from core.model import GraphName, NodeId, SeatId
-from rigdesk.desks import DeskPc, Desks, Held, PcLink, pc_of_link, words_of
+from rigdesk.desks import DeskPc, DeskRefused, Desks, Held, PcLink, RedirectRefused, pc_of_link, token_session, words_of
 from rigdesk.health import Sample
 
 PCS = {"deus": DeskPc(url="https://deus.tail1234.ts.net", token_file="/dev/null", client="acme")}
@@ -1248,6 +1248,57 @@ def test_an_invite_to_a_pc_where_an_agent_may_run_commands_waits_for_the_operato
             finally:
                 await desks._http.close()
                 await runner.cleanup()
+
+    asyncio.run(run())
+
+
+def test_no_request_carrying_a_token_follows_a_redirect() -> None:
+    import aiohttp
+    from aiohttp import web
+
+    reached: list[str] = []
+
+    async def target(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.json_response({})
+
+    async def run() -> None:
+        far = web.Application()
+        far.router.add_route("*", "/{tail:.*}", target)
+        far_runner = web.AppRunner(far)
+        await far_runner.setup()
+        await web.TCPSite(far_runner, "127.0.0.1", 0).start()
+        elsewhere = f"http://127.0.0.1:{far_runner.addresses[0][1]}/stolen"
+
+        async def redirecting(request: web.Request) -> web.Response:
+            raise web.HTTPTemporaryRedirect(elsewhere) if request.method == "POST" else web.HTTPFound(elsewhere)
+
+        near = web.Application()
+        near.router.add_route("*", "/{tail:.*}", redirecting)
+        near_runner = web.AppRunner(near)
+        await near_runner.setup()
+        await web.TCPSite(near_runner, "127.0.0.1", 0).start()
+        with tempfile.TemporaryDirectory() as state:
+            token = Path(state) / "token"
+            token.write_text("t" * 32)
+            desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
+            url = f"http://127.0.0.1:{near_runner.addresses[0][1]}"
+            link = PcLink("deus", DeskPc(url=url, token_file=str(token)))
+            desks._http = token_session()
+            try:
+                for method, path in (("GET", "/health"), ("POST", "/mcp")):
+                    for caught in (DeskRefused, aiohttp.ClientError):
+                        try:
+                            await desks.http.request(method, url + path, headers=desks._headers(link, "session-secret"))
+                        except caught as refused:
+                            assert isinstance(refused, RedirectRefused) and "answered with a redirect" in str(refused), refused
+                        else:
+                            raise AssertionError(f"{method} {path} followed a redirect")
+                assert reached == [], reached
+            finally:
+                await desks._http.close()
+                await near_runner.cleanup()
+                await far_runner.cleanup()
 
     asyncio.run(run())
 

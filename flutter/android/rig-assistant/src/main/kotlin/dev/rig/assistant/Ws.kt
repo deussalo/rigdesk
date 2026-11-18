@@ -48,6 +48,10 @@ class Ws private constructor(private val socket: Socket) : Closeable {
             if (name == "content-length") length = minOf(4096, value.toIntOrNull() ?: 0)
         }
         if (!status.contains(" 101 ")) {
+            Config.redirectRefused(status.split(' ').getOrNull(1)?.toIntOrNull() ?: 0, "Rig")?.let {
+                close()
+                throw IOException(it)
+            }
             val body = ByteArray(length)
             var read = 0
             while (read < length) {

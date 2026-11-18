@@ -222,7 +222,7 @@ class RigInvite(private val service: MainService) {
             }
             try {
                 val status = http.responseCode
-                if (status != 200) return Fetched(null, "Rig answered HTTP $status for its pairing key")
+                if (status != 200) return Fetched(null, Config.redirectRefused(status, "Rig") ?: "Rig answered HTTP $status for its pairing key")
                 val key = JSONObject(http.inputStream.bufferedReader().use { it.readText() }).optString("key").trim()
                 if (Base64.decode(key, Base64.DEFAULT).size == PUBLIC_KEY_BYTES) Fetched(key, "") else Fetched(null, NOT_A_KEY)
             } finally {

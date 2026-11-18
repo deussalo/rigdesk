@@ -60,10 +60,21 @@ class AgentStop(private val ctx: Context) {
     private fun open(host: Host, path: String, method: String = "GET"): HttpURLConnection =
         (URL(host.url + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
+            instanceFollowRedirects = false
             setRequestProperty("Authorization", "Bearer ${host.token}")
             connectTimeout = 15_000
             readTimeout = 15_000
         }
+
+    /** The answer's status. A redirect ends the request, and the Rig bridge row says so until the bridge answers again. */
+    private fun status(host: Host, c: HttpURLConnection): Int {
+        val status = c.responseCode
+        Config.redirectRefused(status, "The Rig bridge")?.let {
+            redirected = host.url to "$it Stop and your touches do not reach the agent. Set the bridge's final address."
+            throw IllegalStateException(it)
+        }
+        return status
+    }
 
     /** The bridge's state, then its events, for as long as the service runs; reconnects with backoff. */
     private fun follow() {
@@ -79,9 +90,11 @@ class AgentStop(private val ctx: Context) {
             }
             try {
                 val health = open(host, "/health").let { c ->
-                    if (c.responseCode != 200) throw IllegalStateException("/health answered HTTP ${c.responseCode}")
+                    val status = status(host, c)
+                    if (status != 200) throw IllegalStateException("/health answered HTTP $status")
                     JSONObject(c.inputStream.bufferedReader().use { it.readText() })
                 }
+                redirected = null
                 val nowBoot = health.optString("boot")
                 if (nowBoot != boot) { boot = nowBoot; lastId = 0 }
                 val standing = health.optJSONObject("standing")
@@ -92,7 +105,8 @@ class AgentStop(private val ctx: Context) {
                     setRequestProperty("Last-Event-ID", lastId.toString())
                     readTimeout = 60_000 // the bridge beats every 15 s
                 }
-                if (events.responseCode != 200) throw IllegalStateException("/events answered HTTP ${events.responseCode}")
+                val eventsStatus = status(host, events)
+                if (eventsStatus != 200) throw IllegalStateException("/events answered HTTP $eventsStatus")
                 waitMs = 1_000L
                 events.inputStream.bufferedReader().use { reader ->
                     val data = StringBuilder()
@@ -188,7 +202,8 @@ class AgentStop(private val ctx: Context) {
                     setRequestProperty("Content-Type", "application/json")
                 }
                 c.outputStream.use { it.write("{}".toByteArray()) }
-                if (c.responseCode != 200) Log.w(TAG, "$path answered HTTP ${c.responseCode}")
+                val status = status(host, c)
+                if (status != 200) Log.w(TAG, "$path answered HTTP $status")
                 c.disconnect()
             } catch (e: Exception) {
                 Log.w(TAG, "$path: $e")
@@ -204,6 +219,9 @@ class AgentStop(private val ctx: Context) {
         private const val OWN_INPUT_MS = 1_000L
         private const val HUMAN_EVERY_MS = 500L
 
+        /** The bridge address that last answered with a redirect, and the refusal for the Rig bridge row. */
+        @Volatile private var redirected: Pair<String, String>? = null
+
         private fun parse(option: String): Host? = try {
             val j = JSONObject(option)
             val url = j.optString("url").trim().trimEnd('/')
@@ -215,7 +233,8 @@ class AgentStop(private val ctx: Context) {
 
         /** Why the Rig bridge set on this phone is not told anything, for the Rig bridge row; null when it is, or none is set. */
         fun refused(): String? {
-            val host = parse(FFI.getLocalOption(HOST_OPTION))?.let { Config.plainHttpTo(it.url) } ?: return null
+            val bridge = parse(FFI.getLocalOption(HOST_OPTION)) ?: return null
+            val host = Config.plainHttpTo(bridge.url) ?: return redirected?.takeIf { it.first == bridge.url }?.second
             return "Refused: plain http to $host would send the bridge's token unencrypted, so this phone does not connect to it, and Stop and " +
                 "your touches do not reach the agent. Use its https address, or its Tailscale address (100.x.y.z or a name ending in .ts.net)."
         }

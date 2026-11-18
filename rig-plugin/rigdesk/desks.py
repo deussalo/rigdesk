@@ -225,6 +225,23 @@ class DeskRefused(Exception):
     """A call that cannot go through, with the words the agent reads."""
 
 
+class RedirectRefused(DeskRefused, aiohttp.ClientError):
+    """A PC or bridge answered a request carrying its token with a redirect. A ClientError too, so every caller that handles an unreachable PC handles it."""
+
+
+async def _refuse_redirect(_session: aiohttp.ClientSession, _context: object, redirect: aiohttp.TraceRequestRedirectParams) -> None:
+    status = redirect.response.status
+    redirect.response.close()
+    raise RedirectRefused(f"{redirect.url.origin()} answered with a redirect (HTTP {status}); a request carrying its token never follows one, so nothing went to the other address")
+
+
+def token_session() -> aiohttp.ClientSession:
+    """The session for every request to a PC or bridge: each carries a token, in Authorization or X-Desk-Session, so none follows a redirect."""
+    refusing = aiohttp.TraceConfig()
+    refusing.on_request_redirect.append(_refuse_redirect)
+    return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10), trace_configs=[refusing])
+
+
 class McpAnswered(DeskRefused):
     """A PC's MCP server, or the PC itself, answered and refused: a JSON-RPC error, or the PC's own 403 or 404. The server is not failing."""
 
@@ -517,7 +534,7 @@ class Desks:
 
     async def settle(self) -> None:
         await self._read_grants()
-        self._http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10))
+        self._http = token_session()
         self._watch = TASKS.spawn("rigdesk-settings", self._watching())
         self._probe = TASKS.spawn("rigdesk-id-server", self._probing())
         TASKS.spawn("rigdesk-adhoc-lost", self._adhoc_restarted())

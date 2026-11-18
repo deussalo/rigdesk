@@ -12,6 +12,7 @@ class Config private constructor(val origin: String, val token: String, val phon
 
     companion object {
         private val PHONE = Regex("^[a-z0-9][a-z0-9_-]{0,47}$")
+        private val REDIRECTS = setOf(301, 302, 303, 307, 308)
 
         fun prefs(ctx: Context): SharedPreferences = ctx.getSharedPreferences("rig-assistant", Context.MODE_PRIVATE)
 
@@ -38,6 +39,11 @@ class Config private constructor(val origin: String, val token: String, val phon
             val host = try { URI.create(url).host } catch (e: IllegalArgumentException) { null } ?: return url
             return if (privateHost(host)) null else host
         }
+
+        /** The refusal for an answer that redirects a request carrying a token, or null for any other status. No such request follows one. */
+        fun redirectRefused(status: Int, who: String): String? =
+            if (status !in REDIRECTS) null
+            else "Refused: $who answered with a redirect (HTTP $status). A request carrying its token never follows one, so nothing went to the other address."
 
         /** Why Rig's token must not go to this address, whichever way it got here, or null. */
         private fun exposes(url: String): String? {
