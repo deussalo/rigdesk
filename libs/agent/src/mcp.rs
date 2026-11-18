@@ -14,6 +14,10 @@ use crate::journal::{Entry, Journal};
 use crate::session::{Holder, Shared};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
+const QUIET_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+/// The desks' `OWN_INPUT_SLACK_MS`: `local_input_after` skips this long after the time it is given, and the person's
+/// input in that span must still count, or input would go back before they have been inactive for `QUIET_MS`.
+const LOCAL_SLACK_MS: u64 = 500;
 
 pub struct Mcp {
     pub shared: Arc<Shared>,
@@ -125,6 +129,17 @@ impl Mcp {
             ));
             refusal.words()
         })
+    }
+
+    /// While the process lives: hands input back by itself once the human's input pauses (`Shared::settle_local`).
+    pub async fn watch_quiet(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(QUIET_CHECK).await;
+            let Some(since) = self.shared.human_input_ms() else { continue };
+            let desk = self.desk.clone();
+            let local = tokio::task::spawn_blocking(move || desk.local_input_after(since.saturating_sub(LOCAL_SLACK_MS))).await.unwrap_or(false);
+            self.shared.settle_local(local);
+        }
     }
 }
 
