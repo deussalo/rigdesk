@@ -59,8 +59,11 @@ class Recognition : RecognitionService() {
 class LinkService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Link.start(this)
-        val shown = builder().setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Rig Assistant")
-            .setContentText("Connected to Rig while the phone is on").setOngoing(true)
+        val refused = Config.refusedAddress(this)
+        val words = refused ?: "Keeps the link to Rig while the phone is on"
+        val shown = builder(refused != null).setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle(if (refused != null) "Rig Assistant is not connected" else "Rig Assistant")
+            .setContentText(words).setStyle(Notification.BigTextStyle().bigText(words)).setOngoing(true).setOnlyAlertOnce(true)
             .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, SetupActivity::class.java), PendingIntent.FLAG_IMMUTABLE)).build()
         try {
             if (Build.VERSION.SDK_INT >= 34) startForeground(ID, shown, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -74,10 +77,11 @@ class LinkService : Service() {
     }
 
     @Suppress("DEPRECATION")
-    private fun builder(): Notification.Builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-            .createNotificationChannel(NotificationChannel(CHANNEL, "Connection to Rig", NotificationManager.IMPORTANCE_MIN))
-        Notification.Builder(this, CHANNEL)
+    private fun builder(refused: Boolean): Notification.Builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val channel = if (refused) NotificationChannel(REFUSED_CHANNEL, "Rig's address refused", NotificationManager.IMPORTANCE_DEFAULT)
+                      else NotificationChannel(CHANNEL, "Connection to Rig", NotificationManager.IMPORTANCE_MIN)
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
+        Notification.Builder(this, channel.id)
     } else Notification.Builder(this)
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -85,6 +89,7 @@ class LinkService : Service() {
     companion object {
         private const val TAG = "RigAssistant"
         private const val CHANNEL = "rig-assistant-link"
+        private const val REFUSED_CHANNEL = "rig-assistant-address"
         private const val ID = 7310
 
         /** The link runs either way; the service only keeps the process up with the screen off. Android may refuse to start it from the

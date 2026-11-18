@@ -298,7 +298,7 @@ pub fn pair(key: &str) -> bool {
     }
     let kept = LocalConfig::get_option(OPTION_RIG_INVITE_KEY);
     if !kept.is_empty() && kept != key.trim() {
-        hbb_common::log::warn!("invite: Rig's pairing key changed; invites, open ones included, are now redeemable only by the Rig holding the new key");
+        hbb_common::log::warn!("invite: Rig's pairing key changed; invites are now redeemable only by the Rig holding the new key");
     }
     LocalConfig::set_option(OPTION_RIG_INVITE_KEY.to_owned(), key.trim().to_owned());
     true

@@ -21,16 +21,31 @@ class Config private constructor(val origin: String, val token: String, val phon
         }
 
         /** Loopback or the tailnet (100.64.0.0/10, *.ts.net), where http is already encrypted by WireGuard. */
-        fun privateHost(host: String): Boolean {
+        fun privateHost(given: String): Boolean {
+            val host = given.lowercase(Locale.ROOT)
             if (host == "localhost" || host == "127.0.0.1" || host.endsWith(".ts.net")) return true
-            val parts = host.split('.').map { it.toIntOrNull() ?: return false }
+            val parts = host.split('.').map { part -> part.toIntOrNull()?.takeIf { it.toString() == part } ?: return false }
             return parts.size == 4 && parts.all { it in 0..255 } && parts[0] == 100 && parts[1] in 64..127
         }
+
+        private fun storedUrl(ctx: Context): String = prefs(ctx).getString("url", "").orEmpty().trim().trimEnd('/')
+
+        /** Why Rig's token must not go to this address, whichever way it got here, or null. */
+        private fun exposes(url: String): String? {
+            val uri = try { URI.create(url) } catch (e: IllegalArgumentException) { return null }
+            val host = uri.host ?: return null
+            if (uri.scheme != "http" || privateHost(host)) return null
+            return "Rig's address is plain http to $host, which would send its access token unencrypted, so this phone will not connect. " +
+                "Change it in Rig Assistant to Rig's https address, or to its Tailscale address (100.x.y.z or a name ending in .ts.net)."
+        }
+
+        /** Why the address the phone holds is refused, for the person to see; null for any other state of the setup. */
+        fun refusedAddress(ctx: Context): String? = exposes(storedUrl(ctx))
 
         /** The config, or why there is none. */
         fun load(ctx: Context): Pair<Config?, String> {
             val prefs = prefs(ctx)
-            val url = prefs.getString("url", "").orEmpty().trim().trimEnd('/')
+            val url = storedUrl(ctx)
             val token = prefs.getString("token", "").orEmpty().trim()
             val phone = prefs.getString("phone", defaultPhone()).orEmpty().trim()
             if (url.isEmpty() || token.isEmpty()) return null to "not set up: enter Rig's address and access token"
@@ -42,6 +57,7 @@ class Config private constructor(val origin: String, val token: String, val phon
                 false
             }
             if (!ok) return null to "Rig's address must look like https://host"
+            exposes(url)?.let { return null to it }
             return Config(url, token, phone) to ""
         }
     }
