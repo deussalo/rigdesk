@@ -24,7 +24,7 @@ class Config private constructor(val origin: String, val token: String, val phon
         fun privateHost(given: String): Boolean {
             val host = given.lowercase(Locale.ROOT)
             if (host == "localhost" || host == "127.0.0.1" || host.endsWith(".ts.net")) return true
-            val parts = host.split('.').map { it.toIntOrNull() ?: return false }
+            val parts = host.split('.').map { part -> part.toIntOrNull()?.takeIf { it.toString() == part } ?: return false }
             return parts.size == 4 && parts.all { it in 0..255 } && parts[0] == 100 && parts[1] in 64..127
         }
 
