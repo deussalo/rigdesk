@@ -257,13 +257,17 @@ class MainService : Service() {
 
         createForegroundNotification()
         agentStop = AgentStop(this).also { it.start() }
+        rigInvite = RigInvite(this).also { it.start() }
     }
 
     private var agentStop: AgentStop? = null
+    private var rigInvite: RigInvite? = null
 
     override fun onDestroy() {
         agentStop?.close()
         agentStop = null
+        rigInvite?.close()
+        rigInvite = null
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
@@ -369,6 +373,7 @@ class MainService : Service() {
         if (intent?.action == ACT_LOGIN_REQ_NOTIFY) {
             onRigRequestAnswered(intent)
         }
+        intent?.let { rigInvite?.handle(it) }
         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
     }
 

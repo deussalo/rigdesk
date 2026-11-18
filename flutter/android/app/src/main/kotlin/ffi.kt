@@ -30,4 +30,9 @@ object FFI {
     external fun isServiceClipboardEnabled(): Boolean
     external fun cmLoginRes(connId: Int, res: Boolean): Boolean
     external fun clickApproves(): Boolean
+    external fun invitePairKey(key: String): Boolean
+    external fun inviteMint(): String
+    external fun inviteRevoke(): Boolean
+    external fun inviteState(): String
+    external fun inviteEnd(): Boolean
 }
