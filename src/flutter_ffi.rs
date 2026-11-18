@@ -3240,10 +3240,11 @@ pub mod server_side {
         jboolean::from(base::invite::revoke())
     }
 
-    /// RigDesk: `{open: {until_ms}|null, holder: {agent, title}|null, refused: {at_ms, reason}|null}`.
+    /// RigDesk: `{id, open: {until_ms}|null, holder: {agent, title}|null, refused: {at_ms, reason}|null}`, with `id` this device's RustDesk ID.
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_inviteState(env: JNIEnv, _class: JClass) -> jstring {
-        let res = serde_json::json!(base::invite::state());
+        let mut res = serde_json::json!(base::invite::state());
+        res["id"] = hbb_common::config::Config::get_id().into();
         env.new_string(res.to_string()).unwrap_or_default().into_raw()
     }
 

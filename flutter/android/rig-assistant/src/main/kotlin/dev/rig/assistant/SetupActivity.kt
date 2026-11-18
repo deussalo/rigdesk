@@ -117,7 +117,7 @@ class SetupActivity : Activity() {
             state.text = "That pairing link is incomplete: it needs Rig's address and a token"
             return
         }
-        if (target.scheme != "https" && !private(host)) {
+        if (target.scheme != "https" && !Config.privateHost(host)) {
             state.text = "That pairing link would send Rig's token unencrypted to $host: only https, or http on the tailnet, is taken"
             return
         }
@@ -150,13 +150,6 @@ class SetupActivity : Activity() {
 
     private fun ask(vararg permissions: String) {
         if (Build.VERSION.SDK_INT >= 23) requestPermissions(permissions, 1)
-    }
-
-    /** Loopback or the tailnet (100.64.0.0/10, *.ts.net), where http is already encrypted by WireGuard. */
-    private fun private(host: String): Boolean {
-        if (host == "localhost" || host == "127.0.0.1" || host.endsWith(".ts.net")) return true
-        val parts = host.split('.').mapNotNull { it.toIntOrNull() }
-        return parts.size == 4 && parts[0] == 100 && parts[1] in 64..127
     }
 
     private fun isAssistant(): Boolean = if (Build.VERSION.SDK_INT >= 29)

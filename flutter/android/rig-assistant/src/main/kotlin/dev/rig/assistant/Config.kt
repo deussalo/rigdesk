@@ -20,6 +20,13 @@ class Config private constructor(val origin: String, val token: String, val phon
             return if (name.isEmpty()) "phone" else name.take(48)
         }
 
+        /** Loopback or the tailnet (100.64.0.0/10, *.ts.net), where http is already encrypted by WireGuard. */
+        fun privateHost(host: String): Boolean {
+            if (host == "localhost" || host == "127.0.0.1" || host.endsWith(".ts.net")) return true
+            val parts = host.split('.').mapNotNull { it.toIntOrNull() }
+            return parts.size == 4 && parts[0] == 100 && parts[1] in 64..127
+        }
+
         /** The config, or why there is none. */
         fun load(ctx: Context): Pair<Config?, String> {
             val prefs = prefs(ctx)
