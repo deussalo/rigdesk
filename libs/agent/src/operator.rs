@@ -99,3 +99,49 @@ pub fn request(body: &Value) -> Result<(Owner, String), String> {
     let ask = body.get("ask").and_then(Value::as_str).unwrap_or("").to_string();
     Ok((owner, ask))
 }
+
+const PERSON_ALLOWED: &str = "\tperson";
+
+/// The session as the PC's tray reads it over IPC: "<agent id>\n<title>", the id marked when the person at the PC allowed it.
+pub fn session_line(agent_id: &str, title: &str, person_allowed: bool) -> String {
+    format!("{agent_id}{}\n{title}", if person_allowed { PERSON_ALLOWED } else { "" })
+}
+
+/// A `session_line`'s agent id, title, and whether the person at the PC allowed the session.
+pub fn parse_session(text: &str) -> Option<(&str, &str, bool)> {
+    let (id, title) = text.split_once('\n')?;
+    Some(match id.strip_suffix(PERSON_ALLOWED) {
+        Some(id) => (id, title, true),
+        None => (id, title, false),
+    })
+}
+
+/// The title and text of the notification that a session started from Rig has begun.
+pub fn words(title: &str, person_allowed: bool) -> (String, String) {
+    let allowed = if person_allowed { "The person at this PC allowed it." } else { "The operator approved it in Rig." };
+    (
+        format!("Rig agent {title} is using this computer"),
+        format!("{allowed} Your own mouse and keyboard still go first, and every action is logged. End it from the RigDesk tray icon."),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_notification_says_who_allowed_the_session() {
+        assert!(words("Helper", false).1.starts_with("The operator approved it in Rig."));
+        let (summary, body) = words("Helper", true);
+        assert_eq!(summary, "Rig agent Helper is using this computer");
+        assert!(body.starts_with("The person at this PC allowed it."));
+        assert!(!body.contains("operator"));
+    }
+
+    #[test]
+    fn the_tray_reads_who_allowed_the_session() {
+        assert_eq!(parse_session(&session_line("a1", "Helper", false)), Some(("a1", "Helper", false)));
+        assert_eq!(parse_session(&session_line("a1", "Helper", true)), Some(("a1", "Helper", true)));
+        assert_eq!(parse_session(""), None);
+    }
+}

@@ -99,6 +99,8 @@ struct Session {
     last_input_ms: u64,
     /// Started by Rig on the operator's Accept, not by a share link: the PC's tray names it and offers to end it.
     operator: bool,
+    /// Of an `operator` session: the person at the PC allowed it on the PC's own prompt, not the operator in Rig.
+    person_allowed: bool,
     /// Started by an invite the person at the PC made: the tray names it and offers to end it, as for `operator`.
     invited: bool,
 }
@@ -253,7 +255,7 @@ impl Shared {
             self.events.push(EventKind::Revoked { agent_id: previous.owner.agent_id, reason: "the desktop was shared with another agent".into() });
         }
         let token = fresh();
-        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: false,
+        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: false, person_allowed: false,
                                        invited: until_ms.is_some() });
         let holder = state.holder().map_or(Holder::Agent, |(holder, _)| holder);
         self.events.push(EventKind::Claimed { owner });
@@ -264,6 +266,15 @@ impl Shared {
     /// A session the operator accepted in Rig, with no link: it never replaces an agent holding the session, never
     /// starts for a blocked agent, and leaves any open link as it is.
     pub fn join_operator(&self, owner: Owner) -> Result<String, crate::operator::Refused> {
+        self.join_from_rig(owner, false)
+    }
+
+    /// The same session, for a request the person at the PC allowed on the PC's own prompt.
+    pub fn join_person_allowed(&self, owner: Owner) -> Result<String, crate::operator::Refused> {
+        self.join_from_rig(owner, true)
+    }
+
+    fn join_from_rig(&self, owner: Owner, person_allowed: bool) -> Result<String, crate::operator::Refused> {
         let mut state = self.state.lock().unwrap();
         if let Some(session) = &state.session {
             return Err(crate::operator::Refused::Held(session.owner.clone()));
@@ -272,7 +283,7 @@ impl Shared {
             return Err(crate::operator::Refused::Blocked { since_ms: block.since_ms });
         }
         let token = fresh();
-        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: true, invited: false });
+        state.session = Some(Session { owner: owner.clone(), token: digest(&token), hands: Hands::Agent, since_ms: now_ms(), last_input_ms: 0, operator: true, person_allowed, invited: false });
         self.events.push(EventKind::Claimed { owner });
         self.events.push(EventKind::Holder { holder: Holder::Agent, by: "operator".into() });
         Ok(token)
@@ -281,6 +292,11 @@ impl Shared {
     /// The agent holding a session the operator started, if one does.
     pub fn operator_owner(&self) -> Option<Owner> {
         self.state.lock().unwrap().session.as_ref().filter(|s| s.operator).map(|s| s.owner.clone())
+    }
+
+    /// The same agent, and whether the person at the PC allowed its session rather than the operator, read together.
+    pub fn operator_session(&self) -> Option<(Owner, bool)> {
+        self.state.lock().unwrap().session.as_ref().filter(|s| s.operator).map(|s| (s.owner.clone(), s.person_allowed))
     }
 
     /// The person at the PC ends the operator-started session of `agent_id`; false when that agent holds none.

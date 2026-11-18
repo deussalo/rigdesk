@@ -12,6 +12,8 @@ use super::operator::{IPC_END, IPC_SESSION};
 struct Holding {
     agent_id: String,
     title: String,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    person_allowed: bool,
 }
 
 pub struct Notice {
@@ -28,7 +30,8 @@ pub fn start() -> Notice {
             let now = crate::ipc::get_config(IPC_SESSION).ok().flatten().unwrap_or_default();
             if now != last {
                 last = now.clone();
-                let holding = now.split_once('\n').map(|(id, title)| Holding { agent_id: id.to_string(), title: title.to_string() });
+                let holding = super::operator::parse_session(&now)
+                    .map(|(id, title, person_allowed)| Holding { agent_id: id.to_string(), title: title.to_string(), person_allowed });
                 if tx.send(holding).is_err() {
                     break;
                 }
@@ -52,7 +55,7 @@ impl Notice {
             let end = MenuItem::new("End the agent's session", true, None);
             menu.append_items(&[&said, &end]).ok();
             #[cfg(windows)]
-            toast(&holding.title);
+            toast(&holding.title, holding.person_allowed);
             self.shown = Some((holding.agent_id, said, end));
         }
     }
@@ -71,9 +74,9 @@ impl Notice {
 }
 
 #[cfg(windows)]
-fn toast(title: &str) {
+fn toast(title: &str, person_allowed: bool) {
     use tauri_winrt_notification::{Duration, Sound, Toast};
-    let (summary, body) = super::operator::words(title);
+    let (summary, body) = super::operator::words(title, person_allowed);
     if let Err(e) = Toast::new(crate::platform::windows::agent_tray::toast_app_id()).title(&summary).text1(&body).sound(Some(Sound::Default)).duration(Duration::Long).show() {
         log::warn!("tray: the notification of a session started from Rig failed: {e}");
     }
