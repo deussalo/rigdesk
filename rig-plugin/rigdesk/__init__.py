@@ -51,6 +51,12 @@ NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to
               "ask the operator with desk/request(pc, why), or call desk/join with a share link the human at the PC gives you. A desk call never joins one by itself")
 
 
+def _unshared(desks: Desks, agent: str, graph: str, words: str = NO_SESSION) -> str:
+    """A refusal for want of a session, led by why the agent's last one ended when it ended without its asking."""
+    why = desks.ended_why(agent, graph)
+    return words if why is None else f"{why} {words[0].upper()}{words[1:]}"
+
+
 REQUEST_CONFIRMED = Provision("rigdesk.request_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
 CONNECT_CONFIRMED = Provision("rigdesk.connect_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
 INVITE_CONFIRMED = Provision("rigdesk.invite_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
@@ -173,7 +179,7 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
         return _refused(call, failed)
     return {"pc": held.pc, "joined": True, "said": (f"You own {held.pc}'s session and hold its input. desk/<tool> acts there; the human sees each call live. "
                                                     "Their own input goes first: while they use the PC your actions are refused, and work again once they pause "
-                                                    "for 3 s. If they press Stop you are told, and every call is refused until they resume you.")}
+                                                    "for 3 s. If they press Stop, your turn is cut short and every call is refused until they resume you.")}
 
 
 async def _ask_invite(desks: Desks, call: Call, pc: str, link: str, title: str) -> Answer:
@@ -267,7 +273,7 @@ async def _leave(desks: Desks, call: Call, _given: LeaveInput) -> Answer:
     agent, graph, _ = _who(call)
     held = desks.held_by(agent, graph)
     if held is None:
-        return call.refused(UNSHARED, NO_SESSION)
+        return call.refused(UNSHARED, _unshared(desks, agent, graph))
     try:
         left = await desks.leave(held)
     except Exception as failed:  # noqa: BLE001
@@ -379,8 +385,8 @@ async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
     held = desks.held_by(agent, graph)
     pc = given.pc if given.pc is not None else None if held is None else held.pc
     if pc is None:
-        return call.refused(UNSHARED, "desk/shell(pc, command) names a PC whose shell the operator allowed you (desk/pcs says where), or runs on the PC you joined; "
-                                      "you named none and hold no session")
+        return call.refused(UNSHARED, _unshared(desks, agent, graph, "desk/shell(pc, command) names a PC whose shell the operator allowed you (desk/pcs says "
+                                                                  "where), or runs on the PC you joined; you named none and hold no session"))
     entry = next((each for each in desks.entries() if each["name"] == pc), None)
     if entry is None:
         return call.refused(REFUSED, f"no RigDesk PC named {pc} is set up in Rig; desk/pcs lists those that are")
@@ -504,7 +510,7 @@ async def _attachment(desks: Desks, call: Call, given: AttachmentInput) -> Answe
     agent, graph, _ = _who(call)
     held = desks.held_by(agent, graph)
     if held is None:
-        return call.refused(UNSHARED, NO_SESSION)
+        return call.refused(UNSHARED, _unshared(desks, agent, graph))
     try:
         path = await desks.attachment(held, given.id)
     except Exception as failed:  # noqa: BLE001
@@ -527,7 +533,7 @@ def _passed(desks: Desks, tool: str, listed: dict[str, Any]) -> ToolDef:
         agent, graph, _ = _who(call)
         held = desks.held_by(agent, graph)
         if held is None:
-            return call.refused(UNSHARED, NO_SESSION)
+            return call.refused(UNSHARED, _unshared(desks, agent, graph))
         try:
             return await desks.call(held, tool, dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
@@ -544,7 +550,7 @@ def _shot(desks: Desks, listed: dict[str, Any]) -> ToolDef:
         agent, graph, _ = _who(call)
         held = desks.held_by(agent, graph)
         if held is None:
-            return call.refused(UNSHARED, NO_SESSION)
+            return call.refused(UNSHARED, _unshared(desks, agent, graph))
         try:
             said = await desks.call(held, "screenshot", dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
@@ -570,7 +576,8 @@ def _served(desks: Desks, server: PcServer, listed: dict[str, Any]) -> ToolDef:
         agent, graph, _ = _who(call)
         held = desks.held_by(agent, graph)
         if held is None or held.pc != server.pc:
-            return call.refused(UNSHARED, f"{key}/{tool} runs on RigDesk PC {server.pc}, which you do not hold: only the agent holding it may call its MCP servers")
+            return call.refused(UNSHARED, _unshared(desks, agent, graph, f"{key}/{tool} runs on RigDesk PC {server.pc}, which you do not hold: only the agent "
+                                                                         "holding it may call its MCP servers"))
         try:
             return await desks.mcp_call(held, key, tool, dict(given.model_extra or {}))
         except Exception as failed:  # noqa: BLE001
