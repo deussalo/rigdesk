@@ -214,9 +214,11 @@ PIN-locked settings): an invite obeys the same switch as the operator's Accept, 
   without Rig's token is journaled too, at most once a minute with a count of the rest.
 - The first agent to claim the link owns the session. Rig names that agent from its own records, so one agent cannot
   pose as another.
-- Known limit: an agent with the agent shell on that PC runs as its user, and could mint an invite through the tray's
-  IPC itself. As an invite needs no Accept in Rig, an agent with a shell grant there could start a desktop session
-  that nobody approved, if it can also get the link to a Rig agent. The switch above turns that off with the rest.
+- **Where an agent may run commands, Rig's operator accepts it too.** An agent with the agent shell on that PC runs as
+  its user, and could mint an invite through the tray's IPC itself. So on a PC where any agent holds a shell grant,
+  `desk/join` with an invite claims nothing until the operator accepts it in Rig; the PC's `/health` says whether the
+  open link is an invite (`invite_open`). On any other PC an invite needs no Accept in Rig: the person at the PC made
+  it. A viewer's share link never asks. Closing the switch above revokes an open invite.
 - **Your input goes first.** Any mouse or keyboard input, from a viewer or at the PC itself, reaches the PC at once,
   and the agent's actions are refused ("the human is using the PC …", reads still work) until that input pauses for
   3 seconds; then the agent may act again by itself.
@@ -252,7 +254,7 @@ under `plugins.rigdesk.pcs` as `{name: {url, token_file, client}}`. See [rig-plu
 | `GET /log?n=N` | the action log |
 | `GET /frame?display=N` | a PNG of the screen now, for the bearer's holder (the viewer's note, Rig's screenshot on demand); journaled |
 | `POST /viewer/note` | bridge only: `{text, pngs, key?}`, the human's message to the owning agent; a note sent again with a `key` already sent to the same agent answers the first event (`replayed: true`) and is not told twice. Keys are forgotten when the bridge restarts, so a note replayed across a restart is told again |
-| `GET /health` | boot id, current standing and the agent shell's switch (`{open, code, words}`, null without one) |
+| `GET /health` | boot id, current standing, the agent shell's switch (`{open, code, words}`, null without one) and whether the open link is an invite (`invite_open`) |
 | `POST /join` | `{agent: {id, title, graph}, ask}`: a session the operator accepted in Rig, with no share link; answers `{session, standing}` as `/claim` does; refused with `join_off`, `join_paused`, `held` (another agent holds the session, named) or `blocked`; journaled either way; 404 `no_join` where the host offers none |
 | `POST /shell` | `{agent: {id, title, graph}, command, as, timeout_s, background}` or `{agent, job}`: the management lane, no session; refused with `shell_off`, `shell_paused`, `blocked`, `jobs_full`, `no_job` or `bad_request`; journaled either way |
 | `GET /samples?after=ID` | the health samples taken after ID (the PC keeps 24 h); a `health` event on `/events` says each new one |

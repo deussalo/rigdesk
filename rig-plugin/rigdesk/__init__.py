@@ -29,7 +29,7 @@ from core.policy import OPERATOR
 from core.refusal import PluginCode
 
 from . import adhoc
-from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, Desks, DeskRefused, Grantee, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
+from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, Desks, DeskRefused, Grantee, InviteAsk, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
 from .health import figures_json, series
 from .shots import inline
 from .desks import PcName as DeskName
@@ -53,6 +53,7 @@ NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to
 
 REQUEST_CONFIRMED = Provision("rigdesk.request_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
 CONNECT_CONFIRMED = Provision("rigdesk.connect_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
+INVITE_CONFIRMED = Provision("rigdesk.invite_confirmed", TypeAdapter(Confirmed), TypeAdapter(str))
 # A RigDesk PC's ask: "always" joins and grants that agent the PC, so its later desk/request or desk/join(pc) joins with no ask.
 RIGDESK_CHOICES = Choices(choices=(Choice(id="accept", label="Join once", tone="allow"), Choice(id="always", label="Always allow", tone="allow"),
                                    Choice(id="deny", label="Deny", tone="deny")), safe_choice="deny")
@@ -80,6 +81,16 @@ class ConnectAsked(TypedDict):
 
 
 CONNECT_ASKED: TypeAdapter[ConnectAsked] = TypeAdapter(ConnectAsked)
+
+
+class InviteAsked(TypedDict):
+    pc: str
+    agent: str
+    graph: str
+    link: str
+
+
+INVITE_ASKED: TypeAdapter[InviteAsked] = TypeAdapter(InviteAsked)
 
 
 class JoinInput(ToolInput):
@@ -156,11 +167,45 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
     try:
         held = (await desks.join(given.link, agent, graph, node, title) if given.link is not None
                 else await desks.join_assigned(str(given.pc), agent, graph, node, title))
+    except InviteAsk as invite:
+        return await _ask_invite(desks, call, invite.pc, str(given.link), title)
     except Exception as failed:  # noqa: BLE001
         return _refused(call, failed)
     return {"pc": held.pc, "joined": True, "said": (f"You own {held.pc}'s session and hold its input. desk/<tool> acts there; the human sees each call live. "
                                                     "Their own input goes first: while they use the PC your actions are refused, and work again once they pause "
                                                     "for 3 s. If they press Stop you are told, and every call is refused until they resume you.")}
+
+
+async def _ask_invite(desks: Desks, call: Call, pc: str, link: str, title: str) -> Answer:
+    """The operator's ruling: on a PC where an agent may run commands, an invite its person made is claimed only once the operator accepts."""
+    agent, graph, _ = _who(call)
+    asked = new_id("desk")
+    reason = (f"{title} ({agent}, in {graph}) was given an invite to RigDesk PC {pc}, made by the person at {pc} from its tray. An agent holds a shell grant "
+              f"on {pc}, so the invite is claimed only once you accept.\n\nAccept joins {title} to {pc} now, for one session: until it leaves, or the person "
+              "at the PC ends it from the tray. Deny claims nothing; the invite lapses on the PC after 15 minutes.")[:2000]
+    # The link is useless without Rig's own bearer for that PC, so keeping it in the ask gives nobody anything they lacked.
+    then: JsonObject = {"pc": pc, "agent": agent, "graph": graph, "link": link}
+    state = await desks.host.confirm(call.contract.place.seat, asked, reason, call.kernel.activation_id, Then(provision=INVITE_CONFIRMED.name, given=then))
+    return {"pc": pc, "joined": False, "ask": asked, "state": state,
+            "said": (f"Nothing is claimed yet: an agent may run commands on {pc}, so the operator is asked to accept this invite, and the decision arrives "
+                     "as your next input. The invite lapses on the PC after 15 minutes either way.")}
+
+
+async def _invite_confirmed(host: PluginHost, asked: Confirmed) -> str:
+    """The operator's Accept of an invite on a PC with a shell grant: the agent it was given to claims it now, if it still stands at its seat."""
+    given = INVITE_ASKED.validate_python(asked["given"])
+    seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
+    identity = await host.roster.identity(seat)
+    if identity is None or identity.agent != given["agent"] or seat in await host.roster.closed((seat,)):
+        raise Refused(REFUSED, f"{given['agent']} no longer stands at {seat.graph}/{seat.node}, so the invite to {given['pc']} was not claimed")
+    try:
+        held = await host.live(Desks).join(given["link"], given["agent"], given["graph"], seat.node, identity.label, approved=True)
+    except DeskRefused as refused:
+        raise Refused(REFUSED, f"{refused}; nothing was done") from refused
+    except (aiohttp.ClientError, TimeoutError, OSError) as failed:
+        raise Refused(DOWN, f"{given['pc']} did not answer: {failure(failed)}; nothing was done") from failed
+    return (f"The operator accepted, and you joined {held.pc}: its session is yours until you desk/leave or the person at the PC ends it from the tray. "
+            "desk/<tool> acts there.")
 
 
 async def _connect(desks: Desks, call: Call, given: ConnectInput) -> Answer:
@@ -1021,7 +1066,7 @@ CONTRIBUTION = ContributionDescriptor(
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN, SHELL_NOT_ALLOWED: HTTPStatus.FORBIDDEN,
                    SYSTEM_NOT_GRANTED: HTTPStatus.FORBIDDEN, **{f"{ID}.{code}": status for code, status in PC_SHELL_CODES.items()}},
-    provisions=(provider(REQUEST_CONFIRMED, _request_confirmed), provider(CONNECT_CONFIRMED, _connect_confirmed)),
+    provisions=(provider(REQUEST_CONFIRMED, _request_confirmed), provider(CONNECT_CONFIRMED, _connect_confirmed), provider(INVITE_CONFIRMED, _invite_confirmed)),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
             RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "screenshot", post_screenshot),

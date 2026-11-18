@@ -25,11 +25,16 @@ pub fn link_host() -> String {
     crate::common::hostname().to_lowercase()
 }
 
+/// Why the PC's switch for sessions from Rig is closed, if it is: an invite is not made then, and one open is revoked.
+fn closed() -> Option<String> {
+    let switch = super::operator::PcSwitch { file: super::data_dir().map(|dir| dir.join(super::operator::SWITCH_FILE)) };
+    switch.open().err().map(|closed| rigdesk_agent::operator::Refused::Closed(closed).words())
+}
+
 /// Why the person cannot invite an agent now, if they cannot.
 fn unable() -> Option<String> {
-    let switch = super::operator::PcSwitch { file: super::data_dir().map(|dir| dir.join(super::operator::SWITCH_FILE)) };
-    if let Err(closed) = switch.open() {
-        return Some(rigdesk_agent::operator::Refused::Closed(closed).words());
+    if let Some(words) = closed() {
+        return Some(words);
     }
     let standing = super::shared().standing();
     if let Some(owner) = standing.owner {
@@ -53,7 +58,16 @@ pub fn text() -> String {
     }
     let mut link = LINK.lock().unwrap();
     match (shared.invite_until(), link.clone()) {
-        (Some(until_ms), Some(text)) => format!("open\n{until_ms}\n{text}"),
+        (Some(until_ms), Some(text)) => match closed() {
+            None => format!("open\n{until_ms}\n{text}"),
+            Some(reason) => {
+                *link = None;
+                if shared.revoke_invite() {
+                    super::HOST.journal.record(&Entry::new("human", "invite", "revoked", json!({"reason": reason})));
+                }
+                "off".into()
+            }
+        },
         _ => {
             *link = None;
             if unable().is_some() {

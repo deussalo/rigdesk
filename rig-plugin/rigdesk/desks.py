@@ -349,6 +349,13 @@ class ConnectAsk(Exception):
         self.target, self.where, self.tried = target, where, tried
 
 
+class InviteAsk(Exception):
+    """desk/join was given the invite a PC's person made, on a PC where an agent holds a shell grant: claiming it waits for the operator's Accept."""
+    def __init__(self, pc: str) -> None:
+        super().__init__(pc)
+        self.pc = pc
+
+
 def failure(failed: BaseException) -> str:
     """An exception in words. A timeout's own text is usually empty, so it is named as one."""
     words = str(failed).strip()
@@ -1408,7 +1415,7 @@ class Desks:
             raise DeskRefused(f"RigDesk PC {pc} is no longer set up in Rig")
         return link
 
-    async def join(self, link_text: str, agent: str, graph: str, node: str, title: str, via: Literal["link", "assigned"] = "link") -> Held:
+    async def join(self, link_text: str, agent: str, graph: str, node: str, title: str, via: Literal["link", "assigned"] = "link", approved: bool = False) -> Held:
         settings = await asyncio.to_thread(self.host.settings, RigdeskSettings)
         found = pc_of_link(link_text, dict(settings.pcs), {name: link.host for name, link in self._pcs.items() if link.host})
         if isinstance(found, str):
@@ -1418,6 +1425,8 @@ class Desks:
         if mine is not None:
             raise DeskRefused(f"you already own the session on {mine.pc}; desk/leave it before joining another" if mine.pc != pc else f"you already own the session on {pc}")
         link = self._link(pc)
+        if not approved and self.shell_granted(pc) and await self._invite_open(pc):
+            raise InviteAsk(pc)
         body = {"grant": grant, "secret": secret, "agent": {"id": agent, "title": title, "graph": graph}}
         async with self._client().post(f"{link.spec.url}/claim", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             said = await answer.json(content_type=None)
@@ -1477,6 +1486,14 @@ class Desks:
             health = _object(await answer.json(content_type=None))
         link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
         return link.join
+
+    async def _invite_open(self, pc: str) -> bool:
+        """Whether the grant open on a RigDesk PC now is an invite its person made, read from its /health; a build without invites says nothing, so False."""
+        link = self._link(pc)
+        async with self._client().get(f"{link.spec.url}/health", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
+            if answer.status != 200:
+                raise DeskRefused(f"{pc}'s /health answered HTTP {answer.status}")
+            return _object(await answer.json(content_type=None)).get("invite_open") is True
 
     async def _join_operator(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str, via: Literal["link", "assigned"] = "link") -> Held:
         """Rig's bearer asks a RigDesk PC for its session for this agent, with no share link; the PC's own switch admits it."""

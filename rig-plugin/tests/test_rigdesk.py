@@ -581,6 +581,55 @@ def test_a_pc_server_that_fails_a_call_shows_as_not_answering_with_its_own_error
     asyncio.run(run())
 
 
+def test_an_invite_to_a_pc_where_an_agent_may_run_commands_waits_for_the_operator_and_one_elsewhere_joins_at_once() -> None:
+    from aiohttp import ClientSession, web
+    from rigdesk.desks import InviteAsk, RigdeskSettings
+    claimed: list[str] = []
+
+    async def health(_request: web.Request) -> web.Response:
+        return web.json_response({"ok": True, "invite_open": True})
+
+    async def claim(request: web.Request) -> web.Response:
+        claimed.append(request.host)
+        return web.json_response({"session": "s"})
+
+    async def run() -> None:
+        app = web.Application()
+        app.router.add_get("/health", health)
+        app.router.add_post("/claim", claim)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        with tempfile.TemporaryDirectory() as state:
+            token = Path(state) / "token"
+            token.write_text("t" * 32)
+            pcs = {name: DeskPc(url=f"http://127.0.0.1:{port}", token_file=str(token)) for name in ("front", "back")}
+            settings = RigdeskSettings(pcs=pcs)
+            desks = Desks(SimpleNamespace(state_dir=Path(state), docs=_Docs(), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            desks._pcs.update({name: PcLink(name, spec) for name, spec in pcs.items()})
+            desks._resync = lambda *_: None  # type: ignore[method-assign]
+            desks._http = ClientSession()
+            try:
+                assert await desks.allow_shell("front", "agent:a9", "user")
+                try:
+                    await desks.join(f"rigdesk://front/{GRANT}#{SECRET}", "a1", "g", "n", "A")
+                except InviteAsk as asked:
+                    assert asked.pc == "front"
+                else:
+                    raise AssertionError("an invite to a PC with a shell grant was claimed unasked")
+                assert claimed == [] and desks.held_by("a1", "g") is None
+                assert (await desks.join(f"rigdesk://front/{GRANT}#{SECRET}", "a1", "g", "n", "A", approved=True)).pc == "front"
+                assert (await desks.join(f"rigdesk://back/{GRANT}#{SECRET}", "a2", "g", "n", "B")).pc == "back"
+                assert len(claimed) == 2
+            finally:
+                await desks._http.close()
+                await runner.cleanup()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
