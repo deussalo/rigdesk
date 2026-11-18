@@ -9,7 +9,7 @@ use crate::events::{EventKind, Events};
 use crate::now_ms;
 
 /// How long the human's input must pause before input goes back to the agent by itself.
-pub const QUIET_MS: u64 = 3_000;
+pub const QUIET_MS: u64 = 5_000;
 /// How long an invite the person at the PC made waits to be claimed.
 pub const INVITE_FOR_MS: u64 = 15 * 60_000;
 
@@ -61,7 +61,7 @@ impl Refusal {
             }
             Refusal::Blocked { since_ms } => format!("the human blocked the agent at {}; nothing runs until they unblock it", clock(*since_ms)),
             Refusal::HumanHolds { since_ms } => format!(
-                "the human is using the PC (since {}); reads still work, and actions work again once their input pauses for {} s: look again, then retry",
+                "the person is using the PC (since {}); reads still work; you will be notified when they have been inactive for more than {} seconds",
                 clock(*since_ms),
                 QUIET_MS / 1000
             ),
@@ -315,6 +315,31 @@ impl Shared {
         }
     }
 
+    /// The human's last input while they hold input and no block stands: what the desk's local input is measured from.
+    pub(crate) fn human_input_ms(&self) -> Option<u64> {
+        let state = self.state.lock().unwrap();
+        if state.blocked() {
+            return None;
+        }
+        state.session.as_ref().filter(|s| s.hands == Hands::Human).map(|s| s.last_input_ms)
+    }
+
+    /// `settle` on the API's timer while the human holds input. Input at the PC itself is seen only when asked (`local`:
+    /// the desk saw some since `human_input_ms`), so it counts first: input goes back once the person really paused, and
+    /// the change is sent whether or not anything reads the session.
+    pub(crate) fn settle_local(&self, local: bool) {
+        let mut state = self.state.lock().unwrap();
+        if state.blocked() {
+            return;
+        }
+        let Some(session) = state.session.as_mut().filter(|s| s.hands == Hands::Human) else { return };
+        if local {
+            session.last_input_ms = now_ms();
+            return;
+        }
+        self.settle(&mut state);
+    }
+
     /// When the human blocked this agent, if they have. A block outlives its session, so it holds for the agent's
     /// commands on the management lane too, which need no session.
     pub fn blocked_since(&self, agent_id: &str) -> Option<u64> {
@@ -536,6 +561,24 @@ mod tests {
         assert!(matches!(shared.admit(&token, false), Err(Refusal::Blocked { .. })), "Stop holds until the human resumes the agent");
         assert!(shared.unblock());
         assert!(shared.admit(&token, false).is_ok());
+    }
+
+    #[test]
+    fn input_taken_at_the_pc_goes_back_only_once_the_person_pauses_and_is_sent_unasked() {
+        let shared = Shared::new(Events::new(64));
+        let link = shared.mint();
+        shared.claim(&link.grant, &link.secret, owner("a1")).unwrap();
+        shared.human_input("local input");
+        let quiet = |shared: &Shared| {
+            shared.events.since(0).iter().filter(|e| matches!(&e.kind, EventKind::Holder { holder: Holder::Agent, by } if by == "quiet")).count()
+        };
+        shared.state.lock().unwrap().session.as_mut().unwrap().last_input_ms -= QUIET_MS;
+        shared.settle_local(true);
+        assert_eq!(shared.standing().holder, Some(Holder::Human), "the person still uses the PC");
+        assert_eq!(quiet(&shared), 0);
+        shared.state.lock().unwrap().session.as_mut().unwrap().last_input_ms -= QUIET_MS;
+        shared.settle_local(false);
+        assert_eq!(quiet(&shared), 1, "the pause hands input back with no call from the agent");
     }
 
     #[test]

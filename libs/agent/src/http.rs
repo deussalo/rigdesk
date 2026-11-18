@@ -214,6 +214,7 @@ impl Api {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         let bound = listener.local_addr()?.port();
         tokio::spawn(journal_holder_changes(self.shared.events.subscribe(), self.journal.clone()));
+        tokio::spawn(self.mcp.clone().watch_quiet());
         if let Some(found) = &self.found {
             tokio::spawn(found.clone().watch(self.shared.clone()));
         }

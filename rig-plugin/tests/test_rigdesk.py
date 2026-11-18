@@ -131,6 +131,70 @@ def test_stop_interrupts_the_owning_agents_turn_and_tells_it_nothing_and_a_repla
     assert done == [("interrupt", "interrupt")]
 
 
+def test_an_agent_refused_while_the_person_uses_the_pc_is_told_once_when_they_are_inactive_and_one_never_refused_is_not() -> None:
+    from aiohttp import ClientSession, web
+    refusal = "the person is using the PC (since 09:00:00 UTC); reads still work; you will be notified when they have been inactive for more than 5 seconds"
+
+    standing = {"holder": "human", "since_ms": 1}
+
+    async def mcp(_request: web.Request) -> web.Response:
+        return web.json_response({"jsonrpc": "2.0", "id": 1, "result": {"isError": True, "content": [{"type": "text", "text": refusal}]}})
+
+    async def health(_request: web.Request) -> web.Response:
+        return web.json_response({"ok": True, "standing": standing})
+
+    async def run() -> None:
+        app = web.Application()
+        app.router.add_post("/mcp", mcp)
+        app.router.add_get("/health", health)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        with tempfile.TemporaryDirectory() as state:
+            token = Path(state) / "token"
+            token.write_text("t" * 32)
+            desks = Desks(SimpleNamespace(state_dir=Path(state)))  # type: ignore[arg-type]
+            told: list[str] = []
+
+            async def tell(_held: Held, words: str, *_args: object) -> bool:
+                told.append(words)
+                return True
+
+            desks._tell = tell  # type: ignore[method-assign]
+            held = desks._sessions["deus"] = Held("deus", "agent_a", "g", "n", "A", "s", 0)
+            link = desks._pcs["deus"] = PcLink("deus", DeskPc(url=f"http://127.0.0.1:{runner.addresses[0][1]}", token_file=str(token)), state="up")
+            desks._http = ClientSession()
+            ids = iter(range(1, 100))
+
+            async def holder(holder: str, by: str) -> None:
+                await desks._event(link, {"type": "holder", "holder": holder, "by": by, "id": next(ids), "at_ms": now_ms()})
+            try:
+                await holder("human", "local input")
+                await holder("agent", "quiet")
+                assert told == [], "an agent never refused is not told"
+                await holder("human", "viewer input")
+                for _ in range(2):
+                    assert (await desks.call(held, "type", {"text": "x"}))["is_error"]
+                assert json.loads(desks._state_file.read_text())["sessions"]["deus"]["refused_human"] is True, "the promise outlives a restart"
+                await holder("agent", "quiet")
+                await holder("human", "local input")
+                await holder("agent", "quiet")
+                assert len(told) == 1 and "no longer using the PC" in told[0] and "Carry on there by yourself" in told[0], told
+                await holder("human", "local input")
+                await holder("agent", "quiet")
+                standing["holder"] = "agent"
+                assert (await desks.call(held, "type", {"text": "x"}))["is_error"]
+                assert len(told) == 2, "a hand-back that passed before the refused answer is still told"
+                await holder("human", "local input")
+                await holder("agent", "quiet")
+                assert len(told) == 2, told
+            finally:
+                await desks._http.close()
+                await runner.cleanup()
+
+    asyncio.run(run())
+
+
 async def _next_call(desks: Desks, agent: str = "a1", graph: str = "g") -> str:
     """The words of the agent's next desk/click, which it holds no session to make."""
     from rigdesk import PassInput, _passed

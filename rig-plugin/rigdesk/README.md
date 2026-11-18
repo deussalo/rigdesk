@@ -142,7 +142,9 @@ Known limits against a RigDesk PC:
   another agent, an idle leave, the PC leaves Rig's settings, the operator unassigns it) sends the agent nothing: its next
   desk call is refused with why, until it joins again; Rig's log has it too. The human taking input, Stop and Block
   likewise send nothing: the PC's refusal of the next call says so. A change that lets the agent carry on is told at
-  once, waking it: the human resuming it after Stop or Block, or handing input back. While the PC is down, its MCP servers close for the holder and reopen when it is back.
+  once, waking it: the human resuming it after Stop or Block, or handing input back. An agent whose desk call was
+  refused while the person used the PC is told once, when they have been inactive for more than 5 s, as that refusal
+  says; one never refused is not. While the PC is down, its MCP servers close for the holder and reopen when it is back.
 * `desk/pcs` — every PC in Rig, with its client, whether it is up, whether it is assigned to the caller, and who holds
   it now.
 * `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins
