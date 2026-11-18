@@ -78,6 +78,8 @@ class RigInvite(private val service: MainService) {
             ACT_END -> if (!FFI.inviteEnd()) Log.w(TAG, "End pressed, but no agent was using the phone by invite")
             else -> return false
         }
+        // Posted again even when nothing changed, which also ends a typed reply's spinner after a refused mint.
+        shown = ""
         refresh()
         return true
     }
