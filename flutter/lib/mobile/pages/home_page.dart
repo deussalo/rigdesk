@@ -43,6 +43,10 @@ class HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     initPages();
+    if (isAndroid) {
+      WidgetsBinding.instance.addPostFrameCallback(
+          (_) => gFFI.serverModel.showWaitingRigRequests());
+    }
   }
 
   void initPages() {
