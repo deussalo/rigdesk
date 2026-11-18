@@ -91,6 +91,8 @@ pub fn start() {
     let api = rigdesk_agent::Api::new(host.shared.clone(), desk, host.journal.clone(), &bearer, Some(found));
     #[cfg(windows)]
     crate::platform::windows::agent_lane::manage(&api, &host.shared, &host.journal, data_dir());
+    #[cfg(windows)]
+    crate::platform::windows::agent_tray::ensure();
     api.operator_joins(Arc::new(operator::PcSwitch { file: data_dir().map(|dir| dir.join(operator::SWITCH_FILE)) }));
     #[cfg(target_os = "linux")]
     operator::notify_starts();

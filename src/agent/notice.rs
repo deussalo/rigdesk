@@ -74,7 +74,7 @@ impl Notice {
 fn toast(title: &str) {
     use tauri_winrt_notification::{Duration, Sound, Toast};
     let (summary, body) = super::operator::words(title);
-    if let Err(e) = Toast::new(Toast::POWERSHELL_APP_ID).title(&summary).text1(&body).sound(Some(Sound::Default)).duration(Duration::Long).show() {
+    if let Err(e) = Toast::new(crate::platform::windows::agent_tray::toast_app_id()).title(&summary).text1(&body).sound(Some(Sound::Default)).duration(Duration::Long).show() {
         log::warn!("tray: the notification of a session started from Rig failed: {e}");
     }
 }
