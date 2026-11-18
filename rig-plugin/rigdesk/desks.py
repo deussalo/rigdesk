@@ -1784,7 +1784,7 @@ class Desks:
 
     async def _join_invite(self, device: str, invite: Invited, agent: str, graph: str, node: str, title: str) -> Held:
         """Redeems a device's invite for this agent, which Rig names: the device spends the invite on the first login that proves Rig's key, so the first
-        agent to arrive owns the session and any later one is refused there."""
+        agent to arrive owns the session and any later one is refused there; an invite the person made for one agent refuses every other."""
         target = adhoc.target_of(device)
         if isinstance(target, str):
             raise DeskRefused(target)

@@ -210,7 +210,8 @@ Known limits against a RigDesk PC:
   server, and the login carries a signature by Rig's pairing key over the invite, that login's challenge and the agent
   Rig names. The device, which fetched the public half from the `pair_key` route, checks it and spends the invite on the
   first login that passes, so the first agent owns the session; it shows that agent and can end it. The invite lapses
-  after 15 minutes unclaimed. Known limits: a device requiring 2FA refuses invites, the session is the desktop only (no
+  after 15 minutes unclaimed. The person can instead make it for one agent, by its id on the device or from the agents
+  that last used the PC in its tray; the device then refuses any other agent and the invite stays open. Known limits: a device requiring 2FA refuses invites, the session is the desktop only (no
   terminal), and an invite spent on a login that then fails needs a new one.
 * `desk/leave` — ends the session.
 

@@ -986,7 +986,7 @@ mod tests {
             assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
         }
         assert_eq!(health(port).await["invite_open"], json!(false));
-        let (invite, _) = shared.invite().unwrap();
+        let (invite, _) = shared.invite(None).unwrap();
         assert_eq!(health(port).await["invite_open"], json!(true), "Rig asks its operator before claiming an invite on a PC an agent may run commands on");
         let agent = json!({"id": "a1", "title": "Helper", "graph": "g"});
         let claim = json!({"grant": invite.grant, "secret": invite.secret, "agent": agent});

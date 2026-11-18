@@ -37,7 +37,10 @@ impl Connection {
         let holder = match invite::redeem(&login) {
             Ok(holder) => holder,
             Err(refusal) => {
-                self.update_failure_with_scope(failure, false, 0, FailureScope::Default);
+                // Past the signature, a wrong agent is Rig proving itself, not a guess, and must not lock Rig's address out.
+                if refusal != invite::Refusal::ForOtherAgent {
+                    self.update_failure_with_scope(failure, false, 0, FailureScope::Default);
+                }
                 return self.refuse_rig_invite(refusal.words()).await;
             }
         };

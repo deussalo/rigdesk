@@ -3216,7 +3216,19 @@ pub mod server_side {
     /// RigDesk: a new invite as JSON, `{link, until_ms}` or `{error}`.
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_inviteMint(env: JNIEnv, _class: JClass) -> jstring {
-        let res = match base::invite::mint() {
+        let res = match base::invite::mint(None) {
+            Ok(minted) => serde_json::json!(minted),
+            Err(error) => serde_json::json!({ "error": error }),
+        };
+        env.new_string(res.to_string()).unwrap_or_default().into_raw()
+    }
+
+    /// RigDesk: a new invite only the Rig agent with this id can redeem, as JSON like `inviteMint`.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_inviteMintFor(env: JNIEnv, _class: JClass, agent: JString) -> jstring {
+        let mut env = env;
+        let agent = env.get_string(&agent).map(String::from).unwrap_or_default();
+        let res = match base::invite::mint(Some(&agent)) {
             Ok(minted) => serde_json::json!(minted),
             Err(error) => serde_json::json!({ "error": error }),
         };
