@@ -290,9 +290,9 @@ class PcLink:
     join: dict[str, Any] | None = None
     sampling: asyncio.Lock = field(default_factory=asyncio.Lock)
     samples_why: str | None = None
-    # The newest password asked for and not yet saved. One call at a time saves under the lock, taking any that arrive meanwhile, so saves at once start one bridge.
+    # The newest password asked for and not yet saved, and the one task saving it, which takes any that arrive meanwhile, so saves at once start one bridge.
     password_wanted: str | None = None
-    saving_password: asyncio.Lock = field(default_factory=asyncio.Lock)
+    saving_password: asyncio.Task[None] | None = None
 
 
 @dataclass
@@ -526,7 +526,7 @@ class Desks:
         TASKS.spawn("rigdesk-adhoc-lost", self._adhoc_restarted())
 
     async def end(self, _ending: LiveEnding) -> None:
-        tasks = [task for task in (self._watch, self._probe, *(task for link in self._pcs.values() for task in (link.task, link.remote, link.lane))) if task is not None]
+        tasks = [task for task in (self._watch, self._probe, *(task for link in self._pcs.values() for task in (link.task, link.remote, link.lane, link.saving_password))) if task is not None]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -807,20 +807,21 @@ class Desks:
         if stock is None:
             raise DeskRefused(f"{pc} is a RigDesk PC: Rig reaches it with its token, so it keeps no password")
         path = stock.password_file
-        file = Path(path).expanduser()
         link.password_wanted = password
-        async with link.saving_password:
-            saved = await self._wanted_password_saved(link, file)
-            if saved is not None:  # otherwise the call before this one saved it and restarted the bridge
-                await self._bridge_restarted_for_password(link, stock, file, saved)
+        if link.saving_password is None or link.saving_password.done():
+            link.saving_password = TASKS.spawn(f"rigdesk-password-{pc}", self._wanted_password_applied(link, stock, Path(path).expanduser()))
+        # Shielded: a call cancelled halfway must leave neither a stopped bridge nor a write still running beside the next one.
+        await asyncio.shield(link.saving_password)
         return path
 
-    async def _bridge_restarted_for_password(self, link: PcLink, stock: StockRemote, file: Path, saved: str) -> None:
+    async def _wanted_password_applied(self, link: PcLink, stock: StockRemote, file: Path) -> None:
         pc = link.name
+        saved = await self._wanted_password_saved(link, file)
         old = link.remote
         if old is not None:
             old.cancel()
             await asyncio.gather(old, return_exceptions=True)
+        failed: Exception | None = None
         try:
             held = self._sessions.pop(pc, None)
             if held is not None:
@@ -829,10 +830,13 @@ class Desks:
                 await self._ended(held, f"RigDesk {pc}: the operator replaced its saved password, which restarts its bridge, so your session there ended. "
                                         "desk/join or desk/request it again.")
             await self._wanted_password_saved(link, file, saved)
-        finally:
-            # A settings change that replaced the link started the bridge already, and it reads the new file.
-            if self._pcs.get(pc) is link and link.remote is old:
-                link.remote = TASKS.spawn(f"rigdesk-bridge-{pc}", self._remote(link, stock))
+        except Exception as error:  # noqa: BLE001
+            failed = error
+        # The bridge was stopped, so it comes back even after a failure. A settings change that replaced the link started it already, and it reads the new file.
+        if self._pcs.get(pc) is link and link.remote is old:
+            link.remote = TASKS.spawn(f"rigdesk-bridge-{pc}", self._remote(link, stock))
+        if failed is not None:
+            raise failed
         _LOG.info("rigdesk_password_set", f"RigDesk {pc}: the operator replaced its saved password, and its rigdesk-bridge restarted", pc=pc)
 
     # --- rigdesk-bridge, for a stock PC ---
