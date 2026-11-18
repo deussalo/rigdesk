@@ -339,6 +339,8 @@ class AdHoc:
     watch: asyncio.Task[None] | None = None
     port: int | None = None
     invited: bool = False
+    # The settings entry an invite came through: the same device, so it cannot be joined under that name meanwhile.
+    device: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1485,6 +1487,7 @@ class Desks:
         mine = self.held_by(agent, graph)
         if mine is not None:
             raise DeskRefused(f"you already own the session on {mine.pc}; desk/leave it before joining another" if mine.pc != pc else f"you already own the session on {pc}")
+        self._refuse_if_invited(pc)
         link = self._link(pc)
         if not approved and self.shell_granted(pc) and await self._invite_open(pc):
             raise InviteAsk(pc)
@@ -1533,6 +1536,7 @@ class Desks:
         other = self._sessions.get(pc)
         if other is not None and other.agent != agent:
             raise DeskRefused(f"{other.title} holds {pc} now")
+        self._refuse_if_invited(pc)
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via)
         self.person_answered.discard(ask)
@@ -1591,6 +1595,7 @@ class Desks:
         if other is not None and other.agent != agent:
             frees = f"they leave or after {IDLE_LEAVE_MS // 60_000} minutes without a desk call" if other.via == "assigned" else "they leave or the human ends that share link"
             raise DeskRefused(f"{pc} is assigned to you, but {other.title} holds it now; it frees when {frees}")
+        self._refuse_if_invited(pc)
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via="assigned")
         minted = await self.viewer(pc, "mint")
@@ -1763,6 +1768,14 @@ class Desks:
         assert peer is not None
         return adhoc.Route(("--peer", peer, "--login-id", target.id), f"{name} over the tailnet", name)
 
+    def _refuse_if_invited(self, pc: str) -> None:
+        """The device shows one agent, the invite's, and its End reaches only that one, so its settings entry takes nobody else while the invite's session lives."""
+        for name, kept in self._adhoc.items():
+            if kept.device == pc:
+                held = self._sessions.get(name)
+                who = f"{held.title} holds" if held is not None else "an agent is joining"
+                raise DeskRefused(f"{who} {pc} now, through an invite the person there made")
+
     @staticmethod
     def _invite_refusal(target: adhoc.Target, route: adhoc.Route, said: adhoc.Outcome) -> str:
         if said != ("refused", adhoc.NOT_THIS_PC):
@@ -1897,6 +1910,8 @@ class Desks:
         kept.files = (password_file, token_file, key_file)
         busy = {pc: held.title for pc, held in self._sessions.items() if pc in settings.pcs and held.agent != agent}
         routes = [self._invite_route(target, settings, busy)] if isinstance(password, Invited) else await self._adhoc_routes(target, settings, key_file, set(busy))
+        if isinstance(password, Invited):
+            kept.device = routes[0].rigdesk
         # Only our own PCs are dialed unasked; any other waits for the operator's approval, and once given, ours are not tried again.
         outside = [] if approved else [route for route in routes if route.rigdesk is None]
         if not isinstance(password, Invited):

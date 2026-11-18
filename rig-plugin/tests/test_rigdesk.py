@@ -576,13 +576,13 @@ exit 3
     asyncio.run(run())
 
 
-def _invite_tools(state: Path, said: str, settings: dict) -> tuple[Desks, SimpleNamespace, Path, list]:
+def _invite_tools(state: Path, said: str, settings: dict, first: str = "") -> tuple[Desks, SimpleNamespace, Path, list]:
     """Desks and a tool call as the plugin's tools get them, with a bridge that records its arguments and answers `said`."""
     import stat
     from rigdesk.desks import PAIR_KEY, SECRETS, RigdeskSettings
 
     dialed, fake = state / "dialed", state / "bridge"
-    fake.write_text(f'#!/bin/sh\necho "$*" >> {dialed}\necho "{said}"\nexit 3\n')
+    fake.write_text(f'#!/bin/sh\necho "$*" >> {dialed}\n{first}\necho "{said}"\nexit 3\n')
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     SECRETS.mkdir(mode=0o700)
     (SECRETS / PAIR_KEY).write_text("x")
@@ -673,6 +673,52 @@ def test_an_invite_goes_only_to_the_entry_declaring_its_id() -> None:
             assert "phone did not show it holds this invite" in answer["said"] and "stock.login_id on phone" in answer["said"], answer
             assert asked == [] and desks.entries() == ()
         await _two_pcs_up(with_pcs)
+
+    _with_invite_tools(body)
+
+
+def test_a_device_held_through_its_invite_cannot_also_be_joined_through_its_settings_entry() -> None:
+    from aiohttp import ClientSession, web
+    from core.tasks import TASKS
+    from rigdesk import JoinInput, _join
+    from rigdesk.desks import DeskRefused, StockRemote
+
+    async def claimed(_request: web.Request) -> web.Response:
+        return web.json_response({"session": "s2"})
+
+    async def body(state: Path) -> None:
+        app = web.Application()
+        app.router.add_post("/claim", claimed)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        go, token = state / "go", state / "token"
+        token.write_text("t0ken")
+        entry = DeskPc(url=f"http://127.0.0.1:{port}", token_file=str(token), stock=StockRemote(peer="127.0.0.1:1", login_id="105517719"))
+        desks, call, dialed, _ = _invite_tools(state, "refused: Offline", {"pcs": {"phone": entry}}, f"until [ -e {go} ]; do sleep 0.05; done")
+        desks._pcs["phone"] = PcLink("phone", entry)
+        desks._http = ClientSession()
+        share = f"rigdesk://phone/{GRANT}#{SECRET}"
+        try:
+            invited = TASKS.spawn("test-invited-join", _join(desks, call, JoinInput(link=INVITE_LINK)))  # type: ignore[arg-type]
+            await _until(dialed.exists)
+            desks._sessions["id-105517719"] = Held("id-105517719", "a1", "g", "n", "Builder", "s", now_ms(), "adhoc")
+            for attempt in (desks.join(share, "a2", "g", "n2", "Other"), desks.join_approved("phone", "a2", "g", "n2", "Other")):
+                try:
+                    await attempt
+                except DeskRefused as refused:
+                    assert "Builder holds phone" in str(refused), refused
+                else:
+                    raise AssertionError("two agents hold one device")
+            go.write_text("")
+            await invited
+            assert (await desks.join(share, "a2", "g", "n2", "Other")).pc == "phone", "the entry stayed closed after the invite's session ended"
+        finally:
+            go.write_text("")
+            await desks._http.close()
+            await runner.cleanup()
 
     _with_invite_tools(body)
 

@@ -207,9 +207,9 @@ Known limits against a RigDesk PC:
     request was filed, that is not the server the request named.
 * `desk/join(link)` with a device's invite, `rigdesk://id.<RustDesk ID>/<grant>#<secret>` — the person at RigDesk on
   Android made it, and it needs no password. The device needs an entry in Rig's settings with `stock.peer`, its tailnet
-  name or address, and `stock.login_id`, the RustDesk ID it shows. Rig dials only the entry declaring the link's ID, over the
-  tailnet, so the tailnet vouches for the node behind that address; a link can name any ID, and with no such entry nothing is
-  dialed. No other PC and no ID server is contacted. The device must first show it holds the invite: its greeting carries a tag
+  name or address, and `stock.login_id`, the RustDesk ID it shows. Rig dials only the entry declaring the link's ID, so with
+  `stock.peer` on the tailnet, the tailnet vouches for the node behind that address; a link can name any ID, and with no such entry nothing is
+  dialed. No other PC and no ID server is contacted. While the invite's session lives, that entry cannot be joined by another agent, since the device names one. The device must first show it holds the invite: its greeting carries a tag
   keyed by the hash of the link's secret, over that connection's challenge and Rig's tailnet address. Without it, Rig sends nothing of the invite. The login then carries a signature by Rig's pairing key over the invite, that
   login's challenge and the agent Rig names. The device, which fetched the public half from the `pair_key` route, checks it, spends the invite on the
   first login that passes and confirms it with a second tag, without which Rig does not count the login as joined. So the first agent owns the session; the device shows that agent and can end it. The invite lapses
