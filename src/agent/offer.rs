@@ -16,8 +16,8 @@ use crate::ipc::Data;
 /// The connection manager's ids for these entries: above any a RustDesk connection is given (they count up from about
 /// 1000), so the connection manager can tell Rig's request from a remote login, which never carries such an id.
 pub const OFFER_ID_BASE: i32 = 1_000_000_000;
-/// An offer Rig never ends is taken away after this, unanswered.
-const OFFER_FOR: Duration = Duration::from_secs(10 * 60);
+/// An offer Rig never ends is taken away after this, unanswered, as RustDesk's own accept prompt lapses; Rig shows it again.
+const OFFER_FOR: Duration = Duration::from_secs(3 * 60);
 
 static NEXT: AtomicI32 = AtomicI32::new(0);
 
