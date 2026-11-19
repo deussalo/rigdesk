@@ -1823,8 +1823,14 @@ class Desks:
 
     @staticmethod
     async def _adhoc_routes(target: adhoc.Target, settings: RigdeskSettings, key_file: Path, busy: set[str]) -> list[adhoc.Route]:
-        """The ID server the ID names; or, for a bare ID, each PC of ours on the tailnet that answers and no other agent holds (a RigDesk PC, or
+        """The tailnet peer or the ID server the ID names; or, for a bare ID, each PC of ours on the tailnet that answers and no other agent holds (a RigDesk PC, or
         one reached by peer, such as RigDesk on a phone), then RustDesk's public server."""
+        if target.peer is not None:
+            try:
+                address = await adhoc.tailnet_address(target.peer)
+            except adhoc.NotOnTailnet as outside:
+                raise DeskRefused(str(outside)) from outside
+            return [adhoc.Route(("--peer", address, "--login-id", target.id), f"{target.peer} over the tailnet")]
         if target.host is not None:
             return [adhoc.Route(("--id", target.id, "--id-server", target.host, "--key-file", str(key_file)), f"the ID server {target.host}")]
         ours = {name: (pc.stock.peer if pc.stock is not None else urlsplit(pc.url).hostname) for name, pc in settings.pcs.items()
@@ -2036,7 +2042,7 @@ class Desks:
             raise DeskRefused(f"{target.id} could not be reached")
         assert kept.process is not None
         kept_password = None if isinstance(password, Invited) else str(password_file)
-        stock = StockRemote(peer=route.argv[1], password_file=kept_password) if route.rigdesk is not None else StockRemote(id=target.id, password_file=kept_password)
+        stock = StockRemote(peer=route.argv[1], password_file=kept_password) if route.argv[0] == "--peer" else StockRemote(id=target.id, password_file=kept_password)
         link = self._pcs[name] = PcLink(name, DeskPc(url=f"http://127.0.0.1:{port}", token_file=str(token_file), stock=stock, mcp=False))
         link.task = TASKS.spawn(f"rigdesk-{name}", self._held(link))
         kept.watch = TASKS.spawn(f"rigdesk-adhoc-{name}", self._adhoc_watch(name, kept.process))

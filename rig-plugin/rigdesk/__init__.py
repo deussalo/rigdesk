@@ -110,7 +110,8 @@ class LeaveInput(ToolInput):
 
 class ConnectInput(ToolInput):
     id: str = Field(min_length=6, max_length=400, description="The PC's RustDesk ID as the operator gave it: the digits it shows (spaces allowed); "
-                                                              "ID@host?key=<key> for a PC on a self-hosted ID server; or the ID one of our RigDesk PCs shows.")
+                                                              "ID@host?key=<key> for a PC on a self-hosted ID server; ID@<tailnet address>[:port] to dial a PC directly over the tailnet "
+                                                              "(100.64.0.0/10 or a *.ts.net name, no key); or the ID one of our RigDesk PCs shows.")
     password: str = Field(min_length=1, max_length=128, description="The PC's permanent password, or the one-time password it shows now, as the operator gave it. "
                                                                     "Rig keeps it in a file only Rig's user reads while the session lives, and never repeats it.")
     why: str = Field(min_length=1, max_length=1000, description="What you need the PC for, in a sentence or two: unless it is one of our RigDesk PCs, the operator "
@@ -608,7 +609,7 @@ def _built(desks: Desks) -> tuple[ToolDef, ...]:
                     JoinInput, _join),
             _native(desks, "leave", "Leave the RigDesk PC you joined; its session ends.", LeaveInput, _leave),
             _native(desks, "connect", "Join a PC by the RustDesk ID and password you were given (its permanent or one-time password): a stock RustDesk "
-                                      "PC on RustDesk's public server, one on a self-hosted server as ID@host?key=<key>, or one of our RigDesk PCs by the ID it "
+                                      "PC on RustDesk's public server, one on a self-hosted server as ID@host?key=<key>, one on the tailnet as ID@<100.64.0.0/10 address or *.ts.net name>, or one of our RigDesk PCs by the ID it "
                                       "shows. Nothing needs setting up in Rig or on the RigDesk page. One of our RigDesk PCs joins at once; any other PC is dialed only "
                                       "once the operator approves, with why, and that decision arrives as your next input. You then own its session alone; desk/screenshot, click, type and the rest act there; desk/leave ends it.", ConnectInput, _connect,
                     limit_s=CALL_LIMIT_S + 4 * adhoc.LOGIN_LIMIT_S),
