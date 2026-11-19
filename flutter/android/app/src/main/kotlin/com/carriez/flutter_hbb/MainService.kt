@@ -154,6 +154,7 @@ class MainService : Service() {
                 if (noPicture.remove(id) || rigRequests.contains(id)) {
                     cancelNotification(id)
                 }
+                loginPromptDone(id)
             }
             "update_voice_call_state" -> {
                 try {
@@ -1034,6 +1035,14 @@ class MainService : Service() {
         return PendingIntent.getService(this, clientID * 2 + if (allow) 1 else 0, intent, flags)
     }
 
+    /// RigDesk: the app's own prompt for this login, if it shows one, has nothing left to answer. Told from here: on the emulator
+    /// the prompt stayed up after Deny, withdrawal and lapse, while this service heard each connection end.
+    private fun loginPromptDone(clientID: Int) {
+        Handler(Looper.getMainLooper()).post {
+            MainActivity.flutterMethodChannel?.invokeMethod("login_prompt_done", clientID)
+        }
+    }
+
     private fun onRigRequestAnswered(intent: Intent) {
         val clientID = intent.getIntExtra(EXT_LOGIN_REQ_ID, -1)
         val allow = intent.getBooleanExtra(EXT_LOGIN_REQ_NOTIFY, false)
@@ -1045,6 +1054,9 @@ class MainService : Service() {
         // With the app closed nothing else starts it: the dialog's Accept does, and a login that is in at once.
         val noCapture = answered && allow && !startCapture()
         cancelNotification(clientID)
+        if (answered && allow) {
+            loginPromptDone(clientID)
+        }
         if (noCapture) {
             noPictureNotification(clientID, "The Rig agent")
         }

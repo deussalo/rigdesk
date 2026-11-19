@@ -602,6 +602,8 @@ class ServerModel with ChangeNotifier {
   Future<void> showWaitingRigRequests() async {
     await updateClientState();
     for (final client in _clients.where((c) => c.isRigKnock && !c.disconnected)) {
+      // A request arriving while this ran has its prompt already: a second would stack untracked under it.
+      if (parent.target?.dialogManager.existing(getLoginDialogTag(client.id)) ?? false) continue;
       showLoginDialog(client);
     }
   }
