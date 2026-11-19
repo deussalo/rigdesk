@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
-from core.ask_said import Confirmed, Then
+from core.ask_said import Confirmed, Then, Titled
 from core.base import JsonObject, ToolAnswer, View, as_object, new_id, now_ms, replace_file
 from core.boundary import BranchTool, NoParams, Params
 from core.kernel_api import RigReach, mcp_capability, plugin_capability
@@ -175,7 +175,7 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
         held = (await desks.join(given.link, agent, graph, node, title) if given.link is not None
                 else await desks.join_assigned(str(given.pc), agent, graph, node, title))
     except InviteAsk as invite:
-        return await _ask_invite(desks, call, invite.pc, str(given.link), title)
+        return await _ask_invite(desks, call, invite.pc, str(given.link))
     except Exception as failed:  # noqa: BLE001
         return _refused(call, failed)
     return {"pc": held.pc, "joined": True, "said": (f"You own {held.pc}'s session and hold its input. desk/<tool> acts there; the human sees each call live. "
@@ -183,16 +183,16 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
                                                     "inactive for 5 s; after such a refusal you are told when. If they press Stop, your turn is cut short and every call is refused until they resume you; you are told when they do.")}
 
 
-async def _ask_invite(desks: Desks, call: Call, pc: str, link: str, title: str) -> Answer:
+async def _ask_invite(desks: Desks, call: Call, pc: str, link: str) -> Answer:
     """The operator's ruling: on a PC where an agent may run commands, an invite its person made is claimed only once the operator accepts."""
     agent, graph, _ = _who(call)
     asked = new_id("desk")
-    reason = (f"{title} ({agent}, in {graph}) was given an invite to RigDesk PC {pc}, made by the person at {pc} from its tray. An agent holds a shell grant "
-              f"on {pc}, so the invite is claimed only once you accept.\n\nAccept joins {title} to {pc} now, for one session: until it leaves, or the person "
-              "at the PC ends it from the tray. Deny claims nothing; the invite lapses on the PC after 15 minutes.")[:2000]
+    asks = f"Was given an invite to RigDesk PC {pc}, made by the person at {pc} from its tray"
+    reason = (f"An agent holds a shell grant on {pc}, so the invite is claimed only once you accept.\n\nAccept joins it to {pc} now, for one session: until it "
+              "leaves, or the person at the PC ends it from the tray. Deny claims nothing; the invite lapses on the PC after 15 minutes.")[:2000]
     # The link is useless without Rig's own bearer for that PC, so keeping it in the ask gives nobody anything they lacked.
     then: JsonObject = {"pc": pc, "agent": agent, "graph": graph, "link": link}
-    state = await desks.host.confirm(call.contract.place.seat, asked, reason, call.kernel.activation_id, Then(provision=INVITE_CONFIRMED.name, given=then))
+    state = await desks.host.confirm(call.contract.place.seat, asked, Titled(asks, reason), call.kernel.activation_id, Then(provision=INVITE_CONFIRMED.name, given=then))
     return {"pc": pc, "joined": False, "ask": asked, "state": state,
             "said": (f"Nothing is claimed yet: an agent may run commands on {pc}, so the operator is asked to accept this invite, and the decision arrives "
                      "as your next input. The invite lapses on the PC after 15 minutes either way.")}
@@ -221,7 +221,7 @@ async def _connect(desks: Desks, call: Call, given: ConnectInput) -> Answer:
     try:
         held, reached = await desks.connect(given.id, given.password, agent, graph, node, title)
     except ConnectAsk as outside:
-        return await _ask_connect(desks, call, given, outside, title)
+        return await _ask_connect(desks, call, given, outside)
     except Exception as failed:  # noqa: BLE001
         return _refused(call, failed)
     return {"pc": held.pc, "joined": True, "reached": reached, "said": _connected_words(held.pc)}
@@ -232,18 +232,18 @@ def _connected_words(pc: str) -> str:
             f"{adhoc.IDLE_MS // 60_000} minutes pass without a desk call; a one-time password then works no more.")
 
 
-async def _ask_connect(desks: Desks, call: Call, given: ConnectInput, outside: ConnectAsk, title: str) -> Answer:
+async def _ask_connect(desks: Desks, call: Call, given: ConnectInput, outside: ConnectAsk) -> Answer:
     """A PC that is none of ours is dialed only once the operator accepts; its password waits in memory, never on disk, and nothing is dialed meanwhile."""
     agent, graph, _ = _who(call)
     seat, asked = call.contract.place.seat, new_id("desk")
     not_ours = f" (it is not {', '.join(outside.tried)})" if outside.tried else ""
-    reason = (f"{title} ({agent}, in {graph}) asks to connect to RustDesk ID {outside.target} through {outside.where}: a PC that is none of our RigDesk PCs"
-              f"{not_ours}.\n\n{given.why.strip()}\n\nAccept dials it now with the password the agent was given, for one session: until the agent leaves, the PC "
+    asks = f"Asks to connect to RustDesk ID {outside.target} through {outside.where}: {given.why.strip()}"
+    reason = (f"A PC that is none of our RigDesk PCs{not_ours}.\n\nAccept dials it now with the password the agent was given, for one session: until the agent leaves, the PC "
               f"ends it, or {adhoc.IDLE_MS // 60_000} idle minutes pass; what the PC shows then reaches the agent. Deny dials nothing.")[:2000]
     then = {"agent": agent, "graph": graph, "id": outside.target, "ask": asked}
     desks.connect_asked(asked, given.id, given.password, agent, seat, (CONNECT_CONFIRMED.name, then))
     try:
-        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id, Then(provision=CONNECT_CONFIRMED.name, given=then))
+        state = await desks.host.confirm(seat, asked, Titled(asks, reason), call.kernel.activation_id, Then(provision=CONNECT_CONFIRMED.name, given=then))
     except BaseException:
         desks.connect_dropped(asked)
         raise
@@ -455,8 +455,8 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
             if not entry["stock"] else
             "Accept joins it to that PC now, for one session: until it leaves, or you end the share." if given.kind == "join" else
             "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the RigDesk page.")
-    wants = "to join" if given.kind == "join" else "a standing grant to"
-    reason = f"{title} ({agent}, in {graph}) asks {wants} RigDesk PC {given.pc}:\n\n{given.why.strip()}\n\n{lets}"[:2000]
+    asks = f"Asks {'to join' if given.kind == 'join' else 'for a standing grant to'} {given.pc}: {given.why.strip()}"
+    reason = Titled(asks, lets)
     if entry["stock"]:
         state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
                                          Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind, "ask": asked}))
