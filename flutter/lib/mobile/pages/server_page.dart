@@ -1012,6 +1012,12 @@ void androidChannelInit() {
             AndroidPermissionManager.complete(type, result);
             break;
           }
+        case "login_prompt_done":
+          {
+            gFFI.dialogManager.dismissByTag(getLoginDialogTag(arguments as int));
+            gFFI.serverModel.updateClientState();
+            break;
+          }
         case "on_media_projection_canceled":
           {
             gFFI.serverModel.stopService();
