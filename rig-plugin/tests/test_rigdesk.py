@@ -1513,43 +1513,6 @@ def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_suc
     asyncio.run(run())
 
 
-def test_rigs_accept_with_a_refused_password_keeps_a_phones_one_tap_notification_up_and_its_accept_then_joins_the_agent() -> None:
-    from rigdesk import _request_confirmed, prompts
-    seat, told = SeatId(GraphName("g"), NodeId("n")), []
-
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as state:
-            asks, bridge, assistant = _Asks("desk_1"), _StockBridge("stale"), _Assistant()
-            assistant.offer()
-            desks, runner = await _stock_desks(state, bridge, asks, told, login_id=MOTO_ID)
-            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
-            try:
-                prompts.start(desks, "phone", "desk_1", seat, "a1", "g", "Builder")
-                await _until(lambda: assistant.shown)
-                nonce = assistant.shown[0]["nonce"]
-                asks.open.discard("desk_1")
-                said = await _request_confirmed(desks.host, _accepted("desk_1"))  # type: ignore[arg-type]
-                assert "must Allow your request on the device" in said, said
-                await asyncio.sleep(0.1)
-                assert assistant.ended == [] and "desk_1" in desks.prompts, "the notification went before any login succeeded"
-                assert "/offer" not in bridge.paths() and desks.held_on("phone") is None, bridge.paths()
-                assert await prompts.phone_said(desks.host, _said("desk_1", nonce, "ready")) == "taken"  # type: ignore[arg-type]
-                await _until(lambda: "/offer" in bridge.paths())
-                assert next(body for path, body in bridge.posted if path == "/offer")["accepted"] is True
-                bridge.allowed = True
-                await desks._event(desks._pcs["phone"], {"type": "offer", "ask": "desk_1", "nonce": nonce, "answer": "allow"})
-                await _until(lambda: told and assistant.ended)
-            finally:
-                prompts.OPEN_EVERY_S = every
-                await prompts.end_all(desks)
-                await desks._http.close()
-                await runner.cleanup()
-            assert len(told) == 1 and "allowed you on the device, so you joined phone over the connection they allowed" in told[0][1], told
-            assert desks.held_on("phone") is not None and assistant.ended == ["desk_1"]
-
-    asyncio.run(run())
-
-
 def test_an_assigned_agents_desk_join_on_a_phone_rig_cannot_log_in_to_asks_the_person_on_the_phone_and_no_one_in_rig() -> None:
     """The standing grant stands in for the operator's yes, not the person's: desk/join(pc) on a phone whose sharing is off sends the phone its
     one-tap request instead of refusing; Accept there joins the agent through its grant, Deny is told. A PC no phone links to is refused as before."""
@@ -1709,52 +1672,6 @@ def _said(ask: str, nonce: str, said: str, phone: str = "moto", reason: str = ""
     return {"phone": phone, "ask": ask, "nonce": nonce, "said": said, "reason": reason}
 
 
-def test_a_phone_in_rig_assistant_is_asked_by_one_notification_and_its_accept_sends_the_bridge_an_offer_naming_the_ask() -> None:
-    from rigdesk import prompts
-    seat, posted, told = SeatId(GraphName("g"), NodeId("n")), [], []
-
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as state:
-            asks, assistant = _Asks("desk_1"), _Assistant()
-            assistant.offer()
-            desks = _one_tap_desks(state, asks)
-
-            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
-                told.append((held.agent, words, key))
-                return True
-            desks._tell = tell  # type: ignore[method-assign]
-            desks.host.live = lambda _kind: desks  # type: ignore[attr-defined]
-            runner, link = await _one_tap_phone(desks, posted)
-            try:
-                prompts.start(desks, "moto-g57", "desk_1", seat, "a1", "g", "Builder")
-                await _until(lambda: assistant.shown)
-                shown = assistant.shown[0]
-                assert {key: shown[key] for key in ("phone", "ask", "agent_id", "agent_title", "graph", "operator", "lapse_s")} == {
-                    "phone": "moto", "ask": "desk_1", "agent_id": "a1", "agent_title": "Builder", "graph": "g", "operator": "Arian", "lapse_s": prompts.ONE_TAP_LAPSE_S}
-                nonce = shown["nonce"]
-                assert len(nonce) >= 16 and posted == [], "the bridge knocks only once the phone is ready"
-                assert await prompts.phone_said(desks.host, _said("desk_1", "f" * 32, "ready")) == "not waited for", "another nonce"  # type: ignore[arg-type]
-                assert await prompts.phone_said(desks.host, _said("desk_1", nonce, "ready", phone="other")) == "not waited for", "another phone"  # type: ignore[arg-type]
-                assert await prompts.phone_said(desks.host, _said("desk_2", nonce, "ready")) == "not waited for", "another ask"  # type: ignore[arg-type]
-                await asyncio.sleep(0.05)
-                assert posted == []
-                assert await prompts.phone_said(desks.host, _said("desk_1", nonce, "ready")) == "taken"  # type: ignore[arg-type]
-                await _until(lambda: posted)
-                path, body = posted[0]
-                assert path == "/offer" and body["ask"] == "desk_1" and body["nonce"] == nonce and body["accepted"] is True, body
-                await desks._event(link, {"type": "offer", "ask": "desk_1", "nonce": nonce, "answer": "allow"})
-                await _until(lambda: told and assistant.ended)
-            finally:
-                await prompts.end_all(desks)
-                await desks._http.close()
-                await runner.cleanup()
-            assert asks.answered == [(seat, "desk_1", "accept", "rigdesk:moto-g57")]
-            assert assistant.ended == ["desk_1"] and desks.prompts == {}
-            assert "person at moto-g57 allowed" in told[0][1], told
-
-    asyncio.run(run())
-
-
 def test_with_no_operator_name_rig_itself_refuses_a_join_to_a_one_tap_phone_naming_the_setting_and_sends_the_phone_nothing() -> None:
     """A one-tap prompt names who the agent works for; with plugins.rigdesk.operator_name unset Rig refuses at its own end, saying how the operator
     sets it, instead of sending the phone a request it can only refuse, and never guesses a name."""
@@ -1795,128 +1712,163 @@ def test_with_no_operator_name_rig_itself_refuses_a_join_to_a_one_tap_phone_nami
     asyncio.run(run())
 
 
-def test_deny_or_a_failed_start_on_the_phone_answers_no_and_knocks_nothing_and_the_operators_answer_takes_the_notification_away() -> None:
-    from rigdesk import prompts
-    seat, posted = SeatId(GraphName("g"), NodeId("n")), []
+class _Card:
+    """Rig's side of a phone's status card: each confirm filed, with its reason and choices, opened in asks, and each withdrawal."""
+    def __init__(self, asks: _Asks) -> None:
+        self.asks, self.filed, self.withdrawn = asks, [], []
+
+    async def confirm(self, seat: SeatId, ask: str, reason: object, _activation: str | None, then: object, choices: object = None) -> str:
+        self.filed.append({"ask": ask, "reason": reason, "then": then, "choices": choices})
+        self.asks.open.add(ask)
+        return "active"
+
+    async def route_ended(self, seat: SeatId, provision: str, given: dict) -> int:
+        self.withdrawn.append((seat, provision, given))
+        self.asks.open.discard(given["ask"])
+        return 1
+
+
+def _requester(agent: str = "a1", node: str = "n") -> SimpleNamespace:
+    async def caller_title() -> str:
+        return "Builder"
+    return SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent=agent, seat=SeatId(GraphName("g"), NodeId(node)))), graph="g", node=node,
+                           kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"), refused=lambda code, words, *_: {"refused": code, "said": words})
+
+
+async def _phone_requested(assistant: _Assistant, answer_with, lapse_s: int | None = None) -> dict:
+    """An agent's desk/request(join) on the phone: the card Rig files, what the phone and the bridge were sent, what the agent was told, and
+    the card's withdrawals, once answer_with(asked) has answered it and the request has ended."""
+    from rigdesk import RequestInput, _request, prompts
+    told: list = []
+    with tempfile.TemporaryDirectory() as state:
+        asks, bridge = _Asks(), _StockBridge("down")
+        card = _Card(asks)
+        assistant.offer()
+        desks, runner = await _stock_desks(state, bridge, asks, told, login_id=MOTO_ID)
+        desks.host.confirm, desks.host.route_ended = card.confirm, card.route_ended  # type: ignore[attr-defined]
+        every, lapse, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, prompts.ONE_TAP_LAPSE_S, 0.01
+        prompts.ONE_TAP_LAPSE_S = lapse_s or lapse
+        try:
+            answer = await _request(desks, _requester(), RequestInput(pc="phone", why="to fix the printer", kind="join"))  # type: ignore[arg-type]
+            ask = answer["ask"]
+            await _until(lambda: assistant.shown or bridge.posted)
+            before = list(bridge.paths())
+            again = await _request(desks, _requester("a2", "n2"), RequestInput(pc="phone", why="to look too", kind="join"))  # type: ignore[arg-type]
+            await answer_with(SimpleNamespace(desks=desks, bridge=bridge, card=card, ask=ask, shown=assistant.shown[0] if assistant.shown else None))
+            await _until(lambda: ask not in desks.prompts, limit_s=15)
+            await asyncio.sleep(0.05)
+            held = desks.held_on("phone")
+        finally:
+            prompts.OPEN_EVERY_S, prompts.ONE_TAP_LAPSE_S = every, lapse
+            await prompts.end_all(desks)
+            await desks._http.close()
+            await runner.cleanup()
+    return {"answer": answer, "again": again, "card": card, "asks": asks, "bridge": bridge, "before": before, "told": told, "held": held}
+
+
+def test_a_phones_desk_request_files_a_card_rig_can_only_cancel_and_only_the_person_on_the_phone_lets_the_agent_in() -> None:
+    """On a phone in Rig Assistant only its person says yes: desk/request files a status card whose one choice is Cancel, the safe choice, so no
+    answer in Rig runs its then, and asks the phone as one notification. Their Accept joins the agent; their Deny, a failure and the last lapse are
+    told to it; each takes the card away. The operator's Cancel takes the notification away, and the agent hears it from Rig, not RigDesk."""
+    from rigdesk import REQUEST_CONFIRMED, prompts
+
+    async def allow(asked: SimpleNamespace) -> None:
+        desks, bridge, ask, shown = asked.desks, asked.bridge, asked.ask, asked.shown
+        assert "/login" not in bridge.paths() and "/offer" not in bridge.paths(), "nothing reaches the phone's RigDesk before the person accepts"
+        assert await prompts.phone_said(desks.host, _said(ask, shown["nonce"], "ready")) == "taken"  # type: ignore[arg-type]
+        await _until(lambda: "/offer" in bridge.paths())
+        assert next(body for path, body in bridge.posted if path == "/offer")["accepted"] is True
+        bridge.allowed = True
+        await desks._event(desks._pcs["phone"], {"type": "offer", "ask": ask, "nonce": shown["nonce"], "answer": "allow"})
+
+    def said_on_phone(said: str, reason: str = ""):
+        async def answer(asked: SimpleNamespace) -> None:
+            assert await prompts.phone_said(asked.desks.host, _said(asked.ask, asked.shown["nonce"], said, reason=reason)) == "taken"  # type: ignore[arg-type]
+        return answer
+
+    async def cancel(asked: SimpleNamespace) -> None:
+        asked.card.asks.open.discard(asked.ask)
+
+    async def unanswered(_asked: SimpleNamespace) -> None:
+        return None
+
+    def ended_once(seen: dict, assistant: _Assistant, shows: int = 1) -> None:
+        ask, then = seen["answer"]["ask"], seen["card"].filed[0]["then"].given
+        assert seen["card"].withdrawn == [(SeatId(GraphName("g"), NodeId("n")), REQUEST_CONFIRMED.name, then)], seen["card"].withdrawn
+        assert assistant.ended == [ask] * shows and seen["asks"].answered == [], (assistant.ended, seen["asks"].answered)
+        assert len(seen["told"]) == 1, seen["told"]
 
     async def run() -> None:
-        with tempfile.TemporaryDirectory() as state:
-            asks, assistant = _Asks("desk_1", "desk_2", "desk_3"), _Assistant()
-            assistant.offer()
-            desks = _one_tap_desks(state, asks)
+        assistant = _Assistant()
+        seen = await _phone_requested(assistant, allow)
+        answer, card = seen["answer"], seen["card"].filed[0]
+        assert answer["state"] == "active" and "only they can let you in" in answer["said"] and "can only cancel" in answer["said"], answer
+        assert card["choices"] == prompts.CANCEL_ONLY and [each.id for each in card["choices"].choices] == [card["choices"].safe_choice] == ["cancel"], card
+        assert card["choices"].choice("accept") is None and card["choices"].choice("allow_always") is None, "the card offers nothing that would run its then"
+        assert card["then"].given == {"pc": "phone", "agent": "a1", "graph": "g", "kind": "join", "ask": answer["ask"]}, card["then"]
+        assert card["reason"].title == "Asks to join phone: to fix the printer", card["reason"]
+        assert "only they can let it in" in card["reason"].rest and "through Rig Assistant" in card["reason"].rest and "Cancel withdraws" in card["reason"].rest, card["reason"]
+        assert seen["before"] == [], seen["before"]
+        assert seen["again"].get("refused") and "being asked for Builder" in seen["again"]["said"], seen["again"]
+        assert len(seen["card"].filed) == 1 and len(assistant.shown) == 1, "one request at a time on a phone"
+        assert seen["held"] is not None and seen["held"].agent == "a1", seen["held"]
+        assert "allowed you on the device, so you joined phone" in seen["told"][0][1], seen["told"]
+        ended_once(seen, assistant)
 
-            async def tell(*_args: object, **_kw: object) -> bool:
-                return True
-            desks._tell = tell  # type: ignore[method-assign]
-            desks.host.live = lambda _kind: desks  # type: ignore[attr-defined]
-            runner, _link = await _one_tap_phone(desks, posted)
-            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
-            try:
-                prompts.start(desks, "moto-g57", "desk_1", seat, "a1", "g", "Builder")
-                await _until(lambda: len(assistant.shown) == 1)
-                await prompts.phone_said(desks.host, _said("desk_1", assistant.shown[0]["nonce"], "deny"))  # type: ignore[arg-type]
-                await _until(lambda: asks.answered and assistant.ended == ["desk_1"])
-                assert asks.answered == [(seat, "desk_1", "deny", "rigdesk:moto-g57")]
+        assistant = _Assistant()
+        seen = await _phone_requested(assistant, said_on_phone("deny"))
+        ended_once(seen, assistant)
+        assert seen["held"] is None and "/offer" not in seen["bridge"].paths(), seen["bridge"].paths()
+        words = seen["told"][0][1]
+        assert "denied by the person" in words and "desk/request asks again" in words and "operator" not in words, words
 
-                prompts.start(desks, "moto-g57", "desk_2", seat, "a1", "g", "Builder")
-                await _until(lambda: len(assistant.shown) == 2)
-                await prompts.phone_said(desks.host, _said("desk_2", assistant.shown[1]["nonce"], "failed", reason="screen sharing did not start within 15 s"))  # type: ignore[arg-type]
-                await _until(lambda: assistant.ended == ["desk_1", "desk_2"] and "desk_2" not in desks.prompts)
-                assert len(asks.answered) == 1, "a failure is not the person's no"
+        assistant = _Assistant()
+        seen = await _phone_requested(assistant, said_on_phone("failed", "screen sharing did not start within 15 s"))
+        ended_once(seen, assistant)
+        assert "could not ask the person there: " in seen["told"][0][1] and "operator" not in seen["told"][0][1], seen["told"]
 
-                prompts.start(desks, "moto-g57", "desk_3", seat, "a1", "g", "Builder")
-                await _until(lambda: len(assistant.shown) == 3)
-                asks.open.discard("desk_3")
-                await _until(lambda: assistant.ended == ["desk_1", "desk_2", "desk_3"])
-                assert await prompts.phone_said(desks.host, _said("desk_3", assistant.shown[2]["nonce"], "ready")) == "not waited for"  # type: ignore[arg-type]
-            finally:
-                prompts.OPEN_EVERY_S = every
-                await prompts.end_all(desks)
-                await desks._http.close()
-                await runner.cleanup()
-            assert posted == [], "nothing knocked"
-            assert len(asks.answered) == 1 and desks.prompts == {}
+        assistant = _Assistant()
+        seen = await _phone_requested(assistant, cancel)
+        assert assistant.ended == [seen["answer"]["ask"]] and seen["told"] == [] and seen["card"].withdrawn == [], (assistant.ended, seen["told"])
+        assert "/offer" not in seen["bridge"].paths() and seen["held"] is None
 
-    asyncio.run(run())
-
-
-def test_an_unanswered_notification_is_shown_again_and_after_its_last_lapse_the_operators_ask_is_withdrawn_and_the_agent_told() -> None:
-    from rigdesk import prompts
-    seat, posted, told, withdrawn = SeatId(GraphName("g"), NodeId("n")), [], [], []
-
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as state:
-            asks, assistant = _Asks("desk_1"), _Assistant()
-            assistant.offer()
-
-            async def route_ended(at: SeatId, provision: str, given: object) -> int:
-                withdrawn.append((at, provision, given))
-                return 1
-            desks = _one_tap_desks(state, asks, route_ended=route_ended)
-
-            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
-                told.append((held.agent, words, key))
-                return True
-            desks._tell = tell  # type: ignore[method-assign]
-            runner, _link = await _one_tap_phone(desks, posted)
-            lapse, prompts.ONE_TAP_LAPSE_S = prompts.ONE_TAP_LAPSE_S, 1
-            then = {"pc": "moto-g57", "agent": "a1", "graph": "g", "kind": "join", "ask": "desk_1"}
-            try:
-                prompts.start(desks, "moto-g57", "desk_1", seat, "a1", "g", "Builder", then)
-                await _until(lambda: told, limit_s=10)
-            finally:
-                prompts.ONE_TAP_LAPSE_S = lapse
-                await prompts.end_all(desks)
-                await desks._http.close()
-                await runner.cleanup()
-            assert [shown["ask"] for shown in assistant.shown] == ["desk_1"] * prompts.SHOWS and assistant.ended == ["desk_1"] * prompts.SHOWS
-            assert withdrawn == [(seat, "rigdesk.request_confirmed", then)]
-            assert told == [("a1", told[0][1], "lapsed:desk_1")] and "lapsed" in told[0][1] and "withdrawn" in told[0][1], told
-            assert posted == [] and asks.answered == []
+        assistant = _Assistant()
+        seen = await _phone_requested(assistant, unanswered, lapse_s=1)
+        assert [shown["ask"] for shown in assistant.shown] == [seen["answer"]["ask"]] * prompts.SHOWS, assistant.shown
+        ended_once(seen, assistant, prompts.SHOWS)
+        assert "nobody answered the prompt on the device" in seen["told"][0][1] and "/offer" not in seen["bridge"].paths(), seen["told"]
 
     asyncio.run(run())
 
 
 def test_with_the_phones_rig_assistant_offline_or_refusing_the_bridges_knock_asks_and_the_agent_is_told_why() -> None:
-    from rigdesk import prompts
-    seat = SeatId(GraphName("g"), NodeId("n"))
-
-    async def round(assistant: _Assistant, ask: str) -> tuple[list, list]:
-        posted: list = []
-        told: list = []
-        with tempfile.TemporaryDirectory() as state:
-            asks = _Asks(ask)
-            assistant.offer()
-            desks = _one_tap_desks(state, asks)
-
-            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
-                told.append((held.agent, words, key))
-                return True
-            desks._tell = tell  # type: ignore[method-assign]
-            runner, _link = await _one_tap_phone(desks, posted)
-            try:
-                prompts.start(desks, "moto-g57", ask, seat, "a1", "g", "Builder")
-                await _until(lambda: posted and told)
-            finally:
-                await prompts.end_all(desks)
-                await desks._http.close()
-                await runner.cleanup()
-        return posted, told
+    """Q4: with the phone's link to Rig Assistant down, the card says RigDesk on the phone asks instead, the bridge knocks with no accepted mark,
+    and the agent is told why, loudly; the person's Allow on that knock joins it. A phone refusing the notification falls back the same way."""
+    async def allow(asked: SimpleNamespace) -> None:
+        desks, bridge, ask = asked.desks, asked.bridge, asked.ask
+        await _until(lambda: "/offer" in bridge.paths())
+        offered = next(body for path, body in bridge.posted if path == "/offer")
+        assert "accepted" not in offered, offered
+        bridge.allowed = True
+        await desks._event(desks._pcs["phone"], {"type": "offer", "ask": ask, "nonce": offered["nonce"], "answer": "allow"})
+        await _until(lambda: desks.held_on("phone") is not None)
 
     async def run() -> None:
         offline = _Assistant(up=False)
-        posted, told = await round(offline, "desk_1")
-        path, body = posted[0]
-        assert path == "/offer" and "accepted" not in body, body
+        seen = await _phone_requested(offline, allow)
+        reason = seen["card"].filed[0]["reason"].rest
+        assert "Rig Assistant cannot reach the phone" in reason and "RigDesk on the phone asks instead" in reason and "only they can let it in" in reason, reason
         assert offline.shown == [] and offline.ended == []
-        assert told == [("a1", told[0][1], "one-tap-unreached:desk_1")], told
-        assert "could not be shown on the phone through Rig Assistant: phone moto says RustDesk ID 123456789 but is not connected" in told[0][1], told
-        assert "only while its screen sharing is on" in told[0][1], told
+        unreached = [words for agent, words in seen["told"] if "could not be shown on the phone through Rig Assistant" in words]
+        assert len(unreached) == 1 and "only while its screen sharing is on" in unreached[0], seen["told"]
+        assert seen["held"] is not None and any("so you joined phone" in words for _agent, words in seen["told"]), seen["told"]
+        assert len(seen["card"].withdrawn) == 1, seen["card"].withdrawn
 
         refusing = _Assistant(refusing=True)
-        posted, told = await round(refusing, "desk_2")
-        assert posted[0][0] == "/offer" and "accepted" not in posted[0][1], posted
-        assert told == [("a1", told[0][1], "one-tap-unreached:desk_2")] and "phone moto is not connected to Rig" in told[0][1], told
+        seen = await _phone_requested(refusing, allow)
+        assert "through Rig Assistant" in seen["card"].filed[0]["reason"].rest
+        assert any("phone moto is not connected to Rig" in words for _agent, words in seen["told"]), seen["told"]
+        assert seen["held"] is not None and len(seen["card"].withdrawn) == 1
 
     asyncio.run(run())
 
@@ -2180,7 +2132,8 @@ def test_every_access_grant_rigdesk_asks_for_is_the_operators_alone() -> None:
 
     entries = [{"name": "phone", "stock": {"peer": "p"}, "held_by": None}, {"name": "deus", "stock": None, "held_by": None}]
     desks = SimpleNamespace(host=SimpleNamespace(confirm=confirm), entries=lambda: entries, join_switch=switch, assigned_pcs=lambda *_: (),
-                            held_by=lambda *_: None, device_unasked=lambda _pc: "it is unshown here", unshown={}, one_tap_unnamed=lambda _pc: _now(None))
+                            held_by=lambda *_: None, device_unasked=lambda _pc: "it is unshown here", unshown={}, one_tap_unnamed=lambda _pc: _now(None),
+                            one_tap=lambda _pc: _now(None))
     call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1", seat=SeatId(GraphName("g"), NodeId("n")))), graph="g", node="n",
                            kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"), refused=lambda code, words, *_: {"refused": code, "said": words})
 

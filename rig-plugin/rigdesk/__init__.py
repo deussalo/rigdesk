@@ -196,9 +196,9 @@ async def _ask_phone(desks: Desks, call: Call, asked: PhoneAsk, title: str) -> A
                 "said": (f"Not joined yet: your request {open_now.ask} is still waiting on the person at {asked.pc}, so nothing more was sent to the phone. "
                          "Your next input says when the session is up, or that they denied it or it lapsed.")}
     ask = new_id("desk")
-    prompts.start(desks, asked.pc, ask, call.contract.place.seat, agent, graph, title, granted=asked.unlogged.password)
+    prompts.start(desks, asked.pc, ask, call.contract.place.seat, agent, graph, title, yes="grant", password=asked.unlogged.password)
     if ask not in desks.prompts:
-        return call.refused(REFUSED, f"{asked.unlogged}, and the person at {asked.pc} could not be asked on the phone: this Rig cannot take a device's answer")
+        return call.refused(REFUSED, f"{asked.unlogged}, and the person at {asked.pc} was not asked: an agent holds {asked.pc} now")
     return {"pc": asked.pc, "joined": False, "ask": ask,
             "said": (f"Not joined yet: {asked.unlogged}, so the person at {asked.pc} is asked on the phone, as your standing grant stands in for the operator "
                      "but not for them. Nothing is joined until they accept; your next input says when the session is up, or that they denied it or it lapsed.")}
@@ -475,6 +475,9 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     if unnamed is not None:
         return call.refused(OPERATOR_UNNAMED, unnamed)
     seat, asked = call.contract.place.seat, new_id("desk")
+    tap = await desks.one_tap(given.pc) if entry["stock"] and given.kind == "join" else None
+    if tap is not None and tap.state != "no_link_match":
+        return await _ask_on_phone(desks, call, given, tap, asked, title)
     unasked = desks.device_unasked(given.pc) if entry["stock"] and given.kind == "join" else None
     lets = ("Join once starts its session on that RigDesk PC now, with no share link: until it leaves, or the person at the PC ends it from RigDesk's tray "
             "icon, where they are told who it is. Always allow does the same, and lets it join again with no ask until you unassign it on the RigDesk page."
@@ -497,6 +500,27 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
         prompts.start(desks, given.pc, asked, seat, agent, graph, title, then)
     return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
             "said": "Nothing is granted yet: the operator is asked to Accept, and the decision arrives as your next input."}
+
+
+async def _ask_on_phone(desks: Desks, call: Call, given: RequestInput, tap: prompts.OneTap, asked: str, title: str) -> Answer:
+    """A phone's person alone lets an agent in: Rig files a status card the operator can only Cancel, and the phone is asked."""
+    agent, graph, _ = _who(call)
+    seat = call.contract.place.seat
+    open_now = prompts.open_on(desks, given.pc)
+    if open_now is not None:
+        return call.refused(REFUSED, f"the person at {given.pc} is being asked for {open_now.title} now ({open_now.ask}); ask again once they have answered")
+    how = (f"It shows on the phone as one notification, through Rig Assistant ({tap.why})." if tap.state == "ready" else
+           f"Rig Assistant cannot reach the phone ({tap.why}), so RigDesk on the phone asks instead, which the person sees only while its screen sharing is on.")
+    reason = Titled(f"Asks to join {given.pc}: {given.why.strip()}",
+                    f"Waiting on the person at {given.pc}: only they can let it in, on the phone. {how} Cancel withdraws the request.")
+    then: JsonObject = {"pc": given.pc, "agent": agent, "graph": graph, "kind": "join", "ask": asked}
+    state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id, Then(provision=REQUEST_CONFIRMED.name, given=then, operator_only=True),
+                                     prompts.CANCEL_ONLY)
+    if state == "active":
+        prompts.start(desks, given.pc, asked, seat, agent, graph, title, then, yes="person")
+    return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
+            "said": (f"Nothing is joined yet: the person at {given.pc} is asked on the phone, and only they can let you in; the operator can only cancel. "
+                     "Your next input says when the session is up, or that they denied it, it lapsed or it was cancelled.")}
 
 
 async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
