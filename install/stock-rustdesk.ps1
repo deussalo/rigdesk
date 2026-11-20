@@ -2,7 +2,8 @@
 # Run in an administrator PowerShell:
 #   & .\stock-rustdesk.ps1 -Config '<config string>'
 # It installs stock RustDesk (pinned, SHA-256 checked), points it at the ID server in the config string, sets a
-# fresh permanent password, and prints the PC's ID and that password: give both to the Rig operator.
+# fresh permanent password, has it accept sessions by password or by the person's click (so an agent's desk/request shows
+# on the PC as RustDesk's own accept prompt), and prints the PC's ID and that password: give both to the Rig operator.
 param(
     [Parameter(Mandatory = $true)][string]$Config,
     [string]$Password = ''
@@ -32,6 +33,9 @@ if (-not $Password) {
 }
 & $exe --config $Config | Out-Null
 & $exe --password $Password | Out-Null
+& $exe --option approve-mode password-click | Out-Null
+$mode = (& $exe --option approve-mode | Out-String).Trim()
+if ($mode -ne 'password-click') { throw "RustDesk did not take approve-mode password-click (it says: $mode)" }
 Start-Sleep 3
 $id = (& $exe --get-id | Out-String).Trim()
 if (-not $id) { throw 'RustDesk gave no ID; is its service running?' }
