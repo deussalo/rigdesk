@@ -64,6 +64,9 @@ class LinkService : Service() {
         val shown = builder(refused != null).setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle(if (refused != null) "Rig Assistant is not connected" else "Rig Assistant")
             .setContentText(words).setStyle(Notification.BigTextStyle().bigText(words)).setOngoing(true).setOnlyAlertOnce(true)
+            // Its own group, as every notification of this app names: Android autogroups an app's ungrouped notifications under
+            // a summary whose public face, while the screen is shared, is the bare app name (API 34 does, even with one).
+            .setGroup(CHANNEL)
             .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, SetupActivity::class.java), PendingIntent.FLAG_IMMUTABLE)).build()
         try {
             if (Build.VERSION.SDK_INT >= 34) startForeground(ID, shown, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)

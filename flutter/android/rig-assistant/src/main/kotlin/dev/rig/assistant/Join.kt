@@ -104,7 +104,7 @@ object Join {
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         val notification = builder.setSmallIcon(android.R.drawable.ic_menu_view).setContentTitle(title).setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text)).setCategory(Notification.CATEGORY_CALL).setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setPublicVersion(hidden).setAutoCancel(false).setOngoing(true)
+            .setPublicVersion(hidden).setAutoCancel(false).setOngoing(true).setGroup("$CHANNEL-${request.ask}")
             .addAction(Notification.Action.Builder(null, "Accept", PendingIntent.getActivity(ctx, id(request.ask), accept, flags)).build())
             .addAction(Notification.Action.Builder(null, "Deny", PendingIntent.getBroadcast(ctx, id(request.ask), deny, flags)).build())
             .build()
