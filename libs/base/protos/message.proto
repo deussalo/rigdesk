@@ -105,6 +105,7 @@ message RigKnock {
   string agent_title = 3;
   string dialer = 4;  // The address Rig signed this for, its own on this connection.
   string ask = 5;  // Rig's ask the person accepted on Rig Assistant's notification; empty for a knock that asks the person here.
+  bool assigned = 6;  // The operator assigned this phone to the agent, for its desk/join; never with an ask.
 }
 
 message Terminal {

@@ -199,6 +199,12 @@ async def _ask_phone(desks: Desks, call: Call, asked: PhoneAsk, title: str) -> A
     prompts.start(desks, asked.pc, ask, call.contract.place.seat, agent, graph, title, yes="grant", password=asked.unlogged.password)
     if ask not in desks.prompts:
         return call.refused(REFUSED, f"{asked.unlogged}, and the person at {asked.pc} was not asked: an agent holds {asked.pc} now")
+    tap = await desks.one_tap(asked.pc)
+    if tap is not None and tap.no_tap:
+        return {"pc": asked.pc, "joined": False, "ask": ask,
+                "said": (f"Not joined yet: {asked.unlogged}, so {asked.pc} is knocked as assigned to you. Its person lets an assigned agent in with no tap "
+                         "while its screen sharing is on; with sharing off they are asked on the phone instead. Your next input says when the session is up, "
+                         "or that they denied it or it lapsed.")}
     return {"pc": asked.pc, "joined": False, "ask": ask,
             "said": (f"Not joined yet: {asked.unlogged}, so the person at {asked.pc} is asked on the phone, as your standing grant stands in for the operator "
                      "but not for them. Nothing is joined until they accept; your next input says when the session is up, or that they denied it or it lapsed.")}

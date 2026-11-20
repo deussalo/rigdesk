@@ -19,5 +19,6 @@ class MainApplication : Application() {
         Log.d(TAG, "App start")
         FFI.onAppStart(applicationContext)
         dev.rig.assistant.Host.rustdeskId = { FFI.rigOwnId() }
+        dev.rig.assistant.Host.assignedNoTap = { FFI.getLocalOption("rig-assigned-no-tap") == "Y" }
     }
 }

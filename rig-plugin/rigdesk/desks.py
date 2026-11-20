@@ -1882,7 +1882,7 @@ class Desks:
 
     def _one_tap_row(self, name: str) -> dict[str, Any] | None:
         tap = self._one_taps.get(name)
-        return None if tap is None else {"state": tap.state, "phone": tap.phone, "why": tap.why}
+        return None if tap is None else {"state": tap.state, "phone": tap.phone, "why": tap.why, "no_tap": tap.no_tap}
 
     def _health_row(self, name: str, link: PcLink) -> dict[str, Any] | None:
         """A PC's health as its row shows it: the verdict, the newest sample's headline figures and age; None for a stock PC."""

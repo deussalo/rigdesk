@@ -76,6 +76,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _checkUpdateOnStartup = false;
   var _showTerminalExtraKeys = false;
   var _floatingWindowDisabled = false;
+  late var _rigAssignedNoTap =
+      bind.mainGetLocalOption(key: kRigAssignedNoTap) == 'Y';
   var _keepScreenOn = KeepScreenOn.duringControlled; // relay on floating window
   var _enableAbr = false;
   var _denyLANDiscovery = false;
@@ -1035,6 +1037,36 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             title: Text(translate("Share screen")),
             tiles: shareScreenTiles,
           ),
+        if (isAndroid &&
+            !disabledSettings &&
+            !outgoingOnly &&
+            !hideSecuritySettings)
+          SettingsSection(title: Text('Rig'), tiles: [
+            SettingsTile.switchTile(
+              initialValue: _rigAssignedNoTap,
+              title: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Assigned agents join with no tap'),
+                    Text(
+                        '* While screen sharing is on, an agent the operator assigned this phone to in Rig joins without asking you. Off: you are asked each time.',
+                        style: Theme.of(context).textTheme.bodySmall),
+                  ]),
+              onToggle: (toValue) async {
+                // Whoever is connected sees and may press this screen: an agent in must not let itself in for good.
+                if (toValue && gFFI.serverModel.clients.isNotEmpty) {
+                  showToast(
+                      'Turn this on while nobody is connected to this phone');
+                  return;
+                }
+                bind.mainSetLocalOption(
+                    key: kRigAssignedNoTap,
+                    value: toValue ? 'Y' : defaultOptionNo);
+                setState(() => _rigAssignedNoTap = toValue);
+                gFFI.invokeMethod(kRigHelloAgain);
+              },
+            ),
+          ]),
         if (!bind.isIncomingOnly()) defaultDisplaySection(),
         if (isAndroid &&
             !disabledSettings &&

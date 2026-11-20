@@ -164,7 +164,15 @@ object Link {
                 .put("read_only", spec.optJSONObject("annotations")?.optBoolean("readOnlyHint") ?: false))
         }
         return JSONObject().put("type", "hello").put("phone", phone).put("boot", boot).put("app", "RigDesk ${tools.version}")
-            .put("rustdesk_id", ownId()).put("tools", offered)
+            .put("rustdesk_id", ownId()).put("assigned_no_tap", assignedNoTap()).put("tools", offered)
+    }
+
+    /** The person's no-tap setting as RigDesk keeps it; off when it cannot be read, so Rig never counts on it wrongly. */
+    private fun assignedNoTap(): Boolean = try {
+        Host.assignedNoTap()
+    } catch (e: Throwable) {
+        Log.w(TAG, "assigned no-tap", e)
+        false
     }
 
     /** RigDesk's ID as Rig takes it, or empty: one Rig would refuse would cost the whole hello. */

@@ -65,17 +65,42 @@ impl Connection {
             }
         };
         self.update_failure_with_scope(failure, true, 0, FailureScope::Default);
-        if let Some(ask) = proved.ask.clone() {
+        if let rig_knock::Vouch::Accepted(ask) = proved.vouch.clone() {
             if one_tap::admit(self.inner.id, &ask, &proved.agent_id) {
                 return self.rig_knock_accepted(&ask, proved).await;
             }
             hbb_common::log::info!("Rig agent {} knocked for {ask}, which no Accept here stands for: the person is asked", proved.agent_id);
+        }
+        if proved.vouch == rig_knock::Vouch::Assigned {
+            let no_tap = hbb_common::config::LocalConfig::get_option(rig_knock::ASSIGNED_NO_TAP) == "Y";
+            if rig_knock::admits_assigned(&proved.vouch, no_tap, rig_knock::anyone_in()) {
+                return self.rig_knock_assigned(proved).await;
+            }
+            let why = if no_tap { "another Rig agent is in" } else { "the person's no-tap setting is off" };
+            hbb_common::log::info!("Rig agent {} knocked as assigned this phone, but {why}: the person is asked", proved.agent_id);
         }
         hbb_common::log::info!("Rig agent {} asks to join", proved.agent_id);
         rig_knock::mark_proved(self.inner.id, &proved.name);
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         self.try_start_cm(rig_knock::PEER_ID.to_owned(), proved.name, false);
         self.send_login_error(crate::client::LOGIN_MSG_NO_PASSWORD_ACCESS).await;
+        true
+    }
+
+    /// The operator assigned this phone to the agent, and the person's own setting lets such an agent in with no tap while
+    /// sharing runs: in, as the person is then told, and never around a 2FA requirement.
+    async fn rig_knock_assigned(&mut self, proved: rig_knock::Proved) -> bool {
+        hbb_common::log::info!("Rig agent {} joins as assigned this phone, with no tap as the person's setting allows", proved.agent_id);
+        rig_knock::mark_proved(self.inner.id, &proved.name);
+        self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
+        let kept = self.send_logon_response_and_keep_alive().await;
+        if self.authorized {
+            rig_knock::joined(self.inner.id, rig_knock::JoinedBy::Assigned);
+        }
+        if !kept {
+            return false;
+        }
+        self.try_start_cm(rig_knock::PEER_ID.to_owned(), proved.name, self.authorized);
         true
     }
 
@@ -119,7 +144,7 @@ impl Connection {
             Ok(proved) => {
                 hbb_common::log::info!("Rig agent {} joined with the saved password", proved.agent_id);
                 rig_knock::mark_proved(self.inner.id, &proved.name);
-                let by = if proved.ask.is_some() { rig_knock::JoinedBy::RigAccept } else { rig_knock::JoinedBy::Unattended };
+                let by = if matches!(proved.vouch, rig_knock::Vouch::Accepted(_)) { rig_knock::JoinedBy::RigAccept } else { rig_knock::JoinedBy::Unattended };
                 rig_knock::joined(self.inner.id, by);
             }
             Err(refusal) => hbb_common::log::warn!("A password login carried a Rig signature that does not hold: {}", refusal.words()),
