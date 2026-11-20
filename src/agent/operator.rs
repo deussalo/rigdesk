@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use base::config::keys;
 use hbb_common::{config::Config, log};
 use rigdesk_agent::operator::{session_line, Closed, Offer, Switch};
-pub use rigdesk_agent::operator::{parse_session, words};
+pub use rigdesk_agent::operator::{disconnect, parse_session, words, JoinedBy};
 
 pub const SWITCH_FILE: &str = "agent-join";
 /// IPC config names: read, the agent holding an operator-started session as `session_line` writes it (empty when none);
@@ -47,7 +47,7 @@ impl Switch for PcSwitch {
 
 /// For the tray: who holds a session the operator started, as `session_line` writes it; empty when nobody does.
 pub fn session_text() -> String {
-    super::shared().operator_session().map_or(String::new(), |(owner, person_allowed)| session_line(&owner.agent_id, &owner.title, person_allowed))
+    super::shared().operator_session().map_or(String::new(), |(owner, how)| session_line(&owner.agent_id, &owner.title, how))
 }
 
 /// The person at the PC ended that agent's operator-started session from the tray.
@@ -71,8 +71,8 @@ pub fn notify_starts() {
                 Ok(event) => {
                     if let EventKind::Holder { holder: Holder::Agent, by } = &event.kind {
                         if by == "operator" {
-                            if let Some((owner, person_allowed)) = super::shared().operator_session() {
-                                tokio::task::spawn_blocking(move || notify(&owner.title, person_allowed));
+                            if let Some((owner, how)) = super::shared().operator_session() {
+                                tokio::task::spawn_blocking(move || notify(&owner.title, how));
                             }
                         }
                     }
@@ -85,9 +85,9 @@ pub fn notify_starts() {
 }
 
 #[cfg(target_os = "linux")]
-fn notify(title: &str, person_allowed: bool) {
+fn notify(title: &str, how: JoinedBy) {
     use dbus::arg::PropMap;
-    let (summary, body) = words(title, person_allowed);
+    let (summary, body) = words(title, how);
     let sent = dbus::blocking::Connection::new_session().and_then(|conn| {
         let proxy = conn.with_proxy("org.freedesktop.Notifications", "/org/freedesktop/Notifications", std::time::Duration::from_secs(3));
         let notified: Result<(u32,), dbus::Error> =

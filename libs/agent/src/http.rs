@@ -27,7 +27,8 @@
 //!   GET  /samples?after=ID - the PC's health samples after ID (see `health`); only where the host offers them
 //!   POST /join {agent, ask} - a session the operator accepted in Rig, with no share link (see `operator`): admitted by the
 //!        PC's own switch, refused while another agent holds the session or for a blocked agent; only where the host offers it.
-//!        `answered_by: "person"` journals that the person at the PC allowed it on the PC's prompt
+//!        `how` says how it was let in, which the PC's notice says and the journal keeps: `accept` (the operator's Join once),
+//!        `standing_grant` (Always allow, or an assigned PC) or `person` (the person at the PC allowed it on the PC's prompt)
 //!   POST /offer {agent, ask, nonce} - while the operator's ask stands, the person at the PC is asked too, in the host's own
 //!        accept prompt; their answer is an `offer` event with that ask and nonce. POST /offer/end {ask} takes the prompt away
 
@@ -570,16 +571,12 @@ impl Api {
             Ok(read) => read,
             Err(why) => return json_response(StatusCode::BAD_REQUEST, &json!({"error": why, "code": "bad_request"})),
         };
-        let person = body.get("answered_by").and_then(Value::as_str) == Some("person");
-        let joined = switch.open().map_err(crate::operator::Refused::Closed).and_then(|()| {
-            if person {
-                self.shared.join_person_allowed(owner.clone())
-            } else {
-                self.shared.join_operator(owner.clone())
-            }
-        });
-        let by = if person { "Rig, allowed by the person at the PC" } else { "Rig, operator-approved" };
-        let detail = json!({"graph": owner.graph, "ask": ask, "by": by});
+        let how = match crate::operator::joined_by(&body) {
+            Ok(how) => how,
+            Err(why) => return json_response(StatusCode::BAD_REQUEST, &json!({"error": why, "code": "bad_request"})),
+        };
+        let joined = switch.open().map_err(crate::operator::Refused::Closed).and_then(|()| self.shared.join_operator(owner.clone(), how));
+        let detail = json!({"graph": owner.graph, "ask": ask, "by": how.by()});
         match joined {
             Ok(token) => {
                 self.journal.record(&Entry::new(owner.who(), "join", "ok", detail));
@@ -836,6 +833,7 @@ mod tests {
     use super::*;
     use crate::desk::{Called, Content, ToolSpec};
     use crate::events::Events;
+    use crate::operator::JoinedBy;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     struct NoDesk;
@@ -945,7 +943,7 @@ mod tests {
         let switch = Arc::new(Toggle(std::sync::Mutex::new(Err(crate::operator::Closed::Off("rerun the install line".into())))));
         api.operator_joins(switch.clone());
         let port = api.serve(0).await.unwrap();
-        let join = json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk-1"});
+        let join = json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk-1", "how": "accept"});
         assert_eq!(post(port, "/join", "", &join).await["code"], json!("join_off"));
         *switch.0.lock().unwrap() = Err(crate::operator::Closed::Paused);
         assert_eq!(post(port, "/join", "", &join).await["code"], json!("join_paused"));
@@ -954,18 +952,24 @@ mod tests {
         let token = joined["session"].as_str().unwrap().to_string();
         let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "type", "arguments": {}}});
         assert_eq!(post(port, "/mcp", &token, &call).await["result"]["isError"], json!(false));
-        let other = json!({"agent": {"id": "a2", "title": "Other", "graph": "g"}, "ask": "desk-2"});
+        let other = json!({"agent": {"id": "a2", "title": "Other", "graph": "g"}, "ask": "desk-2", "how": "accept"});
         let held = post(port, "/join", "", &other).await;
         assert_eq!(held["code"], json!("held"));
         assert!(held["error"].as_str().unwrap().contains("Helper holds"));
         let joins: Vec<String> = journal.tail(20).into_iter().filter(|e| e.what == "join").map(|e| e.outcome).collect();
         assert_eq!(joins, vec!["refused: join_off", "refused: join_paused", "ok", "refused: held"]);
-        assert_eq!(shared.operator_session().map(|(_, person)| person), Some(false), "the operator's Accept stays the operator's");
-        assert!(shared.revoke("done"));
-        post(port, "/join", "", &json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk-3", "answered_by": "person"})).await;
+        assert_eq!(shared.operator_session().map(|(_, how)| how), Some(JoinedBy::RigAccept), "the operator's Accept stays the operator's");
+        for (ask, how, joined) in [("desk-3", "standing_grant", JoinedBy::StandingGrant), ("desk-4", "person", JoinedBy::PersonAllowed)] {
+            assert!(shared.revoke("done"));
+            post(port, "/join", "", &json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": ask, "how": how})).await;
+            assert_eq!(shared.operator_session().map(|(_, how)| how), Some(joined), "the PC's notification says how {ask} got in");
+        }
         let by: Vec<Value> = journal.tail(20).into_iter().filter(|e| e.what == "join" && e.outcome == "ok").map(|e| e.detail["by"].clone()).collect();
-        assert_eq!(by, vec![json!("Rig, operator-approved"), json!("Rig, allowed by the person at the PC")]);
-        assert_eq!(shared.operator_session().map(|(_, person)| person), Some(true), "the PC's notification says who allowed it");
+        assert_eq!(by, vec![json!("Rig, operator-approved"), json!("Rig, standing grant"), json!("Rig, allowed by the person at the PC")]);
+        assert!(shared.revoke("done"));
+        let unsaid = post(port, "/join", "", &json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk-5", "answered_by": "person"})).await;
+        assert_eq!(unsaid["code"], json!("bad_request"), "a join that does not say how it was let in starts nothing: {unsaid}");
+        assert!(shared.operator_session().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

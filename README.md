@@ -99,8 +99,10 @@ client sign this text too before you run the line with it on.
 > connecting to it: the agent sees the screen, moves the pointer, types and runs commands as the signed-in user. The
 > operator approves each session in Rig, for one agent at a time, or allows one agent always until they take it back.
 >
-> **You are told and you can end it.** When such a session starts, a notification names the agent, and while it runs
-> the RigDesk tray icon names it with *End the agent's session*. Your own mouse and keyboard always go first: while you
+> **You are told and you can end it.** When such a session starts, a notification names the agent and how it got in:
+> *your Rig Accept, let in by this PC's -AgentJoin* (approved once in Rig), *Always allow in Rig, let in by -AgentJoin*
+> (a standing grant) or *your Allow* (you allowed it on this computer). While it runs the RigDesk tray icon says the
+> same, with *Disconnect <agent>*, which ends the session. Your own mouse and keyboard always go first: while you
 > use the computer, the agent's actions are refused until you pause for 5 seconds. Every action the agent takes is
 > logged on this computer.
 >

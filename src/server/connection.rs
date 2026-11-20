@@ -2952,6 +2952,13 @@ impl Connection {
             if base::rig_knock::must_prove(&lr) {
                 return self.rig_knock_login(lr).await;
             }
+            #[cfg(not(target_os = "android"))]
+            if base::rig_knock::must_prove(&lr) {
+                hbb_common::throttled_log!(std::time::Duration::from_secs(60), warn, "Refused a Rig agent's knock: {}", base::rig_knock::DESKTOP_REFUSAL);
+                self.send_login_error(base::rig_knock::DESKTOP_REFUSAL).await;
+                sleep(1.).await;
+                return false;
+            }
             match lr.union {
                 Some(login_request::Union::FileTransfer(ft)) => {
                     if !Self::permission(

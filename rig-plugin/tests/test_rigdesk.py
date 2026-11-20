@@ -1245,7 +1245,7 @@ def test_allow_on_a_rigdesk_pc_answers_the_operators_ask_and_an_answer_for_anoth
     asyncio.run(run())
 
 
-def test_the_pcs_journal_is_told_a_join_was_the_persons_and_not_the_operators() -> None:
+def test_the_pc_is_told_how_each_join_got_in_the_persons_allow_the_operators_accept_or_a_standing_grant() -> None:
     from rigdesk import prompts
     seat, posted = SeatId(GraphName("g"), NodeId("n")), []
 
@@ -1275,6 +1275,8 @@ def test_the_pcs_journal_is_told_a_join_was_the_persons_and_not_the_operators() 
                 del desks._sessions["front"]
                 await desks.join_approved("front", "a1", "g", "n", "Builder", "desk_2")
                 del desks._sessions["front"]
+                await desks.join_approved("front", "a1", "g", "n", "Builder", "desk_4", via="assigned")
+                del desks._sessions["front"]
                 prompts.start(desks, "front", "desk_3", seat, "a1", "g", "Builder")
                 await _until(lambda: any(path == "/offer" and body["ask"] == "desk_3" for path, body in posted))
                 nonce = next(body["nonce"] for path, body in posted if path == "/offer" and body["ask"] == "desk_3")
@@ -1286,7 +1288,7 @@ def test_the_pcs_journal_is_told_a_join_was_the_persons_and_not_the_operators() 
                 await desks._http.close()
                 await runner.cleanup()
             joins = [body for path, body in posted if path == "/join"]
-            assert [join.get("answered_by") for join in joins] == ["person", None], joins
+            assert [(join["ask"], join["how"]) for join in joins] == [("desk_1", "person"), ("desk_2", "accept"), ("desk_4", "standing_grant")], joins
             assert desks.person_answered == set()
 
     asyncio.run(run())

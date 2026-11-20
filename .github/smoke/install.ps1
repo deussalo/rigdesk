@@ -189,7 +189,7 @@ if (-not $sample.figures.cpu_ms -or -not $sample.took_ms) { Fail "the health sam
 # is on, never takes a held one, and each join is journaled.
 if (-not $log.Contains("enroll: sessions started from Rig on")) { Fail "the service log lacks 'enroll: sessions started from Rig on' (the install line's default)" }
 function Join-Rig($agent) {
-  try { Post "/join" @{ agent = $agent; ask = "smoke" } } catch {
+  try { Post "/join" @{ agent = $agent; ask = "smoke"; how = "accept" } } catch {
     if ($_.ErrorDetails.Message) { $_.ErrorDetails.Message | ConvertFrom-Json } else { Fail "POST /join failed: $_" }
   }
 }

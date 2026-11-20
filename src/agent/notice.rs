@@ -1,19 +1,18 @@
-//! The tray's part in a session the operator started from Rig: two entries while it runs, naming the agent and ending
-//! its session, and on Windows a notification when it starts (on Linux the `--server` process sends that itself). The
-//! tray process asks `--server` over IPC once a second.
+//! The tray's part in a session started from Rig: two entries while it runs, saying which agent joined and how, and
+//! Disconnect, which ends its session; on Windows a notification when it starts, pointing at that Disconnect (on Linux
+//! the `--server` process sends that itself). The tray process asks `--server` over IPC once a second.
 
 use std::sync::mpsc;
 
 use hbb_common::log;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
-use super::operator::{IPC_END, IPC_SESSION};
+use super::operator::{disconnect, words, JoinedBy, IPC_END, IPC_SESSION};
 
 struct Holding {
     agent_id: String,
     title: String,
-    #[cfg_attr(not(windows), allow(dead_code))]
-    person_allowed: bool,
+    how: JoinedBy,
 }
 
 pub struct Notice {
@@ -31,7 +30,7 @@ pub fn start() -> Notice {
             if now != last {
                 last = now.clone();
                 let holding = super::operator::parse_session(&now)
-                    .map(|(id, title, person_allowed)| Holding { agent_id: id.to_string(), title: title.to_string(), person_allowed });
+                    .map(|(id, title, how)| Holding { agent_id: id.to_string(), title: title.to_string(), how });
                 if tx.send(holding).is_err() {
                     break;
                 }
@@ -51,11 +50,12 @@ impl Notice {
                 menu.remove(&end).ok();
             }
             let Some(holding) = holding else { continue };
-            let said = MenuItem::new(format!("Rig agent {} is using this computer", holding.title), false, None);
-            let end = MenuItem::new("End the agent's session", true, None);
+            let (summary, _body) = words(&holding.title, holding.how);
+            let said = MenuItem::new(&summary, false, None);
+            let end = MenuItem::new(disconnect(&holding.title), true, None);
             menu.append_items(&[&said, &end]).ok();
             #[cfg(windows)]
-            toast(&holding.title, holding.person_allowed);
+            toast(&summary, &_body);
             self.shown = Some((holding.agent_id, said, end));
         }
     }
@@ -74,10 +74,9 @@ impl Notice {
 }
 
 #[cfg(windows)]
-fn toast(title: &str, person_allowed: bool) {
+fn toast(summary: &str, body: &str) {
     use tauri_winrt_notification::{Duration, Sound, Toast};
-    let (summary, body) = super::operator::words(title, person_allowed);
-    if let Err(e) = Toast::new(crate::platform::windows::agent_tray::toast_app_id()).title(&summary).text1(&body).sound(Some(Sound::Default)).duration(Duration::Long).show() {
+    if let Err(e) = Toast::new(crate::platform::windows::agent_tray::toast_app_id()).title(summary).text1(body).sound(Some(Sound::Default)).duration(Duration::Long).show() {
         log::warn!("tray: the notification of a session started from Rig failed: {e}");
     }
 }
