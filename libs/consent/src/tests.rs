@@ -281,13 +281,26 @@ fn several_agents_prompt_at_once_and_the_first_yes_leaves_the_others_up() {
 }
 
 #[test]
-fn switching_hands_the_session_on_with_one_operator_accept_and_tells_the_old_holder() {
+fn the_operators_accept_alone_never_hands_a_joined_session_to_another_agent() {
+    for admission in [Admission::Password, Admission::JoinSwitch, Admission::Neither] {
+        let mut desk = Desk::new();
+        joined_by_allow(&mut desk, "a", "x");
+        prompting(&mut desk, "b", "y");
+        let step = desk.step(T0, Event::Accept { ask: ask("b"), admission });
+        assert_eq!(step.effects, [], "{admission:?}: no admit and no password while x holds the session");
+        assert!(desk.prompts().any(|r| r.agent.id == "y"), "{admission:?}: the person is still asked");
+        assert_eq!(desk.joined().unwrap().agent.id, "x");
+    }
+}
+
+#[test]
+fn switching_takes_the_operators_accept_and_the_persons_allow_and_tells_the_old_holder() {
     let mut desk = Desk::new();
     joined_by_allow(&mut desk, "a", "x");
     prompting(&mut desk, "b", "y");
-    // The operator's word alone moves the session: it already carries a yes.
-    let step = desk.step(T0, Event::Accept { ask: ask("b"), admission: Admission::Neither });
-    assert_eq!(step.effects, [Effect::HidePrompt(ask("b")), Effect::Admit { ask: ask("b"), by: By::Operator }]);
+    desk.step(T0, Event::Accept { ask: ask("b"), admission: Admission::Neither });
+    let step = desk.step(T0, Event::Allow { ask: ask("b"), agent_can_press: false });
+    assert_eq!(step.effects, [Effect::HidePrompt(ask("b")), Effect::Admit { ask: ask("b"), by: By::Person }]);
     assert_eq!(desk.joined().unwrap().agent.id, "x", "the old holder keeps the session until the new one is in");
     let step = desk.step(Millis(5_000), Event::LoginOk { ask: ask("b"), route: Route::Handover });
     assert_eq!(step.effects, [Effect::EndSession { ask: ask("a"), reason: EndReason::SwitchedTo(agent("y")) }]);
@@ -303,7 +316,7 @@ fn a_switch_whose_login_fails_leaves_the_old_holder_in() {
     let mut desk = Desk::new();
     joined_by_allow(&mut desk, "a", "x");
     prompting(&mut desk, "b", "y");
-    desk.step(T0, Event::Accept { ask: ask("b"), admission: Admission::Neither });
+    desk.step(T0, Event::Allow { ask: ask("b"), agent_can_press: false });
     desk.step(T0, Event::LoginFailed(ask("b")));
     assert_eq!(desk.joined().unwrap().agent.id, "x");
 }
@@ -321,6 +334,7 @@ fn the_person_approves_a_switch_only_once_no_agent_can_press() {
 }
 
 /// Every sequence of events keeps the invariants: the prompt shows only while prompting, at most one agent is joined,
+/// the operator's Accept never hands a held session on,
 /// joined comes only from a login, a device answer an agent could press changes nothing, and nothing settled moves.
 #[test]
 fn random_sequences_keep_the_invariants() {
@@ -369,8 +383,16 @@ fn random_sequences_keep_the_invariants() {
             );
             let is_login = matches!(event, Event::LoginOk { .. });
             let is_request = matches!(event, Event::Request(_));
+            let accept_while_held = matches!(event, Event::Accept { .. }) && desk.joined().is_some();
             let before: Vec<(Ask, State)> = desk.open().map(|(r, s)| (r.ask.clone(), s.clone())).collect();
             let step = desk.step(Millis(now), event);
+            if accept_while_held {
+                assert!(
+                    !step.effects.iter().any(|e| matches!(e, Effect::Admit { .. } | Effect::TryPassword(_))),
+                    "the operator's Accept handed a held session on: {:?}",
+                    step.effects
+                );
+            }
             for effect in &step.effects {
                 match effect {
                     Effect::ShowPrompt(x) => {

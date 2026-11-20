@@ -432,15 +432,16 @@ impl Desk {
         if !matches!(state, State::Requested { .. } | State::Prompting { .. }) || state.operator_said().is_some() {
             return Err(Refusal::OutOfTurn(ask));
         }
-        // With an agent joined, the session exists: the operator's yes hands it on.
-        let admits = self.joined().is_some() || admission == Admission::JoinSwitch;
-        if admits {
+        // With an agent joined, the operator's yes alone never hands its session on (R3): neither the switch nor the password
+        // admits, and the person's Allow, once no agent can press it, is the only way the session moves.
+        let held = self.joined().is_some();
+        if admission == Admission::JoinSwitch && !held {
             self.set(now, &ask, State::Allowed { by: By::Operator }, step);
             step.effects.push(Effect::Admit { ask, by: By::Operator });
             return Ok(());
         }
         let next = match (admission, &state) {
-            (Admission::Password, _) => {
+            (Admission::Password, _) if !held => {
                 step.effects.push(Effect::TryPassword(ask.clone()));
                 state.with_operator_said(Password::Trying)
             }
