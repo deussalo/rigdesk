@@ -1410,7 +1410,7 @@ async def _stock_desks(state: str, bridge: _StockBridge, asks: "_Asks", told: li
     stock = (StockRemote(peer="phone.tail1234.ts.net", **named) if bridge.password is None else
              StockRemote(peer="phone.tail1234.ts.net", password_file=str(Path(state) / "phone.password"), **named))
     spec = DeskPc(url=f"http://127.0.0.1:{runner.addresses[0][1]}", token_file=str(token), stock=stock)
-    settings = RigdeskSettings(pcs={"phone": spec})
+    settings = RigdeskSettings(pcs={"phone": spec}, operator_name="Arian")
     roster = SimpleNamespace(identity=lambda seat: _now(SimpleNamespace(agent="a1", label="Builder")), closed=lambda seats: _now(set()))
     host = SimpleNamespace(state_dir=Path(state), docs=_Docs(), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None,
                            confirming=asks.confirming, confirm_answered=asks.confirm_answered, roster=roster)
@@ -1614,10 +1614,10 @@ async def _one_tap_phone(desks: Desks, posted: list[tuple[str, dict]]):
     return runner, desks._pcs.setdefault("moto-g57", PcLink("moto-g57", DeskPc(url=bridge.spec.url, token_file=bridge.spec.token_file, stock=stock)))
 
 
-def _one_tap_desks(state: str, asks: "_Asks", **more: object) -> Desks:
+def _one_tap_desks(state: str, asks: "_Asks", operator: str = "Arian", **more: object) -> Desks:
     from rigdesk.desks import RigdeskSettings
     host = SimpleNamespace(state_dir=Path(state), confirming=asks.confirming, confirm_answered=asks.confirm_answered,
-                           settings=lambda _model: RigdeskSettings(operator_name="Arian"), **more)
+                           settings=lambda _model: RigdeskSettings(operator_name=operator), **more)
     return Desks(host)  # type: ignore[arg-type]
 
 
@@ -1667,6 +1667,46 @@ def test_a_phone_in_rig_assistant_is_asked_by_one_notification_and_its_accept_se
             assert asks.answered == [(seat, "desk_1", "accept", "rigdesk:moto-g57")]
             assert assistant.ended == ["desk_1"] and desks.prompts == {}
             assert "person at moto-g57 allowed" in told[0][1], told
+
+    asyncio.run(run())
+
+
+def test_with_no_operator_name_rig_itself_refuses_a_join_to_a_one_tap_phone_naming_the_setting_and_sends_the_phone_nothing() -> None:
+    """A one-tap prompt names who the agent works for; with plugins.rigdesk.operator_name unset Rig refuses at its own end, saying how the operator
+    sets it, instead of sending the phone a request it can only refuse, and never guesses a name."""
+    from rigdesk import RequestInput, _request, prompts
+    seat, posted, confirmed = SeatId(GraphName("g"), NodeId("n")), [], []
+
+    async def confirm(*given: object) -> str:
+        confirmed.append(given)
+        return "active"
+
+    async def caller_title() -> str:
+        return "Builder"
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks, assistant = _Asks("desk_1"), _Assistant()
+            assistant.offer()
+            desks = _one_tap_desks(state, asks, operator="  ", confirm=confirm)
+            desks.host.live = lambda _kind: desks  # type: ignore[attr-defined]
+            runner, _link = await _one_tap_phone(desks, posted)
+            call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1", seat=seat)), graph="g", node="n",
+                                   kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"),
+                                   refused=lambda code, words, *_: {"refused": code, "said": words})
+            try:
+                answer = await _request(desks, call, RequestInput(pc="moto-g57", why="to fix the printer", kind="join"))  # type: ignore[arg-type]
+                assert answer.get("refused") == "rigdesk.operator_unnamed", answer
+                assert "plugins.rigdesk.operator_name" in answer["said"] and "rig settings --set" in answer["said"] and "operator" in answer["said"], answer
+                assert confirmed == [], "nothing is put to the operator that the phone can only refuse"
+                prompts.start(desks, "moto-g57", "desk_2", seat, "a1", "g", "Builder")
+                await _until(lambda: not desks.prompts)
+                assert assistant.shown == [] and posted == [], (assistant.shown, posted)
+                assert "plugins.rigdesk.operator_name" in desks.unshown.get("moto-g57", ""), desks.unshown
+            finally:
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
 
     asyncio.run(run())
 
@@ -1990,7 +2030,7 @@ def test_every_access_grant_rigdesk_asks_for_is_the_operators_alone() -> None:
 
     entries = [{"name": "phone", "stock": {"peer": "p"}, "held_by": None}, {"name": "deus", "stock": None, "held_by": None}]
     desks = SimpleNamespace(host=SimpleNamespace(confirm=confirm), entries=lambda: entries, join_switch=switch, assigned_pcs=lambda *_: (),
-                            held_by=lambda *_: None, device_unasked=lambda _pc: "it is unshown here", unshown={})
+                            held_by=lambda *_: None, device_unasked=lambda _pc: "it is unshown here", unshown={}, one_tap_unnamed=lambda _pc: _now(None))
     call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1", seat=SeatId(GraphName("g"), NodeId("n")))), graph="g", node="n",
                            kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"), refused=lambda code, words, *_: {"refused": code, "said": words})
 

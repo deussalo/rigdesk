@@ -36,6 +36,7 @@ REFUSED = PluginCode(f"{ID}.refused")
 DOWN = PluginCode(f"{ID}.pc_down")
 UNSHARED = PluginCode(f"{ID}.no_session")
 SHELL_NOT_ALLOWED = PluginCode(f"{ID}.shell_not_allowed")
+OPERATOR_UNNAMED = PluginCode(f"{ID}.operator_unnamed")
 SYSTEM_NOT_GRANTED = PluginCode(f"{ID}.system_not_granted")
 # The PC's own refusals on its agent shell, each passed on under its own code.
 PC_SHELL_CODES: dict[str, HTTPStatus] = {"shell_off": HTTPStatus.FORBIDDEN, "shell_paused": HTTPStatus.FORBIDDEN, "blocked": HTTPStatus.FORBIDDEN,
@@ -445,6 +446,9 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     held = desks.held_by(agent, graph)
     if given.kind == "join" and held is not None and held.pc == given.pc:
         return call.refused(REFUSED, f"you already own the session on {given.pc}")
+    unnamed = await desks.one_tap_unnamed(given.pc) if entry["stock"] and given.kind == "join" else None
+    if unnamed is not None:
+        return call.refused(OPERATOR_UNNAMED, unnamed)
     seat, asked = call.contract.place.seat, new_id("desk")
     unasked = desks.device_unasked(given.pc) if entry["stock"] and given.kind == "join" else None
     lets = ("Join once starts its session on that RigDesk PC now, with no share link: until it leaves, or the person at the PC ends it from RigDesk's tray "
