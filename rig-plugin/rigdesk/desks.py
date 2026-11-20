@@ -479,9 +479,8 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
         if why == "the agent left":
             return None
         if why == PERSON_ENDED:
-            return (f"RigDesk {pc}: your session there ended at {at}: the person at {pc} ended it. Nothing reconnects by itself; desk calls there are "
-                    "refused until you join it again.")
-        return f"RigDesk {pc}: your session there ended at {at} ({why}). Desk calls there are refused until you join it again."
+            return f"the person at {pc} ended it."
+        return f"{why}."
     if kind == "dropped":
         count = int(event.get("messages") or 0)
         return (f"RigDesk {pc}: {count} of the human's messages were dropped unread at {at}: the PC's queue was full." if count
@@ -617,7 +616,7 @@ class Desks:
             held = self._sessions.pop(pc)
             self._unsent.pop(pc, None)
             _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: the PC left Rig's settings, so {held.title}'s session there ended", pc=pc)
-            TASKS.spawn(f"rigdesk-gone-{pc}", self._ended(held, f"RigDesk {pc}: the operator removed {pc} from Rig, so your session there ended."))
+            TASKS.spawn(f"rigdesk-gone-{pc}", self._ended(held, f"the operator removed {pc} from Rig."))
         carried: dict[str, dict[str, PcServer]] = {}
         for name in [name for name, link in self._pcs.items() if name not in self._adhoc and (settings.pcs.get(name) != link.spec or (moved and link.spec.stock is not None))]:
             link = self._pcs.pop(name)
@@ -869,8 +868,7 @@ class Desks:
             if held is not None:
                 self._unsent.pop(pc, None)
                 await asyncio.to_thread(self._write_state)
-                await self._ended(held, f"RigDesk {pc}: the operator replaced its saved password, which restarts its bridge, so your session there ended. "
-                                        "desk/join or desk/request it again.")
+                await self._ended(held, "the operator replaced its saved password, which restarted its rigdesk-bridge.")
             await self._wanted_password_saved(link, file, saved)
         except Exception as error:  # noqa: BLE001
             failed = error
@@ -1102,7 +1100,7 @@ class Desks:
         await asyncio.to_thread(self._write_state)
         if known and held is not None:
             _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: RigDesk restarted, so {held.title}'s session there ended", pc=pc)
-            await self._ended(held, f"RigDesk {pc}: RigDesk restarted there, so your session ended. Desk calls there are refused until you join it again.")
+            await self._ended(held, "RigDesk restarted there.")
 
     async def _listed(self, link: PcLink) -> None:
         """desk/* offers every tool any PC offers: a stock PC has fewer than a RigDesk PC, and refuses the ones it lacks."""
@@ -1282,7 +1280,7 @@ class Desks:
 
     async def _ended(self, held: Held, words: str) -> None:
         """An agent's session ended without its asking: it is sent nothing, and its next desk call's refusal gives these words."""
-        self._ended_why[(held.agent, held.graph)] = f"{words} (It ended at {_clock(now_ms())}.)"
+        self._ended_why[(held.agent, held.graph)] = f"Your session on {held.pc} ended at {_clock(now_ms())}: {words}"
 
     def ended_why(self, agent: str, graph: str) -> str | None:
         """Why this agent's last session ended without its asking, while it has not joined again."""
@@ -1609,7 +1607,7 @@ class Desks:
         self._resync(link)
         if replaced is not None and replaced.agent != agent:
             _LOG.info("rigdesk_session_ended", f"RigDesk {pc}: shared with {title}, so {replaced.title}'s session there ended", pc=pc)
-            await self._ended(replaced, f"RigDesk {pc}: the desktop was shared with {title}, so your session there ended.")
+            await self._ended(replaced, f"the desktop was shared with {title}.")
         return held
 
     def assigned_pcs(self, agent: str, graph: str) -> tuple[str, ...]:
@@ -1629,8 +1627,7 @@ class Desks:
             await self.leave(held)
         except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
             _LOG.warning("rigdesk_unassign_failed", f"RigDesk {held.pc}: ending the unassigned session failed: {failed}", pc=held.pc)
-        await self._ended(held, f"RigDesk {held.pc}: the operator took away your standing access to {held.pc}, so your session there ended. "
-                                "desk/request(pc, why) asks them again.")
+        await self._ended(held, f"the operator took away your standing grant to {held.pc}.")
 
     async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "", via: Literal["link", "assigned"] = "link",
                             denied: Callable[[], int | None] = lambda: None) -> Held:
@@ -1752,8 +1749,7 @@ class Desks:
             except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
                 _LOG.warning("rigdesk_idle_leave_failed", f"RigDesk {held.pc}: leaving the idle session failed: {failed}", pc=held.pc)
             _LOG.info("rigdesk_session_ended", f"RigDesk {held.pc}: {held.title} left after {IDLE_LEAVE_MS // 60_000} idle minutes", pc=held.pc)
-            await self._ended(held, f"RigDesk {held.pc}: you left {held.pc} after {IDLE_LEAVE_MS // 60_000} minutes without a desk call, "
-                                    "so other agents assigned to it can use it.")
+            await self._ended(held, f"you left it after {IDLE_LEAVE_MS // 60_000} minutes without a desk call, so other agents assigned to it can use it.")
 
     async def leave(self, held: Held) -> bool:
         if held.pc in self._adhoc:
@@ -2013,8 +2009,8 @@ class Desks:
         """The operator's Accept: the asked desk/connect dials out now, with the password held for it."""
         asked = self._asked.pop(ask, None)
         if asked is None:
-            raise DeskRefused(f"its password was dropped, as the request went unanswered for {CONNECT_ASK_S // 60} minutes or Rig restarted, so nothing was dialed; "
-                              "the agent can desk/connect again")
+            raise DeskRefused(f"nothing was dialed: Rig no longer holds the password for this desk/connect, as the request went unanswered for {CONNECT_ASK_S // 60} "
+                              "minutes or Rig restarted. The agent can desk/connect again.")
         if asked.expiry is not None:
             asked.expiry.cancel()
         return await self.connect(asked.target, asked.password, agent, graph, node, title, approved=True)
@@ -2159,8 +2155,8 @@ class Desks:
         if held is not None and why is not None:
             _LOG.info("rigdesk_session_ended", f"RigDesk {name}: {held.title}'s ad-hoc session ended: {why}", pc=name)
             again = ("An invite works once: the person at the device can make a new one." if kept.invited
-                     else "desk/connect with its ID and a password joins it again; a one-time password works for one session only.")
-            await self._ended(held, f"RigDesk {name}: your session on RustDesk ID {kept.id} ended: {why}. {again}")
+                     else "A one-time password works for one session only.")
+            await self._ended(held, f"{why}. {again}")
 
     async def _adhoc_idle(self) -> None:
         cutoff = now_ms() - adhoc.IDLE_MS
@@ -2182,7 +2178,7 @@ class Desks:
         if self._adhoc_lost:
             await asyncio.to_thread(self._write_state)
         for held in self._adhoc_lost:
-            await self._ended(held, f"RigDesk {held.pc}: Rig restarted, so your ad-hoc session there ended. desk/connect with its ID and a password joins it again.")
+            await self._ended(held, "Rig restarted, which ends every session joined with desk/connect.")
         self._adhoc_lost = []
 
 
