@@ -1550,6 +1550,82 @@ def test_rigs_accept_with_a_refused_password_keeps_a_phones_one_tap_notification
     asyncio.run(run())
 
 
+def test_an_assigned_agents_desk_join_on_a_phone_rig_cannot_log_in_to_asks_the_person_on_the_phone_and_no_one_in_rig() -> None:
+    """The standing grant stands in for the operator's yes, not the person's: desk/join(pc) on a phone whose sharing is off sends the phone its
+    one-tap request instead of refusing; Accept there joins the agent through its grant, Deny is told. A PC no phone links to is refused as before."""
+    from rigdesk import JoinInput, _join, prompts
+    seat = SeatId(GraphName("g"), NodeId("n"))
+
+    async def caller_title() -> str:
+        return "Builder"
+    call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1", seat=seat)), graph="g", node="n",
+                           kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"), refused=lambda code, words, *_: {"refused": code, "said": words})
+
+    async def round(said: str) -> tuple[_StockBridge, _Assistant, Desks, list, dict]:
+        told: list = []
+        with tempfile.TemporaryDirectory() as state:
+            bridge, assistant = _StockBridge("down"), _Assistant()
+            assistant.offer()
+            desks, runner = await _stock_desks(state, bridge, _Asks(), told, login_id=MOTO_ID)
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                await desks.assign("phone", "agent:a1")
+                answer = await _join(desks, call, JoinInput(pc="phone"))  # type: ignore[arg-type]
+                assert answer["joined"] is False and "is asked on the phone" in answer["said"] and "Can't reach phone" in answer["said"], answer
+                await _until(lambda: assistant.shown)
+                again = await _join(desks, call, JoinInput(pc="phone"))  # type: ignore[arg-type]
+                assert again["joined"] is False and again["ask"] == answer["ask"] and "still waiting on the person" in again["said"], again
+                other = SimpleNamespace(**{**vars(call), "contract": SimpleNamespace(place=SimpleNamespace(agent="a2", seat=SeatId(GraphName("g"), NodeId("n2"))))})
+                await desks.assign("phone", "agent:a2")
+                refused = await _join(desks, other, JoinInput(pc="phone"))  # type: ignore[arg-type]
+                assert refused.get("refused") and "being asked for Builder" in refused["said"], refused
+                await asyncio.sleep(0.05)
+                assert len(assistant.shown) == 1 and list(desks.prompts) == [answer["ask"]], (assistant.shown, list(desks.prompts))
+                shown = assistant.shown[0]
+                assert shown["ask"] == answer["ask"] and shown["agent_id"] == "a1" and shown["operator"] == "Arian", shown
+                assert await prompts.phone_said(desks.host, _said(answer["ask"], shown["nonce"], said)) == "taken"  # type: ignore[arg-type]
+                if said == "ready":
+                    await _until(lambda: "/offer" in bridge.paths())
+                    assert next(body for path, body in bridge.posted if path == "/offer")["accepted"] is True
+                    bridge.allowed = True
+                    await desks._event(desks._pcs["phone"], {"type": "offer", "ask": answer["ask"], "nonce": shown["nonce"], "answer": "allow"})
+                await _until(lambda: told and assistant.ended)
+                held = desks.held_on("phone")
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+        return bridge, assistant, held, told, answer
+
+    async def unlinked() -> dict:
+        with tempfile.TemporaryDirectory() as state:
+            bridge, assistant = _StockBridge("down"), _Assistant()
+            assistant.offer()
+            desks, runner = await _stock_desks(state, bridge, _Asks(), [])
+            try:
+                await desks.assign("phone", "agent:a1")
+                answer = await _join(desks, call, JoinInput(pc="phone"))  # type: ignore[arg-type]
+            finally:
+                await desks._http.close()
+                await runner.cleanup()
+            assert assistant.shown == [] and desks.prompts == {}, assistant.shown
+            return answer
+
+    async def run() -> None:
+        _bridge, assistant, held, told, _answer = await round("ready")
+        assert held is not None and held.agent == "a1" and held.via == "assigned", held
+        assert len(told) == 1 and "allowed you on the device, so you joined phone" in told[0][1], told
+        bridge, assistant, held, told, _answer = await round("deny")
+        assert held is None and "/offer" not in bridge.paths() and "/claim" not in bridge.paths(), bridge.paths()
+        assert len(told) == 1 and "did not join phone" in told[0][1] and "assigned to you" in told[0][1] and "desk/join asks again" in told[0][1], told
+        assert "operator" not in told[0][1], told
+        refused = await unlinked()
+        assert refused.get("refused") and "Can't reach phone" in refused["said"], refused
+
+    asyncio.run(run())
+
+
 def test_an_accept_with_no_login_and_no_prompt_on_the_device_says_why_and_joins_nothing() -> None:
     from rigdesk import _request_confirmed
     from core.sdk.model import Refused

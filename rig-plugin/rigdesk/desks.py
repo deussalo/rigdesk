@@ -428,6 +428,14 @@ class ConnectAsk(Exception):
         self.target, self.where, self.tried = target, where, tried
 
 
+class PhoneAsk(Exception):
+    """desk/join(pc) by an agent assigned a phone Rig Assistant links to, which Rig could not log in to: its standing grant stands in for the
+    operator's yes, not the person's, so the person is asked on the phone."""
+    def __init__(self, pc: str, unlogged: NotLoggedIn) -> None:
+        super().__init__(pc)
+        self.pc, self.unlogged = pc, unlogged
+
+
 class InviteAsk(Exception):
     """desk/join was given the invite a PC's person made, on a PC where an agent holds a shell grant: claiming it waits for the operator's Accept."""
     def __init__(self, pc: str) -> None:
@@ -1678,7 +1686,7 @@ class Desks:
         if denied_ms is not None:
             raise DeniedByPerson(f"denied by the person at {pc} at {_clock(denied_ms)}: they dismissed the request on the device before Rig's login succeeded")
         minted = await self.viewer(pc, "mint")
-        return await self.join(minted["link"], agent, graph, node, title)
+        return await self.join(minted["link"], agent, graph, node, title, via=via)
 
     async def log_in(self, pc: str, signs_for: dict[str, Any]) -> None:
         """A RustDesk login to a stock PC that has actually succeeded, before its agent is told it joined: on the connection the person there allowed,
@@ -1767,7 +1775,13 @@ class Desks:
         self._refuse_if_invited(pc)
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via="assigned")
-        await self.log_in(pc, {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ""})
+        try:
+            await self.log_in(pc, {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ""})
+        except NotLoggedIn as unlogged:
+            tap = await self.one_tap(pc)
+            if tap is None or tap.state == "no_link_match":
+                raise
+            raise PhoneAsk(pc, unlogged) from unlogged
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title, via="assigned")
 
