@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
@@ -16,7 +15,7 @@ import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 from core.sdk.attention import Confirmed, Then, Titled
-from core.sdk.base import as_object, JsonObject, new_id, now_ms, replace_file, View
+from core.sdk.base import as_object, JsonObject, new_id, now_ms, View
 from core.sdk.contrib import ContributionDescriptor, RouteContribution, ToolBranch
 from core.sdk.host import Live, mcp_capability, plugin_capability, PluginHost, provider, Provision, RigReach
 from core.sdk.model import AgentId, Choice, Choices, GraphName, NodeId, PluginCode, Refused, RefusedOutcome, SeatId
@@ -26,7 +25,7 @@ from core.sdk.tools import (Answer, BranchTool, Call, gloss_of, ImageContent, Se
                             ToolInput)
 
 from . import adhoc, prompts
-from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, DeniedByPerson, Desks, DeskRefused, Grantee, InviteAsk, Held, NotLoggedIn, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
+from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, DeniedByPerson, Desks, DeskRefused, Grantee, InviteAsk, Held, NotLoggedIn, PcEntry, PcServer, RigdeskSettings, ShellLevel, SECRETS, failure, secret_files
 from .health import figures_json, series
 from .shots import inline
 from .desks import PcName as DeskName
@@ -1029,8 +1028,6 @@ async def post_screenshot(request: Request[ScreenshotParams]) -> Screenshot | Re
     return Screenshot(mime="image/png", data=base64.b64encode(png).decode("ascii"), taken_ms=now_ms())
 
 
-TOKENS = Path("~/.rig/rigdesk")
-
 type PcName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")]
 type Token = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{32,128}$")]
 
@@ -1051,20 +1048,13 @@ class TokenKept(View):
                                         "in plugins.rigdesk.pcs.")
 
 
-def _kept(path: Path, token: str) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.exists():
-        os.chmod(path, 0o600)
-    replace_file(path, token.encode(), new_mode=0o600)
-
-
 @endpoint(TokenParams, OPERATOR)
 async def post_token(request: Request[TokenParams]) -> TokenKept:
     """Keeps a PC's agent-API token, or with lane a Linux PC's management-lane token, the one its install line sets, in a 0600 file of its own; a second call for
     the same PC replaces it, as rerunning the line rotates it."""
     body = request.params.body
-    path = TOKENS / f"{body.pc}.lane.token" if body.lane else TOKENS / f"{body.pc}.token"
-    await asyncio.to_thread(_kept, path.expanduser(), body.token)
+    path = SECRETS / f"{body.pc}.lane.token" if body.lane else SECRETS / f"{body.pc}.token"
+    await request.host().write_secret(path.expanduser(), body.token)
     return TokenKept(token_file=str(path))
 
 
@@ -1145,6 +1135,7 @@ CONTRIBUTION = ContributionDescriptor(
     tool_branch=ToolBranch(_tools, _why_missing, _capabilities, _reach, _listing, _decide),
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN, SHELL_NOT_ALLOWED: HTTPStatus.FORBIDDEN,
                    SYSTEM_NOT_GRANTED: HTTPStatus.FORBIDDEN, **{f"{ID}.{code}": status for code, status in PC_SHELL_CODES.items()}},
+    secret_files=lambda host: secret_files(host.settings(RigdeskSettings)),
     provisions=(provider(REQUEST_CONFIRMED, _request_confirmed), provider(CONNECT_CONFIRMED, _connect_confirmed), provider(INVITE_CONFIRMED, _invite_confirmed)),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),

@@ -251,6 +251,15 @@ async def _refuse_redirect(_session: aiohttp.ClientSession, _context: object, re
     raise RedirectRefused(f"{redirect.url.origin()} answered with a redirect (HTTP {status}); a request carrying its token never follows one, so nothing went to the other address")
 
 
+def secret_files(settings: RigdeskSettings) -> tuple[Path, ...]:
+    """Where RigDesk keeps its secrets, for Rig's vault: SECRETS, every file in it, and each secret file the settings name elsewhere. The vault is
+    the one writer of each, and masks every one's text wherever Rig writes it down."""
+    named = [file for pc in settings.pcs.values() for file in (pc.token_file, pc.lane_token_file)]
+    named += [file for pc in settings.pcs.values() if (stock := pc.stock) is not None
+              for file in (stock.password_file, stock.viewer_password_file, *(server.token_file for server in stock.mcp_servers))]
+    return (SECRETS.expanduser(), *dict.fromkeys(Path(file).expanduser() for file in named if file is not None))
+
+
 def token_session() -> aiohttp.ClientSession:
     """The session for every request to a PC or bridge: each carries a token, in Authorization or X-Desk-Session, so none follows a redirect."""
     refusing = aiohttp.TraceConfig()
@@ -797,11 +806,10 @@ class Desks:
                 return port
         raise DeskRefused(f"no loopback port in {STOCK_PORTS.start}-{STOCK_PORTS.stop - 1} is free for its rigdesk-bridge")
 
-    def _keep_secret(self, name: str, kind: str, value: str) -> str:
+    async def _keep_secret(self, name: str, kind: str, value: str) -> str:
+        """value kept in SECRETS through Rig's vault, which writes it 0600 and masks it from then on: the path settings name it by."""
         path = SECRETS / f"{name}.{kind}"
-        real = path.expanduser()
-        real.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        replace_file(real, value.encode(), new_mode=0o600)
+        await self.host.write_secret(path.expanduser(), value)
         return str(path)
 
     async def added(self, name: str, rustdesk_id: str, password: str, client: str) -> DeskPc:
@@ -817,22 +825,15 @@ class Desks:
             raise DeskRefused(f"RustDesk ID {rustdesk_id} is already set up as {same}")
         taken = {urlsplit(pc.url).port for pc in settings.pcs.values()} | {pc.stock.viewer_port for pc in settings.pcs.values() if pc.stock is not None}
         port = await asyncio.to_thread(self._first_free, taken)
-        password_file = await asyncio.to_thread(self._keep_secret, name, "password", password)
-        token_file = await asyncio.to_thread(self._keep_secret, name, "token", secrets.token_urlsafe(32))
+        password_file = await self._keep_secret(name, "password", password)
+        token_file = await self._keep_secret(name, "token", secrets.token_urlsafe(32))
         return DeskPc(url=f"http://127.0.0.1:{port}", token_file=token_file, client=client, stock=StockRemote(id=rustdesk_id, password_file=password_file))
-
-    @staticmethod
-    def _replaced_secret(path: Path, value: str) -> None:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if path.exists():
-            path.chmod(0o600)
-        replace_file(path, value.encode(), new_mode=0o600)
 
     async def _wanted_password_saved(self, link: PcLink, path: Path, saved: str | None = None) -> str | None:
         """Writes the newest password asked for until no newer one is waiting, and returns what the file now holds from this run; None if nothing was waiting."""
         while (wanted := link.password_wanted) is not None:
             if wanted != saved:
-                await asyncio.to_thread(self._replaced_secret, path, wanted)
+                await self.host.write_secret(path, wanted)
                 saved = wanted
             if link.password_wanted == wanted:
                 link.password_wanted = None
@@ -2042,14 +2043,14 @@ class Desks:
         secret = f"adhoc-{target.id}"
         if isinstance(password, Invited):
             claim = json.dumps({"grant": password.grant, "secret": password.secret, "agent_id": agent, "agent_title": title or agent})
-            password_file = Path(await asyncio.to_thread(self._keep_secret, secret, "invite", claim)).expanduser()
+            password_file = Path(await self._keep_secret(secret, "invite", claim)).expanduser()
             login = ("--invite-file", str(password_file), "--pair-key-file", str((SECRETS / PAIR_KEY).expanduser()))
         else:
-            password_file = Path(await asyncio.to_thread(self._keep_secret, secret, "password", password)).expanduser()
+            password_file = Path(await self._keep_secret(secret, "password", password)).expanduser()
             login = ("--password-file", str(password_file))
-        token_file = Path(await asyncio.to_thread(self._keep_secret, secret, "token", secrets.token_urlsafe(32))).expanduser()
+        token_file = Path(await self._keep_secret(secret, "token", secrets.token_urlsafe(32))).expanduser()
         server = settings.connect_server
-        key_file = Path(await asyncio.to_thread(self._keep_secret, secret, "key", target.key or (server.key if server is not None else adhoc.PUBLIC_KEY))).expanduser()
+        key_file = Path(await self._keep_secret(secret, "key", target.key or (server.key if server is not None else adhoc.PUBLIC_KEY))).expanduser()
         kept.files = (password_file, token_file, key_file)
         busy = {pc: held.title for pc, held in self._sessions.items() if pc in settings.pcs and held.agent != agent}
         routes = [self._invite_route(target, settings, busy)] if isinstance(password, Invited) else await self._adhoc_routes(target, settings, key_file, set(busy))

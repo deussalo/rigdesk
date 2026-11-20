@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from core.base import now_ms
+from core.base import now_ms, replace_private
 from core.model import GraphName, NodeId, SeatId
 from rigdesk.desks import PERSON_ENDED, DeskPc, DeskRefused, Desks, Held, PcLink, RedirectRefused, pc_of_link, token_session, words_of
 from rigdesk.health import Sample
@@ -603,7 +603,7 @@ def test_connect_dials_a_tailnet_peer_directly_only_once_the_operator_approves_a
             fake.write_text(f'#!/bin/sh\necho "$*" >> {dialed}\necho "refused: Wrong Password"\nexit 3\n')
             fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             settings = RigdeskSettings(pcs={}, bridge_bin=str(fake))
-            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None, write_secret=_vault_writes()))  # type: ignore[arg-type]
             names = {"good.tail1234.ts.net": ["100.70.1.2"], "mixed.tail1234.ts.net": ["100.70.1.3", "8.8.8.8"], "public.tail1234.ts.net": ["8.8.8.8"], "gone.tail1234.ts.net": []}
 
             async def lookup(name: str) -> list[str]:
@@ -658,7 +658,7 @@ def test_connect_dials_a_pc_not_ours_only_once_the_operator_approves_and_leaves_
             fake.write_text(f'#!/bin/sh\necho "$*" >> {dialed}\ncase "$*" in *--login-id*) echo "refused: Offline";; *) echo "refused: Wrong Password";; esac\nexit 3\n')
             fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             settings = RigdeskSettings(pcs={"dell": DeskPc(url="https://dell.tail1234.ts.net", token_file="/dev/null")}, bridge_bin=str(fake))
-            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None, write_secret=_vault_writes()))  # type: ignore[arg-type]
             secrets_dir, answers = desks_module.SECRETS, adhoc.answers
             desks_module.SECRETS = Path(state) / "secrets"
 
@@ -719,7 +719,7 @@ exit 3
             fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             server = IdServer(host="rd.example.com", key_file=str(Path(state) / "hbbs.pub"))
             settings = RigdeskSettings(pcs={}, bridge_bin=str(fake), id_server=server)
-            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            desks = Desks(SimpleNamespace(state_dir=Path(state), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None, write_secret=_vault_writes()))  # type: ignore[arg-type]
             secrets_dir = desks_module.SECRETS
             desks_module.SECRETS = Path(state) / "secrets"
             phone = await asyncio.start_server(lambda _reader, writer: writer.close(), "127.0.0.1", 0)
@@ -783,7 +783,7 @@ def _invite_tools(state: Path, said: str, settings: dict, first: str = "") -> tu
     async def caller_title() -> str:
         return "Builder"
     shaped = RigdeskSettings(bridge_bin=str(fake), **settings)
-    desks = Desks(SimpleNamespace(state_dir=state, settings=lambda _shape: shaped, report=lambda *_: None, forget=lambda *_: None, confirm=confirm))  # type: ignore[arg-type]
+    desks = Desks(SimpleNamespace(state_dir=state, settings=lambda _shape: shaped, report=lambda *_: None, forget=lambda *_: None, confirm=confirm, write_secret=_vault_writes()))  # type: ignore[arg-type]
     place = SimpleNamespace(agent="a1", seat=SeatId(GraphName("g"), NodeId("n")))
     call = SimpleNamespace(contract=SimpleNamespace(place=place), graph="g", node="n", kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"),
                            refused=lambda code, words, *_: {"refused": code, "said": words})
@@ -1055,6 +1055,19 @@ async def _until(check, limit_s: float = 5.0) -> None:
     raise AssertionError("never happened")
 
 
+def _vault_writes(slow_first: bool = False):
+    """PluginHost.write_secret as Rig's vault does it, whole and 0600; slow_first holds the first write a while, as a slow disk would."""
+    writes: list[str] = []
+
+    async def write_secret(path: Path, value: str) -> None:
+        writes.append(value)
+        if slow_first and len(writes) == 1:
+            await asyncio.to_thread(time.sleep, 0.3)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        await asyncio.to_thread(replace_private, path, value.encode())
+    return write_secret
+
+
 def test_passwords_saved_at_once_start_one_bridge_and_the_newest_one_stays() -> None:
     from rigdesk.desks import StockRemote
 
@@ -1070,15 +1083,7 @@ def test_passwords_saved_at_once_start_one_bridge_and_the_newest_one_stays() -> 
             stock = StockRemote(peer="moto-g57.tail1234.ts.net", password_file=str(password))
             link = desks._pcs["moto-g57"] = PcLink("moto-g57", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
             link.remote = asyncio.get_running_loop().create_task(desks._remote(link, stock))
-            write = desks._replaced_secret
-            writes: list[str] = []
-
-            def first_write_is_slow(path: Path, value: str) -> None:
-                writes.append(value)
-                if len(writes) == 1:
-                    time.sleep(0.3)
-                write(path, value)
-            desks._replaced_secret = first_write_is_slow  # type: ignore[method-assign]
+            desks.host.write_secret = _vault_writes(slow_first=True)
 
             async def save_after_the_first_began() -> None:
                 await asyncio.sleep(0.05)
@@ -1112,15 +1117,7 @@ def test_a_cancelled_password_save_still_ends_with_the_newest_password_and_a_run
             desks._bridge_bin = str(bridge)
             stock = StockRemote(peer="moto-g57.tail1234.ts.net", password_file=str(password))
             link = desks._pcs["moto-g57"] = PcLink("moto-g57", DeskPc(url="http://127.0.0.1:21120", token_file="/dev/null", stock=stock))
-            write = desks._replaced_secret
-            writes: list[str] = []
-
-            def first_write_is_slow(path: Path, value: str) -> None:
-                writes.append(value)
-                if len(writes) == 1:
-                    time.sleep(0.3)
-                write(path, value)
-            desks._replaced_secret = first_write_is_slow  # type: ignore[method-assign]
+            desks.host.write_secret = _vault_writes(slow_first=True)
 
             async def slow_to_stop() -> None:
                 try:
@@ -1161,7 +1158,7 @@ def test_the_operator_replaces_a_stock_pcs_saved_password_and_its_bridge_logs_in
 
     async def run() -> None:
         with tempfile.TemporaryDirectory() as state:
-            desks = Desks(SimpleNamespace(state_dir=Path(state), report=lambda *_: None))  # type: ignore[arg-type]
+            desks = Desks(SimpleNamespace(state_dir=Path(state), report=lambda *_: None, write_secret=_vault_writes()))  # type: ignore[arg-type]
             told: list[str] = []
 
             async def tell(_held: Held, words: str, _key: str, _timing: str = "steer") -> bool:
@@ -1593,7 +1590,7 @@ def test_an_invite_to_a_pc_where_an_agent_may_run_commands_waits_for_the_operato
             token.write_text("t" * 32)
             pcs = {name: DeskPc(url=f"http://127.0.0.1:{port}", token_file=str(token)) for name in ("front", "back")}
             settings = RigdeskSettings(pcs=pcs)
-            desks = Desks(SimpleNamespace(state_dir=Path(state), docs=_Docs(), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
+            desks = Desks(SimpleNamespace(state_dir=Path(state), docs=_Docs(), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None, write_secret=_vault_writes()))  # type: ignore[arg-type]
             desks._pcs.update({name: PcLink(name, spec) for name, spec in pcs.items()})
             desks._resync = lambda *_: None  # type: ignore[method-assign]
             desks._http = ClientSession()
