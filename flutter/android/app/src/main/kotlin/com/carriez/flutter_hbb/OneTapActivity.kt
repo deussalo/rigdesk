@@ -18,7 +18,7 @@ import ffi.FFI
 import java.util.Collections
 
 /**
- * RigDesk: one tap. The person's Accept on Rig Assistant's notification lands here. The first time only, it offers the switch for
+ * RigDesk: one tap. The person's Accept on Rig Assistant's notification lands here, or the operator's Accept in Rig does, at once. The first time only, it offers the switch for
  * tapping and typing; then Android's own Start now, unless sharing already runs; then the service. Once the phone listens, its
  * Accept is filed for that ask (base::one_tap) and Rig is told the phone is ready, so Rig's knock for that ask comes in with no
  * second Allow. Transparent: the person sees only those screens.
@@ -129,7 +129,7 @@ object OneTap {
                 !MainService.isReady -> Join.said(ctx, asked.ask, "failed", "screen sharing did not start within ${LISTEN_WAIT_MS / 1000} s")
                 !FFI.rigListening() -> Join.said(ctx, asked.ask, "failed", "RigDesk is not listening for Rig: turn on direct IP access in its settings")
                 else -> {
-                    val refused = FFI.rigOneTapAccept(asked.ask, asked.agentId, asked.agentTitle, asked.graph, asked.operator, asked.leftMs())
+                    val refused = FFI.rigOneTapAccept(asked.ask, asked.agentId, asked.agentTitle, asked.graph, asked.operator, asked.leftMs(), asked.rigAccepted)
                     if (refused.isEmpty()) {
                         accepted.add(asked.ask)
                         Join.said(ctx, asked.ask, "ready")

@@ -179,6 +179,8 @@ pub enum JoinedBy {
     Invite,
     /// Rig's saved password, signed with the ask the operator accepted in Rig.
     RigAccept,
+    /// The person's Start now, which the operator's Accept in Rig raised on the phone (`one_tap`).
+    RigAcceptStartNow,
     /// Rig's saved password, signed with no ask: unattended access, nobody asked.
     Unattended,
 }
@@ -202,6 +204,7 @@ impl Joined {
             JoinedBy::Allowed => "your Allow on this phone",
             JoinedBy::Invite => "this phone's invite",
             JoinedBy::RigAccept => "your Rig Accept, saved password",
+            JoinedBy::RigAcceptStartNow => "your Rig Accept, then your Start now",
             JoinedBy::Unattended => "saved password, nobody asked",
         }
     }
@@ -367,12 +370,12 @@ mod tests {
         left(9001);
         assert_eq!(joined_how(9001), None);
         assert!(!proved(9001));
-        let words = [JoinedBy::OneTap, JoinedBy::Allowed, JoinedBy::Invite, JoinedBy::Unattended]
+        let words = [JoinedBy::OneTap, JoinedBy::Allowed, JoinedBy::Invite, JoinedBy::RigAcceptStartNow, JoinedBy::Unattended]
             .iter()
             .copied()
             .map(|by| Joined { name: "B".into(), by }.how())
             .collect::<Vec<_>>();
-        assert_eq!(words, vec!["your Accept on this phone", "your Allow on this phone", "this phone's invite", "saved password, nobody asked"]);
+        assert_eq!(words, vec!["your Accept on this phone", "your Allow on this phone", "this phone's invite", "your Rig Accept, then your Start now", "saved password, nobody asked"]);
     }
 
     #[test]

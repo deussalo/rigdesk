@@ -1513,7 +1513,7 @@ def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_suc
     asyncio.run(run())
 
 
-def test_rigs_accept_with_a_refused_password_keeps_a_phones_one_tap_notification_up_and_its_accept_then_joins_the_agent() -> None:
+def test_rigs_accept_with_a_refused_password_raises_start_now_on_a_phone_and_its_start_now_joins_the_agent() -> None:
     from rigdesk import _request_confirmed, prompts
     seat, told = SeatId(GraphName("g"), NodeId("n")), []
 
@@ -1527,11 +1527,13 @@ def test_rigs_accept_with_a_refused_password_keeps_a_phones_one_tap_notification
                 prompts.start(desks, "phone", "desk_1", seat, "a1", "g", "Builder")
                 await _until(lambda: assistant.shown)
                 nonce = assistant.shown[0]["nonce"]
+                assert assistant.shown[0]["rig_accepted"] is False
                 asks.open.discard("desk_1")
                 said = await _request_confirmed(desks.host, _accepted("desk_1"))  # type: ignore[arg-type]
-                assert "must Allow your request on the device" in said, said
+                assert "the phone now asks its person to start sharing with Android's Start now" in said, said
+                assert len(assistant.shown) == 2 and assistant.shown[1]["rig_accepted"] is True and assistant.shown[1]["nonce"] == nonce, assistant.shown
                 await asyncio.sleep(0.1)
-                assert assistant.ended == [] and "desk_1" in desks.prompts, "the notification went before any login succeeded"
+                assert assistant.ended == [] and "desk_1" in desks.prompts, "the request went before any login succeeded"
                 assert "/offer" not in bridge.paths() and desks.held_on("phone") is None, bridge.paths()
                 assert await prompts.phone_said(desks.host, _said("desk_1", nonce, "ready")) == "taken"  # type: ignore[arg-type]
                 await _until(lambda: "/offer" in bridge.paths())
@@ -1544,8 +1546,48 @@ def test_rigs_accept_with_a_refused_password_keeps_a_phones_one_tap_notification
                 await prompts.end_all(desks)
                 await desks._http.close()
                 await runner.cleanup()
-            assert len(told) == 1 and "allowed you on the device, so you joined phone over the connection they allowed" in told[0][1], told
+            assert len(told) == 1 and "pressed Android's Start now on the operator's Accept, so you joined phone over the connection they allowed" in told[0][1], told
             assert desks.held_on("phone") is not None and assistant.ended == ["desk_1"]
+
+    asyncio.run(run())
+
+
+def test_rigs_accept_that_cannot_reach_the_phone_keeps_its_notification_up_and_a_cancelled_start_now_is_the_persons_no() -> None:
+    from rigdesk import _request_confirmed, prompts
+    seat, told = SeatId(GraphName("g"), NodeId("n")), []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks, bridge, assistant = _Asks("desk_1", "desk_2"), _StockBridge("stale"), _Assistant()
+            assistant.offer()
+            desks, runner = await _stock_desks(state, bridge, asks, told, assistant="moto")
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                prompts.start(desks, "phone", "desk_1", seat, "a1", "g", "Builder")
+                await _until(lambda: assistant.shown)
+                assistant.up = False
+                asks.open.discard("desk_1")
+                said = await _request_confirmed(desks.host, _accepted("desk_1"))  # type: ignore[arg-type]
+                assert "must Allow your request on the device" in said, said
+                assert len(assistant.shown) == 1 and "desk_1" in desks.prompts, "the link down: the notification waits as before"
+                await prompts.end_all(desks)
+
+                assistant.up = True
+                prompts.start(desks, "phone", "desk_2", seat, "a1", "g", "Builder")
+                await _until(lambda: len(assistant.shown) == 2)
+                nonce = assistant.shown[1]["nonce"]
+                asks.open.discard("desk_2")
+                said = await _request_confirmed(desks.host, _accepted("desk_2"))  # type: ignore[arg-type]
+                assert "Start now" in said and assistant.shown[2]["rig_accepted"] is True, said
+                await prompts.phone_said(desks.host, _said("desk_2", nonce, "deny", reason="the person cancelled Android's Start now"))  # type: ignore[arg-type]
+                await _until(lambda: told)
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            assert "/offer" not in bridge.paths() and desks.held_on("phone") is None, bridge.paths()
+            assert len(told) == 1 and "denied by the person" in told[0][1] and "did not join phone" in told[0][1], told
 
     asyncio.run(run())
 

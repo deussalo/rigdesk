@@ -14,7 +14,11 @@ One tap: a phone named in Rig Assistant (stock.assistant) is asked through that 
 screen sharing off. Its Accept starts sharing and the phone says ready, with the ask and nonce; only then is the bridge sent the offer, marked
 accepted, so its knock names the ask under Rig's signature and the phone lets it in on that Accept with no second Allow. Deny, a failure, the
 operator's Deny, a login on the operator's Accept, a withdrawal and the lapse each take the notification away; an unanswered one is shown again, and after the last lapse the
-operator's ask is withdrawn and the agent told. With the phone's link down the bridge's knock asks as before."""
+operator's ask is withdrawn and the agent told. With the phone's link down the bridge's knock asks as before.
+
+The operator's Accept in Rig, when Rig's saved password finds no login (sharing off, say), sends the phone the request again marked rig_accepted:
+the phone raises Android's Start now at once, with no notification to press first, and the person's Start now is their yes, which goes on as
+the notification's Accept does. If the phone cannot raise it, it posts the notification instead; with the link down the device's prompt waits as before."""
 from __future__ import annotations
 
 import asyncio
@@ -56,6 +60,8 @@ class JoinAsked(TypedDict):
     graph: str
     operator: str
     lapse_s: int
+    # The operator accepted in Rig already: the phone raises Android's Start now at once.
+    rig_accepted: bool
 
 
 class JoinEnded(TypedDict):
@@ -98,6 +104,8 @@ class Prompt:
     # One tap: what the phone said of its notification, and whether its person accepted, so the bridge's offer names the ask.
     phone_said: asyncio.Future[PhoneJoinSaid] | None = None
     accepted: bool = False
+    # The operator's Accept raised Start now on the phone, so the person's yes there is their Start now.
+    rig_accepted: bool = False
 
 
 def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str, then: JsonObject | None = None) -> None:
@@ -116,6 +124,27 @@ def operator_said(desks: Desks, ask: str) -> Prompt | None:
         return None
     prompt.operator_said, prompt.password = True, "trying"
     return prompt
+
+
+async def raised_on_phone(desks: Desks, prompt: Prompt | None, password: Literal["refused", "none"]) -> bool:
+    """The operator accepted and no login succeeded: a phone whose one-tap request is open is asked to raise Android's Start now at once.
+    False when there is none, or Rig Assistant could not reach it, so the device's prompt waits as before."""
+    phone = None if prompt is None else desks.assistant_of(prompt.pc)
+    if prompt is None or phone is None or prompt.phone_said is None or prompt.phone_said.done():
+        return False
+    try:
+        await PROVIDED.ask(JOIN_REQUEST, _asked(prompt, phone, await desks.operator_name(), rig_accepted=True))
+    except Refused as unreached:
+        _LOG.info("rigdesk_start_now_unraised", f"RigDesk {prompt.pc}: Rig Assistant could not raise Start now for {prompt.ask} on {phone} ({unreached.rendered}); "
+                  "its notification waits", pc=prompt.pc)
+        return False
+    prompt.rig_accepted, prompt.password = True, password
+    return True
+
+
+def _asked(prompt: Prompt, phone: str, operator: str, rig_accepted: bool = False) -> JoinAsked:
+    return JoinAsked(phone=phone, ask=prompt.ask, nonce=prompt.nonce, agent_id=prompt.agent, agent_title=prompt.title, graph=prompt.graph,
+                     operator=operator, lapse_s=ONE_TAP_LAPSE_S, rig_accepted=rig_accepted)
 
 
 def denied_by_person(prompt: Prompt | None) -> int | None:
@@ -218,10 +247,8 @@ async def _one_tap(desks: Desks, prompt: Prompt, phone: str) -> str:
     """The request as the phone's one notification; its Accept, once the phone is ready, sends the bridge's offer marked accepted, whose answer
     is this one's. Said as the PC's offer is: allow, deny, lapsed, or why it could not be shown. The notification goes when this ends."""
     prompt.phone_said = asyncio.get_running_loop().create_future()
-    asked = JoinAsked(phone=phone, ask=prompt.ask, nonce=prompt.nonce, agent_id=prompt.agent, agent_title=prompt.title, graph=prompt.graph,
-                      operator=await desks.operator_name(), lapse_s=ONE_TAP_LAPSE_S)
     try:
-        await PROVIDED.ask(JOIN_REQUEST, asked)
+        await PROVIDED.ask(JOIN_REQUEST, _asked(prompt, phone, await desks.operator_name()))
     except Refused as unreached:
         _LOG.info("rigdesk_one_tap_unreached", f"RigDesk {prompt.pc}: Rig Assistant could not show {prompt.ask} on {phone} ({unreached.rendered}); the bridge's knock asks instead",
                   pc=prompt.pc)
@@ -341,7 +368,8 @@ async def _answered_after_accept(desks: Desks, prompt: Prompt, said: str) -> Non
                 return  # the operator's Accept logged in meanwhile, and said so
             words = f"RigDesk: the person at {pc} allowed you on the device, but you did not join {pc}: {failed}. desk/request asks again."
         else:
-            words = (f"RigDesk: the person at {pc} allowed you on the device, so you joined {pc} over the connection they allowed, with no password. "
+            how = "pressed Android's Start now on the operator's Accept" if prompt.rig_accepted else "allowed you on the device"
+            words = (f"RigDesk: the person at {pc} {how}, so you joined {pc} over the connection they allowed, with no password. "
                      "Its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there.")
     await desks.tell_seat(pc, prompt.agent, prompt.seat, words, f"prompt:{prompt.ask}")
 

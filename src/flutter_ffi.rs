@@ -3201,7 +3201,8 @@ pub mod server_side {
         jboolean::from(base::rig_knock::proved(conn_id))
     }
 
-    /// RigDesk: the person tapped Accept on Rig Assistant's notification for this request (base::one_tap). Answers empty
+    /// RigDesk: the person tapped Accept on Rig Assistant's notification for this request, or Start now on the operator's
+    /// Accept (on_rig_accept) (base::one_tap). Answers empty
     /// when it was taken, else why not. It counts for nothing while anyone controls this phone, since they could have tapped it.
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_rigOneTapAccept(
@@ -3213,6 +3214,7 @@ pub mod server_side {
         graph: JString,
         operator: JString,
         lapse_ms: jni::sys::jlong,
+        on_rig_accept: jboolean,
     ) -> jstring {
         let mut env = env;
         let mut text = |s: &JString| env.get_string(s).map(String::from).unwrap_or_default();
@@ -3223,6 +3225,7 @@ pub mod server_side {
             graph: text(&graph),
             operator: text(&operator),
             lapse_ms: lapse_ms.max(0) as u64,
+            yes: if on_rig_accept != 0 { base::one_tap::Yes::StartNowOnRigAccept } else { base::one_tap::Yes::Accept },
         };
         let controlled = crate::server::AUTHED_CONNS
             .lock()

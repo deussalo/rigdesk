@@ -495,6 +495,11 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
             except NotLoggedIn as unlogged:
                 if prompts.denied_by_person(device) is not None:
                     return f"The operator accepted, but you did not join {given['pc']}: {unlogged}, and the person there dismissed your request on the device."
+                if await prompts.raised_on_phone(desks, device, unlogged.password):
+                    kept = True
+                    return (f"The operator accepted, but you have not joined {given['pc']} yet: {unlogged}, so the phone now asks its person to start "
+                            "sharing with Android's Start now. Nothing is joined until they press it; your next input says when the session is up, "
+                            "or that they cancelled it or it lapsed.")
                 said = prompts.waiting(desks, device, given["pc"], str(unlogged), unlogged.password)
                 kept = unlogged.password != "unreached"
                 return said

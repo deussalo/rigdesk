@@ -66,8 +66,8 @@ impl Connection {
         };
         self.update_failure_with_scope(failure, true, 0, FailureScope::Default);
         if let Some(ask) = proved.ask.clone() {
-            if one_tap::admit(self.inner.id, &ask, &proved.agent_id) {
-                return self.rig_knock_accepted(&ask, proved).await;
+            if let Some(by) = one_tap::admit(self.inner.id, &ask, &proved.agent_id) {
+                return self.rig_knock_accepted(&ask, proved, by).await;
             }
             hbb_common::log::info!("Rig agent {} knocked for {ask}, which no Accept here stands for: the person is asked", proved.agent_id);
         }
@@ -79,15 +79,15 @@ impl Connection {
         true
     }
 
-    /// The person's Accept on Rig Assistant's notification was their yes for this ask: the knock is let in with no
-    /// second Allow, as an invite is, and never around a 2FA requirement.
-    async fn rig_knock_accepted(&mut self, ask: &str, proved: rig_knock::Proved) -> bool {
+    /// The person's Accept on Rig Assistant's notification, or their Start now on the operator's Accept, was their yes for
+    /// this ask: the knock is let in with no second Allow, as an invite is, and never around a 2FA requirement.
+    async fn rig_knock_accepted(&mut self, ask: &str, proved: rig_knock::Proved, by: rig_knock::JoinedBy) -> bool {
         hbb_common::log::info!("Rig agent {} joins on the person's Accept for {ask}", proved.agent_id);
         rig_knock::mark_proved(self.inner.id, &proved.name);
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         let kept = self.send_logon_response_and_keep_alive().await;
         if self.authorized {
-            rig_knock::joined(self.inner.id, rig_knock::JoinedBy::OneTap);
+            rig_knock::joined(self.inner.id, by);
         } else {
             one_tap::failed(self.inner.id);
         }
