@@ -25,7 +25,7 @@ from core.sdk.tools import (Answer, BranchTool, Call, gloss_of, ImageContent, Se
                             ToolInput)
 
 from . import adhoc, prompts
-from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, DeniedByPerson, Desks, DeskRefused, Grantee, InviteAsk, Held, NotLoggedIn, PcEntry, PcServer, RigdeskSettings, ShellLevel, SECRETS, failure, secret_files
+from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, DeniedByPerson, Desks, DeskRefused, Grantee, InviteAsk, Held, PhoneAsk, NotLoggedIn, PcEntry, PcServer, RigdeskSettings, ShellLevel, SECRETS, failure, secret_files
 from .health import figures_json, series
 from .shots import inline
 from .desks import PcName as DeskName
@@ -173,11 +173,28 @@ async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
                 else await desks.join_assigned(str(given.pc), agent, graph, node, title))
     except InviteAsk as invite:
         return await _ask_invite(desks, call, invite.pc, str(given.link))
+    except PhoneAsk as phone:
+        return await _ask_phone(desks, call, phone, title)
     except Exception as failed:  # noqa: BLE001
         return _refused(call, failed)
     return {"pc": held.pc, "joined": True, "said": (f"You own {held.pc}'s session and hold its input. desk/<tool> acts there; the human sees each call live. "
                                                     "Their own input goes first: while they use the PC your actions are refused, and work again once they have been "
                                                     "inactive for 5 s; after such a refusal you are told when. If they press Stop, your turn is cut short and every call is refused until they resume you; you are told when they do.")}
+
+
+async def _ask_phone(desks: Desks, call: Call, asked: PhoneAsk, title: str) -> Answer:
+    """An assigned agent's desk/join on a phone Rig could not log in to: the person there is asked on the phone, with no ask in Rig."""
+    agent, graph, _ = _who(call)
+    unnamed = await desks.one_tap_unnamed(asked.pc)
+    if unnamed is not None:
+        return call.refused(OPERATOR_UNNAMED, unnamed)
+    ask = new_id("desk")
+    prompts.start(desks, asked.pc, ask, call.contract.place.seat, agent, graph, title, granted=asked.unlogged.password)
+    if ask not in desks.prompts:
+        return call.refused(REFUSED, f"{asked.unlogged}, and the person at {asked.pc} could not be asked on the phone: this Rig cannot take a device's answer")
+    return {"pc": asked.pc, "joined": False, "ask": ask,
+            "said": (f"Not joined yet: {asked.unlogged}, so the person at {asked.pc} is asked on the phone, as your standing grant stands in for the operator "
+                     "but not for them. Nothing is joined until they accept; your next input says when the session is up, or that they denied it or it lapsed.")}
 
 
 async def _ask_invite(desks: Desks, call: Call, pc: str, link: str) -> Answer:

@@ -16,7 +16,10 @@ login_id is that ID is that phone. Its Accept starts sharing and the phone says 
 accepted, so its knock names the ask under Rig's signature and the phone lets it in on that Accept with no second Allow. Deny, a failure, the
 operator's Deny, a login on the operator's Accept, a withdrawal and the lapse each take the notification away; an unanswered one is shown again, and after the last lapse the
 operator's ask is withdrawn and the agent told. With the phone's link down the bridge's knock asks instead, and the agent and Rig's log are
-told why."""
+told why.
+
+An agent assigned the phone asks the same way: its desk/join(pc), when Rig cannot log in (sharing is off), sends the phone this request with no
+ask in Rig, as the standing grant stands in for the operator's yes but not the person's; their Accept joins it through its grant."""
 from __future__ import annotations
 
 import asyncio
@@ -139,14 +142,20 @@ class Prompt:
     accepted: bool = False
     # The phone in Rig Assistant it was last shown on as one notification, or None while only the bridge's knock asked.
     phone: str | None = None
+    # An assigned agent's desk/join: its standing grant stands in for the operator's yes, so no ask waits in Rig and the person's answer joins it.
+    granted: bool = False
 
 
-def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str, then: JsonObject | None = None) -> None:
-    """Shows the agent's request on the PC too, where Rig can take the PC's answer for the operator's (a Rig with PluginHost.confirm_answered)."""
+def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str, then: JsonObject | None = None,
+          granted: Literal["refused", "unreached", "none"] | None = None) -> None:
+    """Shows the agent's request on the PC too, where Rig can take the PC's answer for the operator's (a Rig with PluginHost.confirm_answered).
+    granted, for an assigned agent's desk/join, says how Rig's login failed: the grant is the operator's yes, and only the person's is asked."""
     if not hasattr(desks.host, "confirm_answered") or desks.held_on(pc) is not None:
         return
     desks.unshown.pop(pc, None)
     prompt = desks.prompts[ask] = Prompt(pc, ask, seat, agent, graph, title, then=then)
+    if granted is not None:
+        prompt.granted, prompt.operator_said, prompt.password = True, True, granted
     prompt.task = TASKS.spawn(f"rigdesk-prompt-{ask}", _prompting(desks, prompt))
 
 
@@ -384,19 +393,19 @@ async def _answered_after_accept(desks: Desks, prompt: Prompt, said: str) -> Non
         if prompt.password == "trying":
             return  # the operator's Accept, still logging in, drops its login and tells the agent
         words = (f"RigDesk {pc}: denied by the person at {_clock(prompt.denied_ms)}: they dismissed your request on the device, so you did not join {pc}, "
-                 "though the operator accepted it. desk/request asks again.")
+                 + ("though it is assigned to you. desk/join asks again." if prompt.granted else "though the operator accepted it. desk/request asks again."))
     else:
         identity = await desks.host.roster.identity(prompt.seat)
         if identity is None or identity.agent != prompt.agent:
             _LOG.warning("rigdesk_prompt_gone", f"RigDesk {pc}: the person allowed {prompt.ask}, but {prompt.agent} no longer stands at its seat, so nobody joined", pc=pc)
             return
         try:
-            await desks.join_approved(pc, prompt.agent, prompt.graph, prompt.seat.node, prompt.title, prompt.ask)
+            await desks.join_approved(pc, prompt.agent, prompt.graph, prompt.seat.node, prompt.title, prompt.ask, via="assigned" if prompt.granted else "link")
         except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
             mine = desks.held_by(prompt.agent, prompt.graph)
             if mine is not None and mine.pc == pc:
                 return  # the operator's Accept logged in meanwhile, and said so
-            words = f"RigDesk: the person at {pc} allowed you on the device, but you did not join {pc}: {failed}. desk/request asks again."
+            words = f"RigDesk: the person at {pc} allowed you on the device, but you did not join {pc}: {failed}. {_again(prompt)}"
         else:
             words = (f"RigDesk: the person at {pc} allowed you on the device, so you joined {pc} over the connection they allowed, with no password. "
                      "Its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there.")
@@ -411,8 +420,12 @@ async def _unjoined(desks: Desks, prompt: Prompt, said: str | None) -> None:
     why = (f"{holder.title} joined {pc} while the person there was asked, so the prompt was taken away" if holder is not None else
            "nobody answered the prompt on the device by " + _clock(now_ms()) if said in (None, "lapsed") else
            f"the device could not ask the person there: {said}")
-    await desks.tell_seat(pc, prompt.agent, prompt.seat, f"RigDesk: you did not join {pc}, though the operator accepted it: {why}. desk/request asks again.",
-                          f"prompt:{prompt.ask}")
+    though = "though it is assigned to you" if prompt.granted else "though the operator accepted it"
+    await desks.tell_seat(pc, prompt.agent, prompt.seat, f"RigDesk: you did not join {pc}, {though}: {why}. {_again(prompt)}", f"prompt:{prompt.ask}")
+
+
+def _again(prompt: Prompt) -> str:
+    return "desk/join asks again." if prompt.granted else "desk/request asks again."
 
 
 def _clock(at_ms: int) -> str:
