@@ -22,7 +22,7 @@ from core.sdk.host import Live, mcp_capability, plugin_capability, PluginHost, p
 from core.sdk.model import AgentId, Choice, Choices, GraphName, NodeId, PluginCode, Refused, RefusedOutcome, SeatId
 from core.sdk.policy import OPERATOR
 from core.sdk.routes import endpoint, NoParams, Params, Request
-from core.sdk.tools import (Answer, BranchTool, Call, gloss_of, ImageContent, TextContent, TOOL_LIMIT_S, ToolAnswer, ToolContent, ToolDef,
+from core.sdk.tools import (Answer, BranchTool, Call, gloss_of, ImageContent, SecretArg, TextContent, TOOL_LIMIT_S, ToolAnswer, ToolContent, ToolDef,
                             ToolInput)
 
 from . import adhoc, prompts
@@ -109,7 +109,7 @@ class ConnectInput(ToolInput):
     id: str = Field(min_length=6, max_length=400, description="The PC's RustDesk ID as the operator gave it: the digits it shows (spaces allowed); "
                                                               "ID@host?key=<key> for a PC on a self-hosted ID server; ID@<tailnet address>[:port] to dial a PC directly over the tailnet "
                                                               "(100.64.0.0/10 or a *.ts.net name, no key); or the ID one of our RigDesk PCs shows.")
-    password: str = Field(min_length=1, max_length=128, description="The PC's permanent password, or the one-time password it shows now, as the operator gave it. "
+    password: SecretArg = Field(min_length=1, max_length=128, description="The PC's permanent password, or the one-time password it shows now, as the operator gave it. "
                                                                     "Rig keeps it in a file only Rig's user reads while the session lives, and never repeats it.")
     why: str = Field(min_length=1, max_length=1000, description="What you need the PC for, in a sentence or two: unless it is one of our RigDesk PCs, the operator "
                                                                 "reads it before deciding whether Rig dials it.")
@@ -216,7 +216,7 @@ async def _connect(desks: Desks, call: Call, given: ConnectInput) -> Answer:
     agent, graph, node = _who(call)
     title = await call.kernel.caller_title()
     try:
-        held, reached = await desks.connect(given.id, given.password, agent, graph, node, title)
+        held, reached = await desks.connect(given.id, given.password.get_secret_value(), agent, graph, node, title)
     except ConnectAsk as outside:
         return await _ask_connect(desks, call, given, outside)
     except Exception as failed:  # noqa: BLE001
@@ -238,7 +238,7 @@ async def _ask_connect(desks: Desks, call: Call, given: ConnectInput, outside: C
     reason = (f"A PC that is none of our RigDesk PCs{not_ours}.\n\nAccept dials it now with the password the agent was given, for one session: until the agent leaves, the PC "
               f"ends it, or {adhoc.IDLE_MS // 60_000} idle minutes pass; what the PC shows then reaches the agent. Deny dials nothing.")[:2000]
     then = {"agent": agent, "graph": graph, "id": outside.target, "ask": asked}
-    desks.connect_asked(asked, given.id, given.password, agent, seat, (CONNECT_CONFIRMED.name, then))
+    desks.connect_asked(asked, given.id, given.password.get_secret_value(), agent, seat, (CONNECT_CONFIRMED.name, then))
     try:
         state = await desks.host.confirm(seat, asked, Titled(asks, reason), call.kernel.activation_id, Then(provision=CONNECT_CONFIRMED.name, given=then))
     except BaseException:
