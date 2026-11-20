@@ -9,14 +9,15 @@
 //! encrypted end to end (see `rendezvous`).
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use base::message_proto::{
     login_request, login_response, message, misc, option_message::BoolOption, supported_decoding::PreferCodec, ClipboardFormat,
-    DisplayInfo, Hash, ImageQuality, LoginRequest, Message, Misc, OptionMessage, PeerInfo, ScreenshotRequest,
+    DisplayInfo, Hash, ImageQuality, LoginRequest, Message, Misc, OptionMessage, PeerInfo, RigKnock, ScreenshotRequest,
     SupportedDecoding,
 };
 use hbb_common::protobuf::{Message as _, MessageField};
@@ -25,6 +26,7 @@ use hbb_common::tcp::FramedStream;
 use hbb_common::tokio::{self, sync::broadcast, sync::mpsc, sync::Notify};
 use hbb_common::{bail, log, ResultType};
 use rigdesk_agent::operator::NoLogin;
+use rigdesk_agent::Owner;
 
 /// RustDesk's direct-IP port.
 const DIRECT_PORT: u16 = 21118;
@@ -221,6 +223,13 @@ pub struct Link {
     /// An invite the device made: the session login presents it in place of the password.
     invite: OnceLock<crate::invite::Invite>,
     invite_login: Mutex<InviteLogin>,
+    /// Rig's pairing key: a password login to a device that asks for Rig's proof is signed with it, so the person there is
+    /// told which agent joined.
+    pair_key: OnceLock<PathBuf>,
+    /// The agent the login Rig's Accept asks for is made for, with the ask the operator accepted, while that login runs.
+    signs_for: Mutex<Option<(Owner, String)>>,
+    /// The address the session running now dials from, as the device sees it.
+    dialer: Mutex<Option<IpAddr>>,
 }
 
 fn now_ms() -> u64 {
@@ -278,6 +287,9 @@ impl Link {
             closed_by_person: AtomicBool::new(false),
             invite: OnceLock::new(),
             invite_login: Mutex::new(InviteLogin::default()),
+            pair_key: OnceLock::new(),
+            signs_for: Mutex::new(None),
+            dialer: Mutex::new(None),
         })
     }
 
@@ -289,6 +301,10 @@ impl Link {
     /// never let go while held, a refused login is never retried, and the session's end is the bridge's. What happens is
     /// told on stdout, one line each, for the plugin that started it: `logged in …`, then `ended: …`; or `refused: …`
     /// (the PC's own words) or `failed: …` before any login.
+    pub fn set_pair_key(&self, key_file: PathBuf) {
+        self.pair_key.get_or_init(|| key_file);
+    }
+
     pub fn set_once(&self) {
         self.once.store(true, Ordering::SeqCst);
     }
@@ -445,6 +461,7 @@ impl Link {
                 Err(e) => return Err(Unreached(self.dial_cause(e).await).into()),
             },
         };
+        *self.dialer.lock().unwrap() = Some(stream.local_addr().ip());
         if self.invite.get().is_some() {
             *self.invite_login.lock().unwrap() = InviteLogin { dialer: Some(stream.local_addr().ip()), ..Default::default() };
         }
@@ -538,6 +555,10 @@ impl Link {
                     let proof = invite.proof(&self.username, &hash);
                     self.invite_login.lock().unwrap().sent = Some((hash, proof.signature.to_vec()));
                     request.rig_invite = MessageField::some(proof);
+                } else if let Some(knock) = self.password_signed(&hash) {
+                    let request = login.mut_login_request();
+                    request.my_name = format!("{} (Rig agent)", knock.agent_title);
+                    request.rig_knock = MessageField::some(knock);
                 }
                 return Ok(Some(login));
             }
@@ -622,6 +643,23 @@ impl Link {
     }
 
     /// What viewers see of the PC: all but the login, the PC's pings and the answers to the agent's own screenshots.
+    /// Rig's signature for a password login to a device that asks for it: for the agent Rig's Accept logs in for, else the
+    /// agent holding the session, which a redial carries on with nobody asked. None with no pairing key or no such agent,
+    /// and the login goes unnamed.
+    fn password_signed(&self, hash: &Hash) -> Option<RigKnock> {
+        let key_file = self.pair_key.get().filter(|_| !hash.rig_knock_nonce.is_empty())?;
+        let dialer = (*self.dialer.lock().unwrap())?;
+        let accepted = self.signs_for.lock().unwrap().clone();
+        let (owner, ask) = accepted.or_else(|| self.shared.standing().owner.map(|owner| (owner, String::new())))?;
+        match crate::invite::read_key(key_file) {
+            Ok((_, key)) => Some(crate::knock::signed(&key, &owner.agent_id, &owner.title, &ask, &self.username, hash, dialer)),
+            Err(e) => {
+                log::warn!("the password login goes without Rig's signature: {e}");
+                None
+            }
+        }
+    }
+
     fn relayed(&self, msg: &Message) -> bool {
         match &msg.union {
             Some(message::Union::Hash(_) | message::Union::LoginResponse(_) | message::Union::TestDelay(_)) => false,
@@ -705,13 +743,16 @@ impl Link {
     /// A login that has actually succeeded, on the connection the person allowed or with the saved password, made now
     /// unless a session is up: Rig asks for it on the operator's Accept. A password the PC refuses is tried this once:
     /// the link does not dial it again until something uses the PC.
-    pub fn log_in(&self, wait: Duration) -> Result<(), NoLogin> {
+    pub fn log_in(&self, wait: Duration, signs_for: Option<(Owner, String)>) -> Result<(), NoLogin> {
         self.closed_by_person.store(false, Ordering::SeqCst);
         if !self.may_dial() {
             return Err(NoLogin::NoPassword);
         }
         let asked = now_ms();
-        self.ensure(wait).map(|_| ()).map_err(|why| {
+        *self.signs_for.lock().unwrap() = signs_for;
+        let made = self.ensure(wait);
+        *self.signs_for.lock().unwrap() = None;
+        made.map(|_| ()).map_err(|why| {
             self.last_use_ms.store(0, Ordering::SeqCst);
             let state = self.state.lock().unwrap();
             match state.failure.as_ref().filter(|(_, at)| *at >= asked).map(|(failure, _)| failure) {
@@ -943,7 +984,7 @@ mod tests {
         link.state.lock().unwrap().platform = platform.map(str::to_string);
         tokio::spawn(link.clone().run());
         let trying = link.clone();
-        let said = tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10))).await.unwrap();
+        let said = tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10), None)).await.unwrap();
         (link, said)
     }
 
@@ -1044,7 +1085,7 @@ mod tests {
         let owner = rigdesk_agent::session::Owner { agent_id: "a1".into(), title: "Builder".into(), graph: "g".into() };
         shared.claim(&grant.grant, &grant.secret, owner).unwrap();
         let trying = link.clone();
-        assert_eq!(tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10))).await.unwrap(), Ok(()));
+        assert_eq!(tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10), None)).await.unwrap(), Ok(()));
 
         let revoked = || {
             shared.events.since(0).into_iter().filter_map(|e| match e.kind {
@@ -1069,8 +1110,89 @@ mod tests {
         assert!(!link.wanted(), "a viewer or a tool call does not reopen it");
 
         let joining = link.clone();
-        assert_eq!(tokio::task::spawn_blocking(move || joining.log_in(Duration::from_secs(10))).await.unwrap(), Ok(()), "a new join logs in again");
+        assert_eq!(tokio::task::spawn_blocking(move || joining.log_in(Duration::from_secs(10), None)).await.unwrap(), Ok(()), "a new join logs in again");
         assert_eq!(logins.load(Ordering::SeqCst), 2);
+    }
+
+    /// The logins a phone on loopback gets with the saved password, greeting each with a nonce that asks for Rig's proof.
+    async fn signing_phone() -> (String, Arc<Mutex<Vec<(LoginRequest, IpAddr)>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let logins = Arc::new(Mutex::new(Vec::new()));
+        let kept = logins.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, dialer)) = listener.accept().await {
+                let mut phone = FramedStream::from(socket, dialer);
+                phone.send(&message_of(Hash { salt: "s".into(), challenge: "c".into(), rig_knock_nonce: b"nonce".to_vec().into(), ..Default::default() })).await.unwrap();
+                while let Some(Ok(bytes)) = phone.next_timeout(5_000).await {
+                    if let Some(login) = Message::parse_from_bytes(&bytes).ok().filter(Message::has_login_request) {
+                        kept.lock().unwrap().push((login.login_request().clone(), dialer.ip()));
+                        let mut msg = Message::new();
+                        msg.set_login_response(base::message_proto::LoginResponse { union: Some(login_response::Union::PeerInfo(PeerInfo::new())), ..Default::default() });
+                        phone.send(&msg).await.unwrap();
+                    }
+                }
+            }
+        });
+        (addr, logins)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_password_login_names_its_agent_and_the_operators_ask_to_a_phone_that_asks_and_only_with_rigs_key() {
+        use hbb_common::base64::{engine::general_purpose::STANDARD, Engine};
+        use hbb_common::sodiumoxide::crypto::sign;
+        let dir = std::env::temp_dir().join(format!("rigdesk-password-signed-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_file = dir.join("pair.key");
+        let public = sign::PublicKey::from_slice(&STANDARD.decode(crate::invite::pair_key(&key_file).unwrap()).unwrap()).unwrap();
+        let owner = Owner { agent_id: "agent_a".into(), title: "Builder".into(), graph: "g".into() };
+
+        let (addr, logins) = signing_phone().await;
+        let unkeyed = Link::new(Route::direct(&addr), "good".into(), "Rig agent".into(), Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8))));
+        tokio::spawn(unkeyed.clone().run());
+        let trying = unkeyed.clone();
+        let accepted = Some((owner.clone(), "desk_1".to_string()));
+        assert_eq!(tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10), accepted)).await.unwrap(), Ok(()));
+        assert!(logins.lock().unwrap()[0].0.rig_knock.is_none(), "no pairing key: the login goes unnamed");
+
+        let (addr, logins) = signing_phone().await;
+        let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
+        let link = Link::new(Route::direct(&addr), "good".into(), "Rig agent".into(), shared.clone());
+        link.set_pair_key(key_file.clone());
+        tokio::spawn(link.clone().run());
+        let trying = link.clone();
+        let accepted = Some((owner.clone(), "desk_1".to_string()));
+        assert_eq!(tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10), accepted)).await.unwrap(), Ok(()));
+        let (login, dialer) = logins.lock().unwrap()[0].clone();
+        assert!(!login.password.is_empty(), "the password still logs in");
+        assert_eq!(login.my_name, "Builder (Rig agent)");
+        let knock = login.rig_knock.clone().into_option().expect("Rig's Accept names its agent");
+        assert_eq!((knock.agent_id.as_str(), knock.ask.as_str()), ("agent_a", "desk_1"));
+        let signature = sign::Signature::from_bytes(&knock.signature).unwrap();
+        let signed = base::rig_knock::Login { device: &login.username, salt: "s", challenge: "c", nonce: b"nonce", dialer };
+        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder", "desk_1"), &public));
+        assert!(link.signs_for.lock().unwrap().is_none(), "the Accept's agent is not carried into a later login");
+
+        let (addr, logins) = signing_phone().await;
+        let link = Link::new(Route::direct(&addr), "good".into(), "Rig agent".into(), shared.clone());
+        link.set_pair_key(key_file.clone());
+        tokio::spawn(link.clone().run());
+        let trying = link.clone();
+        assert_eq!(tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10), None)).await.unwrap(), Ok(()));
+        assert!(logins.lock().unwrap()[0].0.rig_knock.is_none(), "no agent to name: the login goes unnamed");
+
+        let minted = shared.mint();
+        assert!(shared.claim(&minted.grant, &minted.secret, owner).is_ok());
+        let (addr, logins) = signing_phone().await;
+        let redial = Link::new(Route::direct(&addr), "good".into(), "Rig agent".into(), shared);
+        redial.set_pair_key(key_file);
+        tokio::spawn(redial.clone().run());
+        let trying = redial.clone();
+        assert!(tokio::task::spawn_blocking(move || trying.ensure(Duration::from_secs(10))).await.unwrap().is_ok());
+        let knock = logins.lock().unwrap()[0].0.rig_knock.clone().into_option().expect("a redial names the agent holding the session");
+        assert_eq!((knock.agent_id.as_str(), knock.ask.as_str()), ("agent_a", ""), "with nobody asked");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

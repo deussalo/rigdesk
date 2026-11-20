@@ -1652,18 +1652,19 @@ class Desks:
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via)
         self.person_answered.discard(ask)
-        await self.log_in(pc)
+        await self.log_in(pc, {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ask})
         denied_ms = denied()
         if denied_ms is not None:
             raise DeniedByPerson(f"denied by the person at {pc} at {_clock(denied_ms)}: they dismissed the request on the device before Rig's login succeeded")
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title)
 
-    async def log_in(self, pc: str) -> None:
+    async def log_in(self, pc: str, signs_for: dict[str, Any]) -> None:
         """A RustDesk login to a stock PC that has actually succeeded, before its agent is told it joined: on the connection the person there allowed,
-        or with the saved password, which the bridge tries this once."""
+        or with the saved password, which the bridge tries this once. signs_for names the agent and the ask the operator accepted (empty for a
+        standing grant), so a phone that asks for Rig's proof tells its person who joined and how."""
         link = self._link(pc)
-        async with self._client().post(f"{link.spec.url}/login", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=LOGIN_LIMIT_S)) as answer:
+        async with self._client().post(f"{link.spec.url}/login", json=signs_for, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=LOGIN_LIMIT_S)) as answer:
             said = _object(await answer.json(content_type=None)) if answer.content_type == "application/json" else {}
             status = answer.status
         if status == 200 and said.get("logged_in") is True:
@@ -1745,7 +1746,7 @@ class Desks:
         self._refuse_if_invited(pc)
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via="assigned")
-        await self.log_in(pc)
+        await self.log_in(pc, {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ""})
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title, via="assigned")
 

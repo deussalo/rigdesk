@@ -547,6 +547,7 @@ class ServerModel with ChangeNotifier {
             return;
           }
           _clients[index].authorized = true;
+          _clients[index].rigJoined = client.rigJoined;
           _clients[index].privacyMode = client.privacyMode;
         }
       } else {
@@ -643,6 +644,8 @@ class ServerModel with ChangeNotifier {
 
   showClientDialog(Client client, String title, String contentTitle,
       String content, VoidCallback onCancel, VoidCallback onSubmit) {
+    // A second dialog under one tag orphans the first: dismissByTag reaches only the newest.
+    parent.target?.dialogManager.dismissByTag(getLoginDialogTag(client.id));
     parent.target?.dialogManager.show((setState, close, context) {
       cancel() {
         onCancel();
@@ -837,6 +840,8 @@ class Client {
   bool fromSwitch = false;
   bool inVoiceCall = false;
   bool incomingVoiceCall = false;
+  // RigDesk: "<agent> joined: <how>" on Android once a Rig session is in, else empty.
+  String rigJoined = "";
 
   RxInt unreadChatMessageCount = 0.obs;
 
@@ -869,6 +874,7 @@ class Client {
     fromSwitch = json['from_switch'];
     inVoiceCall = json['in_voice_call'];
     incomingVoiceCall = json['incoming_voice_call'];
+    rigJoined = json['rig_joined'] ?? '';
   }
 
   Map<String, dynamic> toJson() {

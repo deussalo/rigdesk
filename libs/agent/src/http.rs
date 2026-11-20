@@ -316,10 +316,7 @@ impl Api {
             ("POST", "/join") => self.join(request).await,
             ("POST", "/offer") => self.offer(request).await,
             ("POST", "/offer/end") => self.offer_end(request).await,
-            ("POST", "/login") => {
-                drain(&mut request).await;
-                self.log_in().await
-            }
+            ("POST", "/login") => self.log_in(request).await,
             ("GET", "/samples") => match self.collector.get() {
                 Some(collector) => {
                     let after = query_number(request.uri().query(), "after").unwrap_or(0) as u64;
@@ -624,11 +621,12 @@ impl Api {
 
     /// The operator accepted an agent's request in Rig: a RustDesk login to the PC, so the agent is told it joined only once
     /// one has succeeded.
-    async fn log_in(self: Arc<Self>) -> Response<Body> {
+    async fn log_in(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
         let Some(switch) = self.operator.get().cloned() else {
             return json_response(StatusCode::NOT_FOUND, &json!({"error": "this PC's RigDesk takes no sessions started from Rig", "code": "no_login"}));
         };
-        match tokio::task::spawn_blocking(move || switch.log_in()).await {
+        let signs_for = crate::operator::login_request(Self::body_json(request).await.as_ref());
+        match tokio::task::spawn_blocking(move || switch.log_in(signs_for)).await {
             Ok(Ok(())) => {
                 self.journal.record(&Entry::new("Rig", "login", "ok", json!({})));
                 json_response(StatusCode::OK, &json!({"logged_in": true}))
@@ -991,7 +989,7 @@ mod tests {
         fn offers(&self) -> bool {
             true
         }
-        fn log_in(&self) -> Result<(), crate::operator::NoLogin> {
+        fn log_in(&self, _signs_for: Option<(crate::Owner, String)>) -> Result<(), crate::operator::NoLogin> {
             Err(crate::operator::NoLogin::NoPassword)
         }
     }

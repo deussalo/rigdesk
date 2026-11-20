@@ -11,6 +11,10 @@
 //! the ask too, under its own domain, so a proof for one ask opens no other.
 //!
 //! Anything else that calls itself Rig gets no prompt, no Allow and keeps no name of its own on this device.
+//!
+//! Rig signs its saved-password login the same way, so a session it opens with the password names its agent, and the ask
+//! the operator accepted, rather than going unnamed. Each session in is then told to the person as who joined and how
+//! ([`Joined`]): never a "Do you accept?" for a login that is already in.
 
 use crate::{invite, message_proto::{LoginRequest, RigKnock}};
 use hbb_common::{
@@ -18,7 +22,7 @@ use hbb_common::{
     sodiumoxide::crypto::sign,
 };
 use lazy_static::lazy_static;
-use std::{collections::HashSet, net::IpAddr, sync::Mutex};
+use std::{collections::HashMap, net::IpAddr, sync::Mutex};
 
 const DOMAIN: &str = "rigdesk-knock-v1";
 const DOMAIN_ASK: &str = "rigdesk-knock-ask-v1";
@@ -164,20 +168,71 @@ pub fn may_authorize(proved: bool, claims_rig: bool, click_approves: bool) -> bo
     proved || (click_approves && !claims_rig)
 }
 
-lazy_static! {
-    static ref PROVED: Mutex<HashSet<i32>> = Mutex::new(HashSet::new());
+/// How a Rig agent's session on this device got in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinedBy {
+    /// The person's Accept on Rig Assistant's notification (`one_tap`).
+    OneTap,
+    /// The person's Allow on this device's own prompt for the knock.
+    Allowed,
+    /// An invite this device made (`invite`).
+    Invite,
+    /// Rig's saved password, signed with the ask the operator accepted in Rig.
+    RigAccept,
+    /// Rig's saved password, signed with no ask: unattended access, nobody asked.
+    Unattended,
 }
 
-pub fn mark_proved(conn: i32) {
-    PROVED.lock().unwrap().insert(conn);
+/// Who joined and how, as the person at the device reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Joined {
+    pub name: String,
+    pub by: JoinedBy,
+}
+
+impl Joined {
+    pub fn words(&self) -> String {
+        let how = match self.by {
+            JoinedBy::OneTap => "your Accept on this phone",
+            JoinedBy::Allowed => "your Allow on this phone",
+            JoinedBy::Invite => "this phone's invite",
+            JoinedBy::RigAccept => "your Rig Accept, saved password",
+            JoinedBy::Unattended => "saved password, nobody asked",
+        };
+        format!("{} joined: {how}", self.name)
+    }
+}
+
+lazy_static! {
+    /// Each proved connection, by the name Rig signed for it.
+    static ref PROVED: Mutex<HashMap<i32, String>> = Mutex::new(HashMap::new());
+    static ref JOINED: Mutex<HashMap<i32, Joined>> = Mutex::new(HashMap::new());
+}
+
+pub fn mark_proved(conn: i32, name: &str) {
+    PROVED.lock().unwrap().insert(conn, name.to_owned());
 }
 
 pub fn proved(conn: i32) -> bool {
-    PROVED.lock().unwrap().contains(&conn)
+    PROVED.lock().unwrap().contains_key(&conn)
+}
+
+/// A proved connection is in, by `by`. A connection that proved nothing is never told as Rig's.
+pub fn joined(conn: i32, by: JoinedBy) {
+    let Some(name) = PROVED.lock().unwrap().get(&conn).cloned() else {
+        return;
+    };
+    JOINED.lock().unwrap().entry(conn).or_insert(Joined { name, by });
+}
+
+/// What the person is told of this connection once it is in; None for any login that is not a proved Rig one.
+pub fn joined_how(conn: i32) -> Option<Joined> {
+    JOINED.lock().unwrap().get(&conn).cloned()
 }
 
 pub fn left(conn: i32) {
     PROVED.lock().unwrap().remove(&conn);
+    JOINED.lock().unwrap().remove(&conn);
 }
 
 #[cfg(test)]
@@ -297,6 +352,25 @@ mod tests {
     }
 
     #[test]
+    fn a_session_in_is_told_by_who_and_how_and_only_for_a_proved_connection() {
+        mark_proved(9001, "Builder (Rig agent)");
+        joined(9001, JoinedBy::RigAccept);
+        joined(9001, JoinedBy::Allowed);
+        assert_eq!(joined_how(9001).unwrap().words(), "Builder (Rig agent) joined: your Rig Accept, saved password", "the first way in stands");
+        joined(9002, JoinedBy::OneTap);
+        assert_eq!(joined_how(9002), None, "an unproved login is never told as Rig's");
+        left(9001);
+        assert_eq!(joined_how(9001), None);
+        assert!(!proved(9001));
+        let words = [JoinedBy::OneTap, JoinedBy::Allowed, JoinedBy::Invite, JoinedBy::Unattended]
+            .iter()
+            .copied()
+            .map(|by| Joined { name: "B".into(), by }.words())
+            .collect::<Vec<_>>();
+        assert_eq!(words, vec!["B joined: your Accept on this phone", "B joined: your Allow on this phone", "B joined: this phone's invite", "B joined: saved password, nobody asked"]);
+    }
+
+    #[test]
     fn the_persons_yes_lets_in_a_proved_knock_alone_where_passwords_rule() {
         assert!(may_authorize(true, true, false));
         assert!(!may_authorize(false, true, false), "calls itself Rig, no proof");
@@ -309,7 +383,7 @@ mod tests {
     fn a_connection_counts_as_proved_until_it_closes() {
         const CONN: i32 = 7_000_001;
         assert!(!proved(CONN));
-        mark_proved(CONN);
+        mark_proved(CONN, "B");
         assert!(proved(CONN) && !proved(CONN + 1));
         left(CONN);
         assert!(!proved(CONN));

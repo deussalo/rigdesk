@@ -1482,6 +1482,8 @@ def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_suc
         assert said.startswith("You joined phone"), said
         assert bridge.paths()[1:] == ["/login", "/viewer/mint", "/claim", "/offer/end"], bridge.paths()
         assert desks.held_on("phone") is not None and told == [], told
+        login = next(body for path, body in bridge.posted if path == "/login")
+        assert login == {"agent": {"id": "a1", "title": "Builder", "graph": "g"}, "ask": "desk_1"}, f"the login names whom the operator accepted: {login}"
 
         said, bridge, desks, told = await accepted_then("stale", "allow")
         assert "you have not joined phone: Rig's saved password for phone did not log in: login refused by the PC: Wrong Password" in said, said

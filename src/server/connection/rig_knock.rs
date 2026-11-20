@@ -72,7 +72,7 @@ impl Connection {
             hbb_common::log::info!("Rig agent {} knocked for {ask}, which no Accept here stands for: the person is asked", proved.agent_id);
         }
         hbb_common::log::info!("Rig agent {} asks to join", proved.agent_id);
-        rig_knock::mark_proved(self.inner.id);
+        rig_knock::mark_proved(self.inner.id, &proved.name);
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         self.try_start_cm(rig_knock::PEER_ID.to_owned(), proved.name, false);
         self.send_login_error(crate::client::LOGIN_MSG_NO_PASSWORD_ACCESS).await;
@@ -83,10 +83,12 @@ impl Connection {
     /// second Allow, as an invite is, and never around a 2FA requirement.
     async fn rig_knock_accepted(&mut self, ask: &str, proved: rig_knock::Proved) -> bool {
         hbb_common::log::info!("Rig agent {} joins on the person's Accept for {ask}", proved.agent_id);
-        rig_knock::mark_proved(self.inner.id);
+        rig_knock::mark_proved(self.inner.id, &proved.name);
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         let kept = self.send_logon_response_and_keep_alive().await;
-        if !self.authorized {
+        if self.authorized {
+            rig_knock::joined(self.inner.id, rig_knock::JoinedBy::OneTap);
+        } else {
             one_tap::failed(self.inner.id);
         }
         if !kept {
@@ -94,6 +96,45 @@ impl Connection {
         }
         self.try_start_cm(rig_knock::PEER_ID.to_owned(), proved.name, self.authorized);
         true
+    }
+
+    /// A login that got in with the password and carries Rig's signature names its agent, and the ask the operator accepted
+    /// when Rig signed one, so the person is told who joined and how. Unsigned, or signed wrongly, it stays unnamed.
+    pub(super) fn rig_password_joined(&mut self) {
+        if self.lr.password.is_empty() || self.lr.rig_knock.is_none() || rig_knock::proved(self.inner.id) {
+            return;
+        }
+        let nonce = std::mem::take(&mut self.hash.rig_knock_nonce);
+        let Ok(dialer) = self.ip.parse() else {
+            return;
+        };
+        let login = rig_knock::Login {
+            device: &self.lr.username,
+            salt: &self.hash.salt,
+            challenge: &self.hash.challenge,
+            nonce: &nonce,
+            dialer,
+        };
+        match rig_knock::verify(self.lr.rig_knock.as_ref(), &login) {
+            Ok(proved) => {
+                hbb_common::log::info!("Rig agent {} joined with the saved password", proved.agent_id);
+                rig_knock::mark_proved(self.inner.id, &proved.name);
+                let by = if proved.ask.is_some() { rig_knock::JoinedBy::RigAccept } else { rig_knock::JoinedBy::Unattended };
+                rig_knock::joined(self.inner.id, by);
+            }
+            Err(refusal) => hbb_common::log::warn!("A password login carried a Rig signature that does not hold: {}", refusal.words()),
+        }
+    }
+
+    /// The person's Allow let a proved knock in: the session is told as theirs, and listed again as in.
+    pub(super) fn rig_knock_allowed(&mut self) {
+        if !rig_knock::proved(self.inner.id) {
+            return;
+        }
+        rig_knock::joined(self.inner.id, rig_knock::JoinedBy::Allowed);
+        if let Some(joined) = rig_knock::joined_how(self.inner.id) {
+            self.try_start_cm(rig_knock::PEER_ID.to_owned(), joined.name, true);
+        }
     }
 
     pub(super) fn rig_knock_listed_as(&self, peer_id: String, name: String, authorized: bool) -> Option<(String, String)> {

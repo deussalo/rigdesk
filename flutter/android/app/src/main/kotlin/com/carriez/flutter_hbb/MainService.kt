@@ -137,7 +137,10 @@ class MainService : Service() {
                             !jsonObject.optBoolean("is_terminal") &&
                             !jsonObject.optBoolean("is_view_camera") &&
                             jsonObject.optString("port_forward").isEmpty()
-                        if (capturing || !seesScreen) {
+                        val rigJoined = jsonObject.optString("rig_joined")
+                        if (rigJoined.isNotEmpty()) {
+                            rigJoinedNotification(id, rigJoined)
+                        } else if (capturing || !seesScreen) {
                             onClientAuthorizedNotification(id, type, username, peerId)
                         } else {
                             noPictureNotification(id, username)
@@ -395,6 +398,10 @@ class MainService : Service() {
         }
         if (intent?.action == ACT_LOGIN_REQ_NOTIFY) {
             onRigRequestAnswered(intent)
+        }
+        if (intent?.action == ACT_RIG_DISCONNECT) {
+            val clientID = intent.getIntExtra(EXT_LOGIN_REQ_ID, -1)
+            if (clientID >= 0) FFI.rigDisconnect(clientID)
         }
         intent?.let { rigInvite?.handle(it) }
         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
@@ -1073,6 +1080,40 @@ class MainService : Service() {
             .setContentTitle("$who can't see this screen")
             .setContentText(if (isReady) "RigDesk could not start screen capture" else "Screen capture is off: tap Start service in RigDesk")
             .build()
+        notificationManager.notify(getClientNotifyID(clientID), notification)
+    }
+
+    /// RigDesk: a Rig agent's session is in. Says who joined and how ("<agent> joined: your Rig Accept, saved password"), with
+    /// Disconnect; never a "Do you accept?" for a login that is already in. While the screen is shared Android 15 shows only
+    /// the public version, without buttons, so that says the same and opens the app, whose connection card has Disconnect.
+    private fun rigJoinedNotification(clientID: Int, joined: String) {
+        loginPromptDone(clientID)
+        cancelNotification(clientID)
+        val openApp = rigRequestOpenApp(clientID)
+        val whileShared = NotificationCompat.Builder(this, notificationChannel)
+            .setSmallIcon(R.mipmap.ic_stat_logo)
+            .setContentTitle(joined)
+            .setContentText("Open RigDesk to disconnect it.")
+            .setContentIntent(openApp)
+            .setColor(ContextCompat.getColor(this, R.color.primary))
+            .build()
+        val disconnect = Intent(this, MainService::class.java).apply {
+            action = ACT_RIG_DISCONNECT
+            putExtra(EXT_LOGIN_REQ_ID, clientID)
+        }
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE else FLAG_UPDATE_CURRENT
+        val notification = NotificationCompat.Builder(this, notificationChannel)
+            .setSmallIcon(R.mipmap.ic_stat_logo)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setContentTitle(joined)
+            .setContentText("It can see and use this phone until you disconnect it.")
+            .setContentIntent(openApp)
+            .setPublicVersion(whileShared)
+            .setColor(ContextCompat.getColor(this, R.color.primary))
+            .addAction(0, "Disconnect", PendingIntent.getService(this, clientID * 2 + 1_000_001, disconnect, flags))
+            .build()
+        rigRequests.add(clientID)
         notificationManager.notify(getClientNotifyID(clientID), notification)
     }
 

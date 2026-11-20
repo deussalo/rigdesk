@@ -26,7 +26,7 @@ use hbb_common::{
     tokio::{self, runtime::Handle, task::AbortHandle},
 };
 use rigdesk_agent::operator::{Closed, NoLogin, Offer, Switch};
-use rigdesk_agent::{EventKind, Shared};
+use rigdesk_agent::{EventKind, Owner, Shared};
 
 use crate::link::Link;
 
@@ -77,17 +77,24 @@ struct Proof {
     ask: String,
 }
 
+/// Rig's signature over one login to `device`, for the connection its greeting `hash` opened from `dialer`, naming the
+/// agent it is for and the ask accepted for it (empty for none). A knock carries it, and so does a password login, which
+/// the phone then names.
+pub(crate) fn signed(key: &sign::SecretKey, agent_id: &str, agent_title: &str, ask: &str, device: &str, hash: &Hash, dialer: IpAddr) -> RigKnock {
+    let login = rig_knock::Login { device, salt: &hash.salt, challenge: &hash.challenge, nonce: &hash.rig_knock_nonce, dialer };
+    RigKnock {
+        signature: sign::sign_detached(&login.message(agent_id, agent_title, ask), key).to_bytes().to_vec().into(),
+        agent_id: agent_id.to_owned(),
+        agent_title: agent_title.to_owned(),
+        dialer: dialer.to_string(),
+        ask: ask.to_owned(),
+        ..Default::default()
+    }
+}
+
 impl Proof {
     fn knock(&self, key: &sign::SecretKey, device: &str, hash: &Hash, dialer: IpAddr) -> RigKnock {
-        let login = rig_knock::Login { device, salt: &hash.salt, challenge: &hash.challenge, nonce: &hash.rig_knock_nonce, dialer };
-        RigKnock {
-            signature: sign::sign_detached(&login.message(&self.agent_id, &self.agent_title, &self.ask), key).to_bytes().to_vec().into(),
-            agent_id: self.agent_id.clone(),
-            agent_title: self.agent_title.clone(),
-            dialer: dialer.to_string(),
-            ask: self.ask.clone(),
-            ..Default::default()
-        }
+        signed(key, &self.agent_id, &self.agent_title, &self.ask, device, hash, dialer)
     }
 
     /// The login with the proof in it. The key is read for each knock, so one made after the bridge started counts.
@@ -178,8 +185,8 @@ impl Switch for Knocker {
         true
     }
 
-    fn log_in(&self) -> Result<(), NoLogin> {
-        self.link.log_in(LOGIN_WAIT)
+    fn log_in(&self, signs_for: Option<(Owner, String)>) -> Result<(), NoLogin> {
+        self.link.log_in(LOGIN_WAIT, signs_for)
     }
 }
 

@@ -3245,6 +3245,12 @@ pub mod server_side {
         }
     }
 
+    /// RigDesk: the person's Disconnect on a "joined" notice ends that session.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_rigDisconnect(_env: JNIEnv, _class: JClass, conn_id: jni::sys::jint) {
+        crate::ui_cm_interface::close(conn_id);
+    }
+
     /// RigDesk: whether this phone listens for Rig's knock now (its direct server is up).
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_rigListening(_env: JNIEnv, _class: JClass) -> jboolean {

@@ -68,9 +68,13 @@ impl Connection {
         if !self.send_logon_response_and_keep_alive().await {
             return false;
         }
+        let name = format!("{} (Rig agent)", holder.title);
         #[cfg(target_os = "android")]
-        base::rig_knock::mark_proved(self.inner.id);
-        self.try_start_cm(lr.my_id, format!("{} (Rig agent)", holder.title), self.authorized);
+        {
+            base::rig_knock::mark_proved(self.inner.id, &name);
+            base::rig_knock::joined(self.inner.id, base::rig_knock::JoinedBy::Invite);
+        }
+        self.try_start_cm(lr.my_id, name, self.authorized);
         true
     }
 

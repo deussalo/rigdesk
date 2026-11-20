@@ -37,8 +37,9 @@ pub trait Switch: Send + Sync {
 
     /// A RustDesk login to the PC that has actually succeeded, made now unless one is up, for a host that logs in to the PC
     /// rather than being it: Rig asks for it on the operator's Accept, before the agent is told it joined. It blocks while
-    /// it dials.
-    fn log_in(&self) -> Result<(), NoLogin> {
+    /// it dials. `signs_for` is the agent it is for and the ask the operator accepted, empty for a standing grant: a PC that
+    /// asks for Rig's proof is told who joined and how.
+    fn log_in(&self, _signs_for: Option<(Owner, String)>) -> Result<(), NoLogin> {
         Err(NoLogin::Failed("this host is the PC itself, so there is no login to make".into()))
     }
 }
@@ -107,6 +108,11 @@ pub fn offer_request(body: &Value) -> Result<Offer, String> {
         Some(_) => return Err("offer's accepted is true or false".into()),
     };
     Ok(Offer { owner, ask, nonce: nonce.to_string(), accepted })
+}
+
+/// The agent a `/login` is for and the operator's ask, from its body when Rig sends one: `{agent, ask}` as `/join`'s.
+pub fn login_request(body: Option<&Value>) -> Option<(Owner, String)> {
+    body.and_then(|body| request(body).ok())
 }
 
 /// Why a `/join` was refused.

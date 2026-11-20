@@ -149,6 +149,8 @@ pub struct Client {
     pub from_switch: bool,
     pub in_voice_call: bool,
     pub incoming_voice_call: bool,
+    /// RigDesk Android: who joined and how, for a Rig agent's session that is in ("<agent> joined: <how>"); empty otherwise.
+    pub rig_joined: String,
     #[serde(skip)]
     #[cfg(not(any(target_os = "ios")))]
     tx: UnboundedSender<Data>,
@@ -214,6 +216,16 @@ impl<T: InvokeUiCM> DerefMut for ConnectionManager<T> {
     }
 }
 
+/// What the person is told of a Rig agent's session once it is in, from how the server let it in (`base::rig_knock`).
+fn rig_joined(id: i32, authorized: bool) -> String {
+    #[cfg(target_os = "android")]
+    if authorized {
+        return base::rig_knock::joined_how(id).map(|joined| joined.words()).unwrap_or_default();
+    }
+    let _ = (id, authorized);
+    String::new()
+}
+
 impl<T: InvokeUiCM> ConnectionManager<T> {
     fn add_connection(
         &self,
@@ -261,6 +273,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             tx,
             in_voice_call: false,
             incoming_voice_call: false,
+            rig_joined: rig_joined(id, authorized),
         };
         CLIENTS
             .write()
