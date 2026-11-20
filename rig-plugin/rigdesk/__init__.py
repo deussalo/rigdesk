@@ -26,7 +26,7 @@ from core.sdk.tools import (Answer, BranchTool, Call, gloss_of, ImageContent, Te
                             ToolInput)
 
 from . import adhoc, prompts
-from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, Desks, DeskRefused, Grantee, InviteAsk, Held, NotLoggedIn, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
+from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, DeniedByPerson, Desks, DeskRefused, Grantee, InviteAsk, Held, NotLoggedIn, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
 from .health import figures_json, series
 from .shots import inline
 from .desks import PcName as DeskName
@@ -480,7 +480,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
     accepted before anything is awaited, as the ask already no longer waits."""
     given = REQUESTED.validate_python(asked["given"])
     desks, ask = host.live(Desks), given.get("ask", "")
-    device = prompts.accepted(desks, ask) if given["kind"] == "join" and asked.get("choice") != "always" else None
+    device = prompts.operator_said(desks, ask) if given["kind"] == "join" and asked.get("choice") != "always" else None
     kept = False
     try:
         seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
@@ -493,11 +493,16 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
             return await _always_allowed(desks, given, seat.node, identity.label)
         if given["kind"] == "join":
             try:
-                held = await desks.join_approved(given["pc"], given["agent"], given["graph"], seat.node, identity.label, ask)
+                held = await desks.join_approved(given["pc"], given["agent"], given["graph"], seat.node, identity.label, ask,
+                                                 denied=lambda: prompts.denied_by_person(device))
             except NotLoggedIn as unlogged:
-                said = prompts.waiting(desks, device, given["pc"], str(unlogged))
+                if prompts.denied_by_person(device) is not None:
+                    return f"The operator accepted, but you did not join {given['pc']}: {unlogged}, and the person there dismissed your request on the device."
+                said = prompts.waiting(desks, device, given["pc"], str(unlogged), unlogged.password)
                 kept = True
                 return said
+            except DeniedByPerson as denied:
+                return f"The operator accepted, but you did not join {given['pc']}: {denied}. desk/request asks again."
             except DeskRefused:
                 mine = desks.held_by(given["agent"], given["graph"])
                 if mine is None or mine.pc != given["pc"] or device is None:

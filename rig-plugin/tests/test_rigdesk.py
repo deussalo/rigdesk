@@ -1359,13 +1359,14 @@ class _StockBridge:
     """A stock PC's rigdesk-bridge on loopback: its prompt routes, its login on the operator's Accept (which logs in once the person allowed, or
     with a good saved password), and mint and claim."""
     def __init__(self, password: str | None) -> None:
-        self.password, self.allowed, self.posted = password, False, []
+        self.password, self.allowed, self.posted, self.login_s = password, False, [], 0.0
 
     async def took(self, request) -> object:
         from aiohttp import web
         body = await request.json() if request.can_read_body else {}
         self.posted.append((request.path, body))
         if request.path == "/login":
+            await asyncio.sleep(self.login_s)
             if self.allowed or self.password == "good":
                 return web.json_response({"logged_in": True})
             if self.password is None:
@@ -1422,11 +1423,13 @@ def _accepted(ask: str) -> dict:
 
 
 def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_succeeds_and_says_joined_only_then() -> None:
+    from core.sdk.host import scoped
     from rigdesk import _request_confirmed, prompts
     seat = SeatId(GraphName("g"), NodeId("n"))
 
-    async def accepted_then(password: str | None, device: str) -> tuple[str, _StockBridge, Desks, list]:
-        """The operator accepts while the device's prompt is up; the person there then answers device ("allow", "deny" or "" for nothing)."""
+    async def accepted_then(password: str | None, device: str, while_logging_in: bool = False) -> tuple[str, _StockBridge, Desks, list]:
+        """The operator accepts while the device's prompt is up; the person there then answers device ("allow", "deny" or "" for nothing), after
+        the Accept's login or while it is under way."""
         told: list = []
         with tempfile.TemporaryDirectory() as state:
             asks, bridge = _Asks("desk_1"), _StockBridge(password)
@@ -1436,7 +1439,16 @@ def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_suc
                 prompts.start(desks, "phone", "desk_1", seat, "a1", "g", "Builder")
                 await _until(lambda: "/offer" in bridge.paths())
                 asks.open.discard("desk_1")
-                said = await _request_confirmed(desks.host, _accepted("desk_1"))  # type: ignore[arg-type]
+                if while_logging_in:
+                    bridge.login_s = 0.3
+                    accepting = scoped("accepting", _request_confirmed(desks.host, _accepted("desk_1")))  # type: ignore[arg-type]
+                    await _until(lambda: "/login" in bridge.paths())
+                    nonce = next(body["nonce"] for path, body in bridge.posted if path == "/offer")
+                    await desks._event(desks._pcs["phone"], {"type": "offer", "ask": "desk_1", "nonce": nonce, "answer": device})
+                    said = await accepting
+                    device = ""
+                else:
+                    said = await _request_confirmed(desks.host, _accepted("desk_1"))  # type: ignore[arg-type]
                 await asyncio.sleep(0.1)
                 if device:
                     assert "/offer/end" not in bridge.paths() and "desk_1" in desks.prompts, "the device's prompt went away before any login succeeded"
@@ -1469,6 +1481,10 @@ def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_suc
         assert "you have not joined phone: Rig keeps no password for phone" in said, said
         assert len(told) == 1 and "dismissed your request on the device, so you did not join phone" in told[0][1], told
         assert "/claim" not in bridge.paths() and desks.held_on("phone") is None
+
+        said, bridge, desks, told = await accepted_then("good", "deny", while_logging_in=True)
+        assert "you did not join phone: denied by the person at phone" in said and "before Rig's login succeeded" in said, said
+        assert "/claim" not in bridge.paths() and desks.held_on("phone") is None and told == [], (bridge.paths(), told)
 
     asyncio.run(run())
 

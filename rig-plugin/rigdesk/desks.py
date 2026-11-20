@@ -228,8 +228,16 @@ class DeskRefused(Exception):
 
 
 class NotLoggedIn(DeskRefused):
-    """The operator's Accept found no RustDesk login to a stock PC: Rig keeps no password for it, or the PC refused the saved one. The person there can
-    still let the agent in by Allow on the device."""
+    """The operator's Accept found no RustDesk login to a stock PC: Rig keeps no password for it ("none"), or the PC refused the saved one ("refused").
+    The person there can still let the agent in by Allow on the device."""
+
+    def __init__(self, words: str, password: Literal["refused", "none"]) -> None:
+        super().__init__(words)
+        self.password: Literal["refused", "none"] = password
+
+
+class DeniedByPerson(DeskRefused):
+    """The person at the PC dismissed the request on the device while the operator's Accept was logging in: their no wins, and the login is not used."""
 
 
 class RedirectRefused(DeskRefused, aiohttp.ClientError):
@@ -1619,7 +1627,8 @@ class Desks:
         await self._ended(held, f"RigDesk {held.pc}: the operator took away your standing access to {held.pc}, so your session there ended. "
                                 "desk/request(pc, why) asks them again.")
 
-    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "", via: Literal["link", "assigned"] = "link") -> Held:
+    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "", via: Literal["link", "assigned"] = "link",
+                            denied: Callable[[], int | None] = lambda: None) -> Held:
         """The operator accepted this agent's request to join a PC: on a stock PC a share link is minted and claimed for it, as the human would;
         a RigDesk PC is asked for the session itself."""
         mine = self.held_by(agent, graph)
@@ -1633,6 +1642,9 @@ class Desks:
             return await self._join_operator(pc, agent, graph, node, title, ask, via)
         self.person_answered.discard(ask)
         await self.log_in(pc)
+        denied_ms = denied()
+        if denied_ms is not None:
+            raise DeniedByPerson(f"denied by the person at {pc} at {_clock(denied_ms)}: they dismissed the request on the device before Rig's login succeeded")
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title)
 
@@ -1649,8 +1661,8 @@ class Desks:
             raise DeskRefused(f"{pc}'s rigdesk-bridge is older than logging in on the operator's Accept, so whether it can log in is not known; "
                               "the operator installs a current rigdesk-bridge")
         if said.get("code") == "no_password":
-            raise NotLoggedIn(f"Rig keeps no password for {pc}")
-        raise NotLoggedIn(f"Rig's saved password for {pc} did not log in: {said.get('error') or f'HTTP {status}'}")
+            raise NotLoggedIn(f"Rig keeps no password for {pc}", "none")
+        raise NotLoggedIn(f"Rig's saved password for {pc} did not log in: {said.get('error') or f'HTTP {status}'}", "refused")
 
     def device_unasked(self, pc: str) -> str | None:
         """Why the person at a stock PC is not asked on the device for an agent's desk/request; None when they are, or for a RigDesk PC."""
