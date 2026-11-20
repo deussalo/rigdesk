@@ -188,6 +188,13 @@ async def _ask_phone(desks: Desks, call: Call, asked: PhoneAsk, title: str) -> A
     unnamed = await desks.one_tap_unnamed(asked.pc)
     if unnamed is not None:
         return call.refused(OPERATOR_UNNAMED, unnamed)
+    open_now = prompts.open_on(desks, asked.pc)
+    if open_now is not None and open_now.agent != agent:
+        return call.refused(REFUSED, f"the person at {asked.pc} is being asked for {open_now.title} now; desk/join again once they have answered")
+    if open_now is not None:
+        return {"pc": asked.pc, "joined": False, "ask": open_now.ask,
+                "said": (f"Not joined yet: your request {open_now.ask} is still waiting on the person at {asked.pc}, so nothing more was sent to the phone. "
+                         "Your next input says when the session is up, or that they denied it or it lapsed.")}
     ask = new_id("desk")
     prompts.start(desks, asked.pc, ask, call.contract.place.seat, agent, graph, title, granted=asked.unlogged.password)
     if ask not in desks.prompts:

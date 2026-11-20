@@ -1573,6 +1573,14 @@ def test_an_assigned_agents_desk_join_on_a_phone_rig_cannot_log_in_to_asks_the_p
                 answer = await _join(desks, call, JoinInput(pc="phone"))  # type: ignore[arg-type]
                 assert answer["joined"] is False and "is asked on the phone" in answer["said"] and "Can't reach phone" in answer["said"], answer
                 await _until(lambda: assistant.shown)
+                again = await _join(desks, call, JoinInput(pc="phone"))  # type: ignore[arg-type]
+                assert again["joined"] is False and again["ask"] == answer["ask"] and "still waiting on the person" in again["said"], again
+                other = SimpleNamespace(**{**vars(call), "contract": SimpleNamespace(place=SimpleNamespace(agent="a2", seat=SeatId(GraphName("g"), NodeId("n2"))))})
+                await desks.assign("phone", "agent:a2")
+                refused = await _join(desks, other, JoinInput(pc="phone"))  # type: ignore[arg-type]
+                assert refused.get("refused") and "being asked for Builder" in refused["said"], refused
+                await asyncio.sleep(0.05)
+                assert len(assistant.shown) == 1 and list(desks.prompts) == [answer["ask"]], (assistant.shown, list(desks.prompts))
                 shown = assistant.shown[0]
                 assert shown["ask"] == answer["ask"] and shown["agent_id"] == "a1" and shown["operator"] == "Arian", shown
                 assert await prompts.phone_said(desks.host, _said(answer["ask"], shown["nonce"], said)) == "taken"  # type: ignore[arg-type]

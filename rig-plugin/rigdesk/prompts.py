@@ -159,6 +159,11 @@ def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str,
     prompt.task = TASKS.spawn(f"rigdesk-prompt-{ask}", _prompting(desks, prompt))
 
 
+def open_on(desks: Desks, pc: str) -> Prompt | None:
+    """The request being shown on pc now, whoever asked; None with none."""
+    return next((prompt for prompt in desks.prompts.values() if prompt.pc == pc and prompt.task is not None and not prompt.task.done()), None)
+
+
 def operator_said(desks: Desks, ask: str) -> Prompt | None:
     """The operator accepted the ask: its prompt, kept up while Rig tries the saved password and until a login succeeds; None when none is up."""
     prompt = desks.prompts.get(ask)
