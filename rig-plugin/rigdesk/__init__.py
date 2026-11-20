@@ -42,9 +42,9 @@ PC_SHELL_CODES: dict[str, HTTPStatus] = {"shell_off": HTTPStatus.FORBIDDEN, "she
                                          "jobs_full": HTTPStatus.TOO_MANY_REQUESTS, "no_job": HTTPStatus.NOT_FOUND}
 
 
-NO_SESSION = ("you hold no RigDesk session: desk/join(pc) joins a PC assigned to you (desk/pcs lists every PC and which are yours); given a PC's "
-              "RustDesk ID and its password (permanent or one-time), desk/connect(id, password) joins it yourself; for another, "
-              "ask the operator with desk/request(pc, why), or call desk/join with a share link the human at the PC gives you. A desk call never joins one by itself")
+NO_SESSION = ("you hold no RigDesk session. To join a PC, call desk/join(pc) for one assigned to you (desk/pcs lists every PC and which are yours), "
+              "desk/join(link) with a share link from the human at the PC, desk/connect(id, password) with its RustDesk ID and its permanent or one-time password, "
+              "or desk/request(pc, why) to ask the operator.")
 
 
 def _unshared(desks: Desks, agent: str, graph: str, words: str = NO_SESSION) -> str:
@@ -165,7 +165,7 @@ def _refused(call: Call, refused: Exception) -> Answer:
 async def _join(desks: Desks, call: Call, given: JoinInput) -> Answer:
     agent, graph, node = _who(call)
     if (given.link is None) == (given.pc is None):
-        return call.refused("invalid_params", "desk/join takes a share link or the name of a PC assigned to you, not both")
+        return call.refused("invalid_params", "desk/join takes exactly one of link (a share link) or pc (a PC assigned to you)")
     title = await call.kernel.caller_title()
     try:
         held = (await desks.join(given.link, agent, graph, node, title) if given.link is not None
@@ -200,7 +200,7 @@ async def _invite_confirmed(host: PluginHost, asked: Confirmed) -> str:
     seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
     identity = await host.roster.identity(seat)
     if identity is None or identity.agent != given["agent"] or seat in await host.roster.closed((seat,)):
-        raise Refused(REFUSED, f"{given['agent']} no longer stands at {seat.graph}/{seat.node}, so the invite to {given['pc']} was not claimed")
+        raise Refused(REFUSED, f"the invite to {given['pc']} was not claimed: {given['agent']} no longer stands at {seat.graph}/{seat.node}")
     try:
         held = await host.live(Desks).join(given["link"], given["agent"], given["graph"], seat.node, identity.label, approved=True)
     except DeskRefused as refused:
@@ -256,7 +256,7 @@ async def _connect_confirmed(host: PluginHost, asked: Confirmed) -> str:
     identity = await host.roster.identity(seat)
     if identity is None or identity.agent != given["agent"] or seat in await host.roster.closed((seat,)):
         desks.connect_dropped(given["ask"])
-        raise Refused(REFUSED, f"{given['agent']} no longer stands at {seat.graph}/{seat.node}, so {given['id']} was not dialed")
+        raise Refused(REFUSED, f"{given['id']} was not dialed: {given['agent']} no longer stands at {seat.graph}/{seat.node}")
     try:
         held, reached = await desks.connect_approved(given["ask"], given["agent"], given["graph"], seat.node, identity.label)
     except DeskRefused as refused:
@@ -378,12 +378,12 @@ def _shell_answered(pc: str, given: ShellInput, run_as: ShellLevel, said: JsonOb
 async def _shell(desks: Desks, call: Call, given: ShellInput) -> Answer:
     agent, graph, _ = _who(call)
     if (given.job is None) == (given.command is None):
-        return call.refused("invalid_params", "desk/shell takes a command to run, or a job to read, not both")
+        return call.refused("invalid_params", "desk/shell takes exactly one of command (to run) or job (to read)")
     held = desks.held_by(agent, graph)
     pc = given.pc if given.pc is not None else None if held is None else held.pc
     if pc is None:
-        return call.refused(UNSHARED, _unshared(desks, agent, graph, "desk/shell(pc, command) names a PC whose shell the operator allowed you (desk/pcs says "
-                                                                  "where), or runs on the PC you joined; you named none and hold no session"))
+        return call.refused(UNSHARED, _unshared(desks, agent, graph, "you named no pc and hold no session: desk/shell(pc, command) runs on a PC whose shell the "
+                                                                  "operator allowed you (desk/pcs says where), or without pc on the PC you joined"))
     entry = next((each for each in desks.entries() if each["name"] == pc), None)
     if entry is None:
         return call.refused(REFUSED, f"no RigDesk PC named {pc} is set up in Rig; desk/pcs lists those that are")
@@ -485,7 +485,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
         seat = SeatId(GraphName(asked["graph"]), NodeId(asked["node"]))
         identity = await host.roster.identity(seat)
         if identity is None or identity.agent != given["agent"] or seat in await host.roster.closed((seat,)):
-            raise Refused(REFUSED, f"{given['agent']} no longer stands at {seat.graph}/{seat.node}, so nothing was done on {given['pc']}")
+            raise Refused(REFUSED, f"nothing was done on {given['pc']}: {given['agent']} no longer stands at {seat.graph}/{seat.node}")
         if device is None:
             prompts.end(desks, ask)
         if asked.get("choice") == "always":
@@ -668,7 +668,7 @@ def _why_missing(host: PluginHost, name: str, listed: bool) -> str | None:
     if branch != BRANCH or not slash:
         return None
     if not host.live(Desks).catalog():
-        return f"no RigDesk PC has been reached yet, so its tools are not known; desk/join works, and {name} shows once a PC answers"
+        return f"no RigDesk PC has answered yet, so Rig knows none of their tools; desk/join works now, and {name} shows once a PC answers"
     return f"RigDesk PCs offer no tool {tool!r}" + ("; tool_load `desk/` lists the ones they do" if listed else "")
 
 

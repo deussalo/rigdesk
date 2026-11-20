@@ -30,9 +30,9 @@ def test_the_agent_hears_only_of_a_holder_change_that_lets_it_carry_on_and_not_o
     handed = str(words_of("deus", {"type": "holder", "holder": "agent", "by": "hand to agent", "at_ms": 0}))
     assert "resumed you" in resumed and "handed input back to you" in handed and all("Carry on there by yourself" in said for said in (resumed, handed))
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
-    assert "session there ended" in str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the human ended the share", "at_ms": 0}))
+    assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the human ended the share", "at_ms": 0}) == "the human ended the share."
     closed = str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": PERSON_ENDED, "at_ms": 0}))
-    assert "the person at deus ended it" in closed and "Nothing reconnects by itself" in closed, closed
+    assert closed == "the person at deus ended it.", closed
 
 
 def test_a_rigdesk_pc_says_whether_the_operator_can_start_a_session_there() -> None:
@@ -240,7 +240,7 @@ def test_a_session_that_ends_by_itself_sends_the_agent_nothing_and_its_next_desk
             desks.leave = leave  # type: ignore[method-assign]
             assert (await _next_call(desks)).startswith("you hold no RigDesk session")
             for cause, why in (("person", "the person at the PC ended the session"), ("closed", "the person at deus ended it"), ("restart", "RigDesk restarted there"),
-                               ("idle", "you left deus after 5 minutes without a desk call"), ("unassigned", "took away your standing access to deus")):
+                               ("idle", "you left it after 5 minutes without a desk call"), ("unassigned", "took away your standing grant to deus")):
                 await ended_by(cause)
                 said = await _next_call(desks)
                 assert "deus" not in desks._sessions and why in said and "You hold no RigDesk session" in said, (cause, said)
@@ -402,7 +402,7 @@ def test_always_allow_on_a_rigdesk_pc_grants_and_joins_through_join_and_unassign
             assert joined == [("front", "desk_1", "assigned"), ("front", "standing grant", "assigned")]
             assert await desks.unassign("front", "agent:a1")
             assert "front" not in desks._sessions and desks.assigned_pcs("a1", "g") == ()
-            assert "took away your standing access to front" in await _next_call(desks)
+            assert "took away your standing grant to front" in await _next_call(desks)
             desks._pcs["busy"] = PcLink("busy", DeskPc(url="https://busy.tail1234.ts.net", token_file="/dev/null"))
             try:
                 await _always_allowed(desks, {"pc": "busy", "agent": "a1", "graph": "g", "kind": "join", "ask": "desk_2"}, "n", "A")
@@ -453,7 +453,7 @@ def test_an_assigned_session_idle_five_minutes_leaves_the_pc_but_a_link_session_
             desks.leave = leave  # type: ignore[method-assign]
             desks._tell = tell  # type: ignore[method-assign]
             await desks._idle_leaves()
-            assert "RigDesk deus: you left deus after 5 minutes" in await _next_call(desks)
+            assert "Your session on deus ended at" in (said := await _next_call(desks)) and "you left it after 5 minutes" in said, said
 
     asyncio.run(run())
     assert left == ["deus"]
