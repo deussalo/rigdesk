@@ -32,8 +32,8 @@ use crate::link::Link;
 
 /// What the PC answers a login that comes with no password, while its person is asked.
 const NO_PASSWORD_ACCESS: &str = "No Password Access";
-/// What the PC says as it closes the connection when its person presses Dismiss.
-const CLOSED_BY_PERSON: &str = "Closed manually by the peer";
+/// What the PC says as it closes the connection when its person presses Dismiss, or closes a session.
+pub(crate) const CLOSED_BY_PERSON: &str = "Closed manually by the peer";
 /// The PC drops an unanswered prompt itself after about 3 minutes; this only bounds a PC that went silent.
 const READ_TIMEOUT_MS: u64 = 30_000;
 /// An allowed connection no agent has claimed by then is hung up: Rig settled the ask another way, or never claimed it.

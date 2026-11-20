@@ -73,6 +73,21 @@ struct State {
     info: Option<PeerInfo>,
 }
 
+/// Why the agent's claim ends when the person at the PC closes the session; the plugin names the PC in it.
+pub const PERSON_ENDED: &str = "the person at the PC ended it";
+
+/// The PC closed the session because the person at it closed it there.
+#[derive(Debug)]
+struct PersonClosed;
+
+impl std::fmt::Display for PersonClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the person at the PC closed the session")
+    }
+}
+
+impl std::error::Error for PersonClosed {}
+
 /// What a RigDesk PC answers a login under an ID not its own; the plugin takes it to mean "try the next PC".
 const NOT_THE_INVITED_DEVICE: &str = "Offline";
 
@@ -143,6 +158,9 @@ pub struct Link {
     carried: AtomicBool,
     /// Hangs up the adopted session running now (`hang_up`).
     hang: AtomicBool,
+    /// The person at the PC closed the last session: nothing dials it, for a tool, a viewer or the saved password, until Rig is let in
+    /// again, by a login on a new join (`log_in`), a connection the person allows (`adopt`) or a new claim.
+    closed_by_person: AtomicBool,
     /// An invite the device made: the session login presents it in place of the password.
     invite: OnceLock<crate::invite::Invite>,
     invite_login: Mutex<InviteLogin>,
@@ -200,6 +218,7 @@ impl Link {
             swap: Notify::new(),
             carried: AtomicBool::new(false),
             hang: AtomicBool::new(false),
+            closed_by_person: AtomicBool::new(false),
             invite: OnceLock::new(),
             invite_login: Mutex::new(InviteLogin::default()),
         })
@@ -240,8 +259,15 @@ impl Link {
         self.once.load(Ordering::SeqCst) || self.viewers.load(Ordering::SeqCst) > 0 || now_ms().saturating_sub(self.last_use_ms.load(Ordering::SeqCst)) < IDLE.as_millis() as u64
     }
 
-    /// With no password saved, only a connection the person at the PC allowed carries a session.
+    /// With no password saved, only a connection the person at the PC allowed carries a session; once the person closed one, nothing
+    /// does until Rig is let in again.
     fn may_dial(&self) -> bool {
+        if self.closed_by_person.load(Ordering::SeqCst) {
+            if !self.shared.claimed() {
+                return false;
+            }
+            self.closed_by_person.store(false, Ordering::SeqCst);
+        }
         !self.password.is_empty() || self.once.load(Ordering::SeqCst) || self.carried.load(Ordering::SeqCst) || self.adopted.lock().unwrap().is_some()
     }
 
@@ -254,7 +280,13 @@ impl Link {
             }
             let started = now_ms();
             let ended = self.session().await;
-            if self.carried.swap(false, Ordering::SeqCst) && !self.may_dial() {
+            let carried = self.carried.swap(false, Ordering::SeqCst);
+            let by_person = matches!(&ended, Err(e) if e.downcast_ref::<PersonClosed>().is_some());
+            if by_person {
+                self.last_use_ms.store(0, Ordering::SeqCst);
+                self.shared.revoke(PERSON_ENDED);
+                self.closed_by_person.store(true, Ordering::SeqCst);
+            } else if carried && !self.may_dial() {
                 self.shared.revoke("the RustDesk session the person at the PC allowed ended; desk/request asks them again");
             }
             {
@@ -262,7 +294,7 @@ impl Link {
                 state.out = None;
                 state.peer = None;
                 state.info = None;
-                if let Err(e) = &ended {
+                if let (Err(e), false) = (&ended, by_person) {
                     state.failure = Some((e.to_string(), now_ms()));
                     self.shared.set_down(Some(e.to_string()));
                 }
@@ -276,6 +308,7 @@ impl Link {
             }
             match ended {
                 Ok(()) => log::info!("closed the session to {} after it went idle", self.addr),
+                Err(_) if by_person => log::info!("the person at {} closed the session; nothing dials it until Rig is let in again", self.addr),
                 Err(e) => {
                     log::warn!("session to {} ended: {e}", self.addr);
                     let pause = if e.to_string().starts_with("login refused") {
@@ -487,6 +520,7 @@ impl Link {
                 }
             }
             Some(message::Union::Misc(m)) => match m.union {
+                Some(misc::Union::CloseReason(reason)) if reason == crate::knock::CLOSED_BY_PERSON => return Err(PersonClosed.into()),
                 Some(misc::Union::CloseReason(reason)) => bail!("the PC closed the session: {reason}"),
                 Some(misc::Union::SwitchDisplay(sd)) => {
                     let mut state = self.state.lock().unwrap();
@@ -559,6 +593,7 @@ impl Link {
 
     /// The connection the person at the PC allowed carries the session from now: any session running is closed for it.
     pub fn adopt(&self, allowed: crate::knock::Allowed) {
+        self.closed_by_person.store(false, Ordering::SeqCst);
         *self.adopted.lock().unwrap() = Some(allowed);
         self.last_use_ms.store(now_ms(), Ordering::SeqCst);
         self.swap.notify_one();
@@ -594,6 +629,7 @@ impl Link {
     /// unless a session is up: Rig asks for it on the operator's Accept. A password the PC refuses is tried this once:
     /// the link does not dial it again until something uses the PC.
     pub fn log_in(&self, wait: Duration) -> Result<(), NoLogin> {
+        self.closed_by_person.store(false, Ordering::SeqCst);
         if !self.may_dial() {
             return Err(NoLogin::NoPassword);
         }
@@ -620,6 +656,10 @@ impl Link {
                         return Err(format!("cannot reach the PC at {}: {why}", self.addr));
                     }
                 }
+            }
+            if self.closed_by_person.load(Ordering::SeqCst) && !self.may_dial() {
+                return Err(format!("no RustDesk session to the PC at {}: the person there closed the last one, so nothing dials it until an agent \
+                                    joins again", self.addr));
             }
             if !self.may_dial() {
                 return Err(format!("no RustDesk session to the PC at {}: Rig keeps no password for it, so only the person at the PC lets an agent in, \
@@ -758,6 +798,7 @@ fn rand_id() -> u64 {
 mod tests {
     use super::*;
     use base::invite;
+    use rigdesk_agent::EventKind;
 
     #[test]
     fn with_no_password_kept_an_agent_is_told_only_the_persons_allow_lets_it_in() {
@@ -819,6 +860,79 @@ mod tests {
         let (link, ok) = logged_in_with(&addr, "good").await;
         assert_eq!(ok, Ok(()));
         assert_eq!(link.state.lock().unwrap().peer.as_ref().map(|peer| peer.hostname.as_str()), Some("front"));
+    }
+
+    /// A stock PC on loopback that logs in every dial and, on the first session only, then closes it as its person does.
+    async fn pc_whose_person_closes_the_first_session() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let logins = Arc::new(AtomicUsize::new(0));
+        let counted = logins.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, dialer)) = listener.accept().await {
+                let counted = counted.clone();
+                tokio::spawn(async move {
+                    let mut pc = FramedStream::from(socket, dialer);
+                    if pc.send(&message_of(Hash { salt: "s".into(), challenge: "c".into(), ..Default::default() })).await.is_err() {
+                        return;
+                    }
+                    while let Some(Ok(bytes)) = pc.next_timeout(5_000).await {
+                        if Message::parse_from_bytes(&bytes).ok().filter(Message::has_login_request).is_none() {
+                            continue;
+                        }
+                        let first = counted.fetch_add(1, Ordering::SeqCst) == 0;
+                        pc.send(&logged_in()).await.unwrap();
+                        if first {
+                            let mut close = Message::new();
+                            close.set_misc(Misc { union: Some(misc::Union::CloseReason(crate::knock::CLOSED_BY_PERSON.into())), ..Default::default() });
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            pc.send(&close).await.unwrap();
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, logins)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_persons_close_ends_the_agents_claim_and_nothing_dials_the_pc_again_until_a_new_join() {
+        let (addr, logins) = pc_whose_person_closes_the_first_session().await;
+        let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(64)));
+        let link = Link::new(Route::direct(&addr), "saved".into(), "Rig agent".into(), shared.clone());
+        tokio::spawn(link.clone().run());
+        let grant = shared.mint();
+        let owner = rigdesk_agent::session::Owner { agent_id: "a1".into(), title: "Builder".into(), graph: "g".into() };
+        shared.claim(&grant.grant, &grant.secret, owner).unwrap();
+        let trying = link.clone();
+        assert_eq!(tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10))).await.unwrap(), Ok(()));
+
+        let revoked = || {
+            shared.events.since(0).into_iter().filter_map(|e| match e.kind {
+                EventKind::Revoked { agent_id, reason } => Some((agent_id, reason)),
+                _ => None,
+            }).collect::<Vec<_>>()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while revoked().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(revoked(), vec![("a1".to_string(), PERSON_ENDED.to_string())], "the agent's claim ends, saying the person ended it");
+        assert!(!shared.claimed());
+        assert!(link.shared.down().is_none(), "a person's close is not the PC being down");
+
+        let _viewer = link.attach();
+        let using = link.clone();
+        let Err(refused) = tokio::task::spawn_blocking(move || using.ensure(Duration::from_secs(2))).await.unwrap() else { panic!("a tool reached the PC after the person closed it") };
+        assert!(refused.contains("the person there closed the last one"), "{refused}");
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        assert_eq!(logins.load(Ordering::SeqCst), 1, "the saved password was dialed again after the person closed the session");
+        assert!(!link.wanted(), "a viewer or a tool call does not reopen it");
+
+        let joining = link.clone();
+        assert_eq!(tokio::task::spawn_blocking(move || joining.log_in(Duration::from_secs(10))).await.unwrap(), Ok(()), "a new join logs in again");
+        assert_eq!(logins.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
