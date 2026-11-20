@@ -709,6 +709,7 @@ class Desks:
                 return False
             left = tuple(each for each in held if each != grantee)
             await self._save_grants(Grants(pcs={name: grantees for name, grantees in (self._grants.pcs | {pc: left}).items() if grantees}, shell=self._grants.shell))
+        await prompts.unassigned(self, pc)
         session = self._sessions.get(pc)
         if session is not None and session.via == "assigned" and not _grants(left, session.agent, session.graph):
             if self._link(pc).spec.stock is None:

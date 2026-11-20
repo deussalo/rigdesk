@@ -1044,12 +1044,16 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           SettingsSection(title: Text('Rig'), tiles: [
             SettingsTile.switchTile(
               initialValue: _rigAssignedNoTap,
+              // "Accept sessions via password" alone lets nothing in with no password but your own Accept.
+              enabled: gFFI.serverModel.approveMode != 'password',
               title: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text('Assigned agents join with no tap'),
                     Text(
-                        '* While screen sharing is on, an agent the operator assigned this phone to in Rig joins without asking you. Off: you are asked each time.',
+                        gFFI.serverModel.approveMode == 'password'
+                            ? '* Off while sessions are accepted via password only.'
+                            : '* While screen sharing is on, an agent the operator assigned this phone to in Rig joins without asking you, even while someone views this phone with RustDesk; only another Rig agent being in makes it ask. Off: you are asked each time.',
                         style: Theme.of(context).textTheme.bodySmall),
                   ]),
               onToggle: (toValue) async {
