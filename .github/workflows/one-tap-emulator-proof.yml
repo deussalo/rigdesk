@@ -1,0 +1,71 @@
+# THROWAWAY: runs one-tap-emulator-proof/prove.py on an emulator with the APK and bridge of one-tap-emulator-build.
+name: one-tap-emulator-proof
+on:
+  push:
+    branches: [rig/rigdesk/one-tap-proof]
+    paths: [one-tap-emulator-proof/**, .github/workflows/one-tap-emulator-proof.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [34, 35]
+    env:
+      IMAGE: "system-images;android-${{ matrix.api }};google_apis;x86_64"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { submodules: false }
+      - name: The build's artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(cat one-tap-emulator-proof/BUILD_RUN)
+          echo "BUILD_HEAD=$(gh run view "$run" -R "$GITHUB_REPOSITORY" --json headSha --jq .headSha)" >> "$GITHUB_ENV"
+          gh run download "$run" -R "$GITHUB_REPOSITORY" -n rigdesk-android-x64 -D "$RUNNER_TEMP/apk"
+          gh run download "$run" -R "$GITHUB_REPOSITORY" -n knock-linux-tools -D "$RUNNER_TEMP/tools"
+          chmod +x "$RUNNER_TEMP"/tools/rigdesk-bridge
+          gcc -static -O2 -o "$RUNNER_TEMP/relay" one-tap-emulator-proof/relay.c
+      - name: KVM must be here
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules; sudo udevadm trigger --name-match=kvm; sleep 2
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Android tools
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          export JAVA_HOME=$JAVA_HOME_17_X64
+          S="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$S" --licenses >/dev/null || true
+          "$S" --install emulator platform-tools "$IMAGE" >/dev/null
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"; echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"; echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+      - name: Start the emulator
+        run: |
+          export ANDROID_AVD_HOME="$HOME/.android/avd"; mkdir -p "$ANDROID_AVD_HOME"; echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          echo no | avdmanager create avd -n proof -k "$IMAGE" -d pixel_6 --force
+          emulator -list-avds | grep -qx proof
+          nohup emulator -avd proof -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -no-metrics > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          booted() { [ "$(timeout 10 adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; }
+          for i in $(seq 1 120); do booted && break; pgrep -f qemu-system >/dev/null || { echo "emulator died"; break; }; sleep 5; done
+          booted || { echo "no boot after 10 min"; tail -100 "$RUNNER_TEMP/emulator.log"; adb devices; exit 1; }
+          sleep 15
+      - name: The proof
+        timeout-minutes: 35
+        run: python3 one-tap-emulator-proof/prove.py "$RUNNER_TEMP/tools" "$RUNNER_TEMP"/apk/rigdesk-android-x64.apk "$RUNNER_TEMP/proof" "$RUNNER_TEMP/relay"
+      - name: What the emulator logged
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/proof"; rm -f "$RUNNER_TEMP/proof/pair.key" "$RUNNER_TEMP/proof/put.tmp" "$RUNNER_TEMP/proof/bridge.token"
+          timeout 30 adb exec-out screencap -p > "$RUNNER_TEMP/proof/final.png" 2>/dev/null || true
+          echo "=== crash buffer"; timeout 30 adb logcat -d -b crash 2>/dev/null | cut -c1-220 | tail -120 || true
+          echo "=== background starts"; timeout 30 adb logcat -d -v time 2>/dev/null | grep -iE "RigAssistantJoin|Background activity|BAL|abort_background" | cut -c1-260 | tail -80 || true
+          echo "=== fatal lines"; timeout 30 adb logcat -d -v time -s AndroidRuntime:E DEBUG:F libc:F flutter:E 2>/dev/null | cut -c1-220 | tail -120 || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: one-tap-emulator-proof-api${{ matrix.api }}
+          path: ${{ runner.temp }}/proof
