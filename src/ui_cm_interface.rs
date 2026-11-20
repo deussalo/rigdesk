@@ -152,7 +152,7 @@ pub struct Client {
     /// RigDesk Android: for a Rig agent's session that is in, who joined ("<agent> joined") and how ("your Accept on this
     /// phone"); both empty otherwise.
     pub rig_joined: String,
-    pub rig_joined_how: String,
+    pub rig_joined_said: String,
     #[serde(skip)]
     #[cfg(not(any(target_os = "ios")))]
     tx: UnboundedSender<Data>,
@@ -219,12 +219,12 @@ impl<T: InvokeUiCM> DerefMut for ConnectionManager<T> {
 }
 
 /// What the person is told of a Rig agent's session once it is in, from how the server let it in (`base::rig_knock`):
-/// who joined and how.
+/// who joined, and the sentence saying how.
 fn rig_joined(id: i32, authorized: bool) -> (String, String) {
     #[cfg(target_os = "android")]
     if authorized {
         if let Some(joined) = base::rig_knock::joined_how(id) {
-            return (joined.title(), joined.how().to_owned());
+            return (joined.title(), joined.said().to_owned());
         }
     }
     let _ = (id, authorized);
@@ -254,7 +254,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
         from_switch: bool,
         #[cfg(not(any(target_os = "ios")))] tx: mpsc::UnboundedSender<Data>,
     ) {
-        let (rig_joined, rig_joined_how) = rig_joined(id, authorized);
+        let (rig_joined, rig_joined_said) = rig_joined(id, authorized);
         let client = Client {
             id,
             authorized,
@@ -280,7 +280,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             in_voice_call: false,
             incoming_voice_call: false,
             rig_joined,
-            rig_joined_how,
+            rig_joined_said,
         };
         CLIENTS
             .write()

@@ -287,14 +287,15 @@ impl Joined {
         format!("{} joined", self.name)
     }
 
-    pub fn how(&self) -> &'static str {
+    /// How it got in, as the sentence the notice opens with and the app's card shows after the title.
+    pub fn said(&self) -> &'static str {
         match self.by {
-            JoinedBy::OneTap => "your Accept on this phone",
-            JoinedBy::Allowed => "your Allow on this phone",
-            JoinedBy::Invite => "this phone's invite",
-            JoinedBy::RigAccept => "your Rig Accept, saved password",
-            JoinedBy::Unattended => "saved password, nobody asked",
-            JoinedBy::Assigned => "assigned in Rig, no tap: your setting",
+            JoinedBy::OneTap => "By your Accept on this phone.",
+            JoinedBy::Allowed => "By your Allow on this phone.",
+            JoinedBy::Invite => "By this phone's invite.",
+            JoinedBy::RigAccept => "By your Rig Accept, saved password.",
+            JoinedBy::Unattended => "By saved password, nobody asked.",
+            JoinedBy::Assigned => "With no tap: assigned in Rig, and your setting allows it.",
         }
     }
 }
@@ -504,7 +505,7 @@ mod tests {
         joined(9001, JoinedBy::RigAccept);
         joined(9001, JoinedBy::Allowed);
         let first = joined_how(9001).unwrap();
-        assert_eq!((first.title().as_str(), first.how()), ("Builder (Rig agent) joined", "your Rig Accept, saved password"), "the first way in stands");
+        assert_eq!((first.title().as_str(), first.said()), ("Builder (Rig agent) joined", "By your Rig Accept, saved password."), "the first way in stands");
         joined(9002, JoinedBy::OneTap);
         assert_eq!(joined_how(9002), None, "an unproved login is never told as Rig's");
         left(9001);
@@ -513,10 +514,10 @@ mod tests {
         let words = [JoinedBy::OneTap, JoinedBy::Allowed, JoinedBy::Invite, JoinedBy::Unattended, JoinedBy::Assigned]
             .iter()
             .copied()
-            .map(|by| Joined { name: "B".into(), by }.how())
+            .map(|by| Joined { name: "B".into(), by }.said())
             .collect::<Vec<_>>();
-        assert_eq!(words, vec!["your Accept on this phone", "your Allow on this phone", "this phone's invite", "saved password, nobody asked",
-                               "assigned in Rig, no tap: your setting"]);
+        assert_eq!(words, vec!["By your Accept on this phone.", "By your Allow on this phone.", "By this phone's invite.", "By saved password, nobody asked.",
+                               "With no tap: assigned in Rig, and your setting allows it."]);
     }
 
     #[test]

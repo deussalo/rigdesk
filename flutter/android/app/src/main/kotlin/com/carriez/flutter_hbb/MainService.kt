@@ -140,7 +140,7 @@ class MainService : Service() {
                             jsonObject.optString("port_forward").isEmpty()
                         val rigJoined = jsonObject.optString("rig_joined")
                         if (rigJoined.isNotEmpty()) {
-                            rigJoinedNotification(id, rigJoined, jsonObject.optString("rig_joined_how"))
+                            rigJoinedNotification(id, rigJoined, jsonObject.optString("rig_joined_said"))
                         } else if (capturing || !seesScreen) {
                             onClientAuthorizedNotification(id, type, username, peerId)
                         } else {
@@ -1089,14 +1089,14 @@ class MainService : Service() {
     }
 
     /// RigDesk: a Rig agent's session is in. The title says who ("<agent> joined") and the text opens with how ("By your Rig
-    /// Accept, saved password."), since a collapsed row cuts the title's end; with Disconnect, never a "Do you accept?" for a
+    /// Accept, saved password.", base::rig_knock's Joined::said), since a collapsed row cuts the title's end; with Disconnect, never a "Do you accept?" for a
     /// login that is already in. While the screen is shared Android 15 shows only the public version, without buttons, so
     /// that says the same and opens the app, whose connection card has Disconnect.
-    private fun rigJoinedNotification(clientID: Int, joined: String, how: String) {
+    private fun rigJoinedNotification(clientID: Int, joined: String, said: String) {
         loginPromptDone(clientID)
         cancelNotification(clientID)
         val openApp = rigRequestOpenApp(clientID)
-        val sharedWords = "By $how. Open RigDesk to disconnect it."
+        val sharedWords = "$said Open RigDesk to disconnect it."
         val whileShared = NotificationCompat.Builder(this, notificationChannel)
             .setSmallIcon(R.mipmap.ic_stat_logo)
             .setContentTitle(joined)
@@ -1110,7 +1110,7 @@ class MainService : Service() {
             putExtra(EXT_LOGIN_REQ_ID, clientID)
         }
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE else FLAG_UPDATE_CURRENT
-        val words = "By $how. It can see and use this phone until you disconnect it."
+        val words = "$said It can see and use this phone until you disconnect it."
         val notification = NotificationCompat.Builder(this, notificationChannel)
             .setSmallIcon(R.mipmap.ic_stat_logo)
             .setOngoing(true)
