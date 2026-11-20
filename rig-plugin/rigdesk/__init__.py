@@ -511,15 +511,14 @@ async def _ask_on_phone(desks: Desks, call: Call, given: RequestInput, tap: prom
         return call.refused(REFUSED, f"the person at {given.pc} is being asked for {open_now.title} now ({open_now.ask}); ask again once they have answered")
     how = (f"It shows on the phone as one notification, through Rig Assistant ({tap.why})." if tap.state == "ready" else
            f"Rig Assistant cannot reach the phone ({tap.why}), so RigDesk on the phone asks instead, which the person sees only while its screen sharing is on.")
-    reason = Titled(f"Asks to join {given.pc}: {given.why.strip()}",
-                    f"Waiting on the person at {given.pc}: only they can let it in, on the phone. {how} Cancel withdraws the request.")
+    reason = Titled(f"Asks to join {given.pc}: {given.why.strip()}", f"Waiting for you to accept on {given.pc}. Cancel withdraws the request.")
     then: JsonObject = {"pc": given.pc, "agent": agent, "graph": graph, "kind": "join", "ask": asked}
     state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id, Then(provision=REQUEST_CONFIRMED.name, given=then, operator_only=True),
                                      prompts.CANCEL_ONLY)
     if state == "active":
         prompts.start(desks, given.pc, asked, seat, agent, graph, title, then, yes="person")
     return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
-            "said": (f"Nothing is joined yet: the person at {given.pc} is asked on the phone, and only they can let you in; the operator can only cancel. "
+            "said": (f"Nothing is joined yet: the person at {given.pc} is asked on the phone, and only they can let you in; the operator can only cancel. {how} "
                      "Your next input says when the session is up, or that they denied it, it lapsed or it was cancelled.")}
 
 

@@ -1807,7 +1807,8 @@ def test_a_phones_desk_request_files_a_card_rig_can_only_cancel_and_only_the_per
         assert card["choices"].choice("accept") is None and card["choices"].choice("allow_always") is None, "the card offers nothing that would run its then"
         assert card["then"].given == {"pc": "phone", "agent": "a1", "graph": "g", "kind": "join", "ask": answer["ask"]}, card["then"]
         assert card["reason"].title == "Asks to join phone: to fix the printer", card["reason"]
-        assert "only they can let it in" in card["reason"].rest and "through Rig Assistant" in card["reason"].rest and "Cancel withdraws" in card["reason"].rest, card["reason"]
+        assert card["reason"].rest == "Waiting for you to accept on phone. Cancel withdraws the request.", card["reason"]
+        assert "through Rig Assistant" in answer["said"], answer
         assert seen["before"] == [], seen["before"]
         assert seen["again"].get("refused") and "being asked for Builder" in seen["again"]["said"], seen["again"]
         assert len(seen["card"].filed) == 1 and len(assistant.shown) == 1, "one request at a time on a phone"
@@ -1857,8 +1858,9 @@ def test_with_the_phones_rig_assistant_offline_or_refusing_the_bridges_knock_ask
     async def run() -> None:
         offline = _Assistant(up=False)
         seen = await _phone_requested(offline, allow)
-        reason = seen["card"].filed[0]["reason"].rest
-        assert "Rig Assistant cannot reach the phone" in reason and "RigDesk on the phone asks instead" in reason and "only they can let it in" in reason, reason
+        reason, said = seen["card"].filed[0]["reason"].rest, seen["answer"]["said"]
+        assert reason == "Waiting for you to accept on phone. Cancel withdraws the request.", reason
+        assert "Rig Assistant cannot reach the phone" in said and "RigDesk on the phone asks instead" in said, said
         assert offline.shown == [] and offline.ended == []
         unreached = [words for agent, words in seen["told"] if "could not be shown on the phone through Rig Assistant" in words]
         assert len(unreached) == 1 and "only while its screen sharing is on" in unreached[0], seen["told"]
@@ -1867,7 +1869,7 @@ def test_with_the_phones_rig_assistant_offline_or_refusing_the_bridges_knock_ask
 
         refusing = _Assistant(refusing=True)
         seen = await _phone_requested(refusing, allow)
-        assert "through Rig Assistant" in seen["card"].filed[0]["reason"].rest
+        assert "through Rig Assistant" in seen["answer"]["said"]
         assert any("phone moto is not connected to Rig" in words for _agent, words in seen["told"]), seen["told"]
         assert seen["held"] is not None and len(seen["card"].withdrawn) == 1
 
