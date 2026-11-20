@@ -7,7 +7,7 @@ on:
   push:
     branches: [main, "s*"]
     tags: ["v*"]
-    paths: [libs/bridge/**, libs/agent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/smoke/lane.sh, src/platform/linux/agent_health.sh, .github/workflows/stock.yml]
+    paths: [libs/bridge/**, libs/agent/**, libs/consent/**, libs/base/**, libs/hbb_common, Cargo.lock, .github/smoke/stock.ps1, .github/smoke/lane.sh, src/platform/linux/agent_health.sh, .github/workflows/stock.yml]
   pull_request:
   workflow_dispatch:
 
@@ -32,7 +32,7 @@ jobs:
         with:
           prefix-key: stock-linux
       - name: Unit tests
-        run: cargo test -p rigdesk-bridge -p rigdesk-agent --locked
+        run: cargo test -p rigdesk-bridge -p rigdesk-agent -p rigdesk-consent --locked
       - name: Linux management lane smoke test (root and user through systemd, jobs, time-out, switch, pause, root-only socket)
         run: |
           cargo build -p rigdesk-agent --example lane_host --locked

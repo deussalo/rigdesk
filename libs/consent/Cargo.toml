@@ -1,0 +1,8 @@
+[package]
+name = "rigdesk-consent"
+version = "0.1.0"
+edition = "2021"
+description = "RigDesk's consent: one state per agent's request to use a desk, from Rig's ask to the end of its session"
+license = "AGPL-3.0"
+
+[dependencies]
