@@ -49,7 +49,7 @@ class Prompt:
     # Named as the consent states (CONSENT.md): the operator said yes while the prompt is up, and how Rig's saved password fares; until a login
     # succeeds the prompt stays up, and the person's answer joins the agent or is told to it.
     operator_said: bool = False
-    password: Literal["trying", "refused", "none"] | None = None
+    password: Literal["trying", "refused", "unreached", "none"] | None = None
     # When the person dismissed it after the operator's yes: denied by the person, which a password login still under way does not override.
     denied_ms: int | None = None
 
@@ -77,9 +77,13 @@ def denied_by_person(prompt: Prompt | None) -> int | None:
     return None if prompt is None else prompt.denied_ms
 
 
-def waiting(desks: Desks, prompt: Prompt | None, pc: str, why: str, password: Literal["refused", "none"]) -> str:
-    """The operator accepted, but no login succeeded: what the agent is told while the person at the PC is asked, or why it is not asked."""
+def waiting(desks: Desks, prompt: Prompt | None, pc: str, why: str, password: Literal["refused", "unreached", "none"]) -> str:
+    """The operator accepted, but no login succeeded: what the agent is told while the person at the PC is asked, or why it is not asked.
+    Nothing at an unreached PC can show the request, so the caller takes its prompt away."""
     from .desks import DeskRefused  # noqa: PLC0415 (desks imports this module)
+    if password == "unreached":
+        return (f"The operator accepted, but you have not joined {pc}. {why} "
+                f"Your request can't show on {pc} until that service runs. Once it runs, desk/request asks again.")
     if prompt is None or desks.prompts.get(prompt.ask) is not prompt or prompt.task is None or prompt.task.done():
         unshown = desks.unshown.get(pc)
         raise DeskRefused(f"{why}, and the person at {pc} is not asked on the device: {unshown or 'no prompt for this request is up there'}")

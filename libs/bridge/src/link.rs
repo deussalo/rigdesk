@@ -67,7 +67,9 @@ struct State {
     out: Option<mpsc::UnboundedSender<Message>>,
     peer: Option<Peer>,
     /// Why the last attempt or session ended, and when (ms).
-    failure: Option<(String, u64)>,
+    failure: Option<(Failure, u64)>,
+    /// The platform the PC said at its last login, kept across sessions: Rig's Accept names a phone or a PC by it.
+    platform: Option<String>,
     clipboard: Option<String>,
     /// The PC's login answer as it sent it, handed to each viewer as its own.
     info: Option<PeerInfo>,
@@ -75,6 +77,61 @@ struct State {
 
 /// Why the agent's claim ends when the person at the PC closes the session; the plugin names the PC in it.
 pub const PERSON_ENDED: &str = "the person at the PC ended it";
+
+/// Why the last attempt or session to the PC ended, by what the operator's Accept is told.
+#[derive(Clone, Debug)]
+enum Failure {
+    /// Nothing took the connection, or it closed before the PC asked for a login: no login was tried.
+    Unreached(String),
+    /// The PC answered the login with a refusal, in its words.
+    Refused(String),
+    Ended(String),
+}
+
+impl Failure {
+    fn of(e: &hbb_common::anyhow::Error) -> Failure {
+        if let Some(Unreached(why)) = e.downcast_ref::<Unreached>() {
+            Failure::Unreached(why.clone())
+        } else if let Some(LoginRefused(words)) = e.downcast_ref::<LoginRefused>() {
+            Failure::Refused(words.clone())
+        } else {
+            Failure::Ended(e.to_string())
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Unreached(why) | Failure::Ended(why) => f.write_str(why),
+            Failure::Refused(words) => write!(f, "{}", LoginRefused(words.clone())),
+        }
+    }
+}
+
+/// The connection to the PC failed before it asked for a login.
+#[derive(Debug)]
+struct Unreached(String);
+
+impl std::fmt::Display for Unreached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unreached {}
+
+/// The PC answered the login with a refusal, in its words.
+#[derive(Debug)]
+struct LoginRefused(String);
+
+impl std::fmt::Display for LoginRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "login refused by the PC: {}", self.0)
+    }
+}
+
+impl std::error::Error for LoginRefused {}
 
 /// The PC closed the session because the person at it closed it there.
 #[derive(Debug)]
@@ -295,7 +352,7 @@ impl Link {
                 state.peer = None;
                 state.info = None;
                 if let (Err(e), false) = (&ended, by_person) {
-                    state.failure = Some((e.to_string(), now_ms()));
+                    state.failure = Some((Failure::of(e), now_ms()));
                     self.shared.set_down(Some(e.to_string()));
                 }
             }
@@ -311,7 +368,7 @@ impl Link {
                 Err(_) if by_person => log::info!("the person at {} closed the session; nothing dials it until Rig is let in again", self.addr),
                 Err(e) => {
                     log::warn!("session to {} ended: {e}", self.addr);
-                    let pause = if e.to_string().starts_with("login refused") {
+                    let pause = if e.downcast_ref::<LoginRefused>().is_some() {
                         LOGIN_RETRY
                     } else if now_ms() - started > 60_000 {
                         Duration::from_secs(1)
@@ -337,6 +394,17 @@ impl Link {
             }
             Route::Id { id, server } => crate::rendezvous::dial(server, id).await?,
         })
+    }
+
+    /// What made a dial fail, in the OS's words where it has them.
+    async fn dial_cause(&self, e: hbb_common::anyhow::Error) -> String {
+        let Route::Direct { addr } = &self.route else { return e.to_string() };
+        // hbb_common's FramedStream::new drops the OS error and says only "Failed to connect to <addr>": a second connect learns it.
+        match tokio::time::timeout(PROBE_WAIT, tokio::net::TcpStream::connect(addr.as_str())).await {
+            Ok(Err(refused)) => refused.to_string(),
+            Err(_) => format!("no answer within {} s", PROBE_WAIT.as_secs()),
+            Ok(Ok(_)) => e.to_string(),
+        }
     }
 
     /// Whether the PC answers, found without logging in: its direct-IP port takes a connection, or the ID server has it.
@@ -372,7 +440,10 @@ impl Link {
                 self.on_message(allowed.peer_info, &tx)?;
                 allowed.stream
             }
-            None => self.dial().await?,
+            None => match self.dial().await {
+                Ok(stream) => stream,
+                Err(e) => return Err(Unreached(self.dial_cause(e).await).into()),
+            },
         };
         if self.invite.get().is_some() {
             *self.invite_login.lock().unwrap() = InviteLogin { dialer: Some(stream.local_addr().ip()), ..Default::default() };
@@ -380,14 +451,19 @@ impl Link {
         let mut idle_check = tokio::time::interval(Duration::from_secs(5));
         // next_timeout restarts with every select! round, so the idle tick alone would keep a dead link looking alive.
         let mut heard = std::time::Instant::now();
+        // Until the PC sends anything, a dropped connection is one that never reached it: no login was asked for.
+        let mut answered = false;
         loop {
             tokio::select! {
                 incoming = stream.next_timeout(READ_TIMEOUT_MS) => {
                     let bytes = match incoming {
                         Some(Ok(bytes)) => {
                             heard = std::time::Instant::now();
+                            answered = true;
                             bytes
                         }
+                        Some(Err(e)) if !answered => return Err(Unreached(format!("it closed the connection before asking for a login: {e}")).into()),
+                        None if !answered => return Err(Unreached("it closed the connection before asking for a login".into()).into()),
                         Some(Err(e)) => bail!("connection error: {e}"),
                         None => bail!("the PC went silent or closed the connection"),
                     };
@@ -420,7 +496,7 @@ impl Link {
         let Some(invite) = self.invite.get() else { return Ok(()) };
         let dialer = self.invite_login.lock().unwrap().dialer;
         if !dialer.is_some_and(|dialer| invite.held_by(&self.username, hash, dialer)) {
-            bail!("login refused by the PC: {NOT_THE_INVITED_DEVICE}");
+            return Err(LoginRefused(NOT_THE_INVITED_DEVICE.into()).into());
         }
         Ok(())
     }
@@ -467,13 +543,14 @@ impl Link {
             }
             Some(message::Union::RigInviteAccepted(tag)) => self.on_invite_accepted(&tag),
             Some(message::Union::LoginResponse(res)) => match res.union {
-                Some(login_response::Union::Error(e)) => bail!("login refused by the PC: {e}"),
+                Some(login_response::Union::Error(e)) => return Err(LoginRefused(e).into()),
                 Some(login_response::Union::PeerInfo(pi)) => {
                     if self.invite.get().is_some() && !self.invite_login.lock().unwrap().accepted {
-                        bail!("login refused by the PC: it did not confirm the invite");
+                        return Err(LoginRefused("it did not confirm the invite".into()).into());
                     }
                     log::info!("logged in to {} ({} {}, RustDesk {})", self.addr, pi.hostname, pi.platform, pi.version);
                     let mut state = self.state.lock().unwrap();
+                    state.platform = Some(pi.platform.clone());
                     state.peer = Some(Peer {
                         hostname: pi.hostname.clone(),
                         platform: pi.platform.clone(),
@@ -633,10 +710,33 @@ impl Link {
         if !self.may_dial() {
             return Err(NoLogin::NoPassword);
         }
+        let asked = now_ms();
         self.ensure(wait).map(|_| ()).map_err(|why| {
             self.last_use_ms.store(0, Ordering::SeqCst);
-            NoLogin::Failed(why)
+            let state = self.state.lock().unwrap();
+            match state.failure.as_ref().filter(|(_, at)| *at >= asked).map(|(failure, _)| failure) {
+                Some(Failure::Unreached(cause)) => self.unreached(cause, state.platform.as_deref()),
+                Some(refused @ Failure::Refused(_)) => NoLogin::Refused(refused.to_string()),
+                _ => NoLogin::Failed(why),
+            }
         })
+    }
+
+    /// Rig's Accept found nothing at the PC to log in to: what failed where, and what to start, for the device the PC last said it is.
+    fn unreached(&self, cause: &str, platform: Option<&str>) -> NoLogin {
+        const UNTRIED: &str = "No login was tried, and no password was sent.";
+        let (at, why) = match (&self.route, platform) {
+            (Route::Direct { addr }, Some("Android")) => {
+                (addr.clone(), format!("RigDesk on the phone isn't accepting connections ({cause}). {UNTRIED} Start the service in RigDesk on the phone."))
+            }
+            (Route::Direct { addr }, Some(_)) => (addr.clone(), format!("RustDesk on the PC isn't accepting connections ({cause}). {UNTRIED} \
+                                                                          Start the RustDesk service on the PC, with direct IP access on.")),
+            (Route::Direct { addr }, None) => (addr.clone(), format!("Nothing there is accepting connections ({cause}). {UNTRIED} \
+                                                                       Start the service in RigDesk on a phone, or the RustDesk service on a PC, with direct IP access on.")),
+            (Route::Id { id, .. }, _) => (format!("ID {id}"), format!("The ID server didn't put Rig through ({cause}). {UNTRIED} \
+                                                                        Start the RustDesk service on the PC, and check that it's online.")),
+        };
+        NoLogin::Unreached { at, why }
     }
 
     /// Open the session if it is not, and wait for the login, up to `wait`.
@@ -833,8 +933,14 @@ mod tests {
     }
 
     async fn logged_in_with(addr: &str, password: &str) -> (Arc<Link>, Result<(), NoLogin>) {
+        logged_in_as(addr, password, None).await
+    }
+
+    /// A login from a bridge that saw the PC say `platform` at an earlier login.
+    async fn logged_in_as(addr: &str, password: &str, platform: Option<&str>) -> (Arc<Link>, Result<(), NoLogin>) {
         let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
         let link = Link::new(Route::direct(addr), password.into(), "Rig agent".into(), shared);
+        link.state.lock().unwrap().platform = platform.map(str::to_string);
         tokio::spawn(link.clone().run());
         let trying = link.clone();
         let said = tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10))).await.unwrap();
@@ -848,8 +954,8 @@ mod tests {
 
         let (addr, logins) = answering_pc(login_response::Union::Error("Wrong Password".into())).await;
         let (link, refused) = logged_in_with(&addr, "stale").await;
-        let Err(NoLogin::Failed(why)) = refused else { panic!("a refused password logged in: {refused:?}") };
-        assert!(why.contains("Wrong Password"), "{why}");
+        let Err(NoLogin::Refused(why)) = refused else { panic!("a refused password is not told as refused: {refused:?}") };
+        assert_eq!(why, "login refused by the PC: Wrong Password");
         assert!(!link.wanted(), "a refused password is not dialed again on its own");
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(logins.load(Ordering::SeqCst), 1, "the saved password was tried more than once");
@@ -860,6 +966,38 @@ mod tests {
         let (link, ok) = logged_in_with(&addr, "good").await;
         assert_eq!(ok, Ok(()));
         assert_eq!(link.state.lock().unwrap().peer.as_ref().map(|peer| peer.hostname.as_str()), Some("front"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rigs_accept_at_a_pc_where_nothing_takes_the_connection_says_no_password_was_tried() {
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = closed.local_addr().unwrap().to_string();
+        drop(closed);
+        let untried = "No login was tried, and no password was sent.";
+        let told = |said: Result<(), NoLogin>| match said {
+            Err(NoLogin::Unreached { at, why }) => (at, why),
+            other => panic!("a closed port is not told as unreached: {other:?}"),
+        };
+        let (at, why) = told(logged_in_as(&addr, "saved", Some("Android")).await.1);
+        assert_eq!(at, addr);
+        let cause = why.strip_prefix("RigDesk on the phone isn't accepting connections (").and_then(|rest| rest.split_once("). ")).map(|(cause, _)| cause);
+        let cause = cause.unwrap_or_else(|| panic!("{why}"));
+        assert!(!cause.contains(&addr) && !cause.is_empty(), "the cause repeats the address or is empty: {why}");
+        assert_eq!(why, format!("RigDesk on the phone isn't accepting connections ({cause}). {untried} Start the service in RigDesk on the phone."));
+        let (_, why) = told(logged_in_as(&addr, "saved", Some("Windows")).await.1);
+        assert_eq!(why, format!("RustDesk on the PC isn't accepting connections ({cause}). {untried} Start the RustDesk service on the PC, with direct IP access on."));
+        let (_, why) = told(logged_in_with(&addr, "saved").await.1);
+        assert!(why.starts_with("Nothing there is accepting connections (") && why.contains(untried), "{why}");
+
+        let hanging_up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = hanging_up.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = hanging_up.accept().await {
+                drop(socket);
+            }
+        });
+        let (_, why) = told(logged_in_as(&addr, "saved", Some("Windows")).await.1);
+        assert!(why.starts_with("RustDesk on the PC isn't accepting connections (it closed the connection before asking for a login") && why.contains(untried), "{why}");
     }
 
     /// A stock PC on loopback that logs in every dial and, on the first session only, then closes it as its person does.
