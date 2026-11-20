@@ -544,11 +544,13 @@ class ServerModel with ChangeNotifier {
           if (_clients[index].authorized) {
             _clients[index].privacyMode = client.privacyMode;
             _clients[index].rigJoined = client.rigJoined;
+            _clients[index].rigJoinedHow = client.rigJoinedHow;
             notifyListeners();
             return;
           }
           _clients[index].authorized = true;
           _clients[index].rigJoined = client.rigJoined;
+          _clients[index].rigJoinedHow = client.rigJoinedHow;
           _clients[index].privacyMode = client.privacyMode;
         }
       } else {
@@ -841,8 +843,9 @@ class Client {
   bool fromSwitch = false;
   bool inVoiceCall = false;
   bool incomingVoiceCall = false;
-  // RigDesk: "<agent> joined: <how>" on Android once a Rig session is in, else empty.
+  // RigDesk: "<agent> joined" and how ("your Accept on this phone") on Android once a Rig session is in, else empty.
   String rigJoined = "";
+  String rigJoinedHow = "";
 
   RxInt unreadChatMessageCount = 0.obs;
 
@@ -876,6 +879,7 @@ class Client {
     inVoiceCall = json['in_voice_call'];
     incomingVoiceCall = json['incoming_voice_call'];
     rigJoined = json['rig_joined'] ?? '';
+    rigJoinedHow = json['rig_joined_how'] ?? '';
   }
 
   Map<String, dynamic> toJson() {

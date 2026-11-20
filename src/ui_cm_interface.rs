@@ -149,8 +149,10 @@ pub struct Client {
     pub from_switch: bool,
     pub in_voice_call: bool,
     pub incoming_voice_call: bool,
-    /// RigDesk Android: who joined and how, for a Rig agent's session that is in ("<agent> joined: <how>"); empty otherwise.
+    /// RigDesk Android: for a Rig agent's session that is in, who joined ("<agent> joined") and how ("your Accept on this
+    /// phone"); both empty otherwise.
     pub rig_joined: String,
+    pub rig_joined_how: String,
     #[serde(skip)]
     #[cfg(not(any(target_os = "ios")))]
     tx: UnboundedSender<Data>,
@@ -216,14 +218,17 @@ impl<T: InvokeUiCM> DerefMut for ConnectionManager<T> {
     }
 }
 
-/// What the person is told of a Rig agent's session once it is in, from how the server let it in (`base::rig_knock`).
-fn rig_joined(id: i32, authorized: bool) -> String {
+/// What the person is told of a Rig agent's session once it is in, from how the server let it in (`base::rig_knock`):
+/// who joined and how.
+fn rig_joined(id: i32, authorized: bool) -> (String, String) {
     #[cfg(target_os = "android")]
     if authorized {
-        return base::rig_knock::joined_how(id).map(|joined| joined.words()).unwrap_or_default();
+        if let Some(joined) = base::rig_knock::joined_how(id) {
+            return (joined.title(), joined.how().to_owned());
+        }
     }
     let _ = (id, authorized);
-    String::new()
+    (String::new(), String::new())
 }
 
 impl<T: InvokeUiCM> ConnectionManager<T> {
@@ -249,6 +254,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
         from_switch: bool,
         #[cfg(not(any(target_os = "ios")))] tx: mpsc::UnboundedSender<Data>,
     ) {
+        let (rig_joined, rig_joined_how) = rig_joined(id, authorized);
         let client = Client {
             id,
             authorized,
@@ -273,7 +279,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             tx,
             in_voice_call: false,
             incoming_voice_call: false,
-            rig_joined: rig_joined(id, authorized),
+            rig_joined,
+            rig_joined_how,
         };
         CLIENTS
             .write()

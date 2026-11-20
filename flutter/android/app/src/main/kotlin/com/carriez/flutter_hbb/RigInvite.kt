@@ -266,6 +266,8 @@ class RigInvite(private val service: MainService) {
             .setColor(ContextCompat.getColor(service, R.color.primary))
             .setOnlyAlertOnce(true)
             .setOngoing(true)
+            // Its own group, as MainService's are: ungrouped, Android folds it under a bare "RigDesk" summary.
+            .setGroup("rig-invite")
             .setDeleteIntent(action(ACT_SWIPED))
         val offered = offeredKey
         val key: String

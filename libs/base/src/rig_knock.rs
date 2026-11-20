@@ -191,15 +191,19 @@ pub struct Joined {
 }
 
 impl Joined {
-    pub fn words(&self) -> String {
-        let how = match self.by {
+    /// "<agent> joined": short enough that a collapsed notification row never cuts it.
+    pub fn title(&self) -> String {
+        format!("{} joined", self.name)
+    }
+
+    pub fn how(&self) -> &'static str {
+        match self.by {
             JoinedBy::OneTap => "your Accept on this phone",
             JoinedBy::Allowed => "your Allow on this phone",
             JoinedBy::Invite => "this phone's invite",
             JoinedBy::RigAccept => "your Rig Accept, saved password",
             JoinedBy::Unattended => "saved password, nobody asked",
-        };
-        format!("{} joined: {how}", self.name)
+        }
     }
 }
 
@@ -356,7 +360,8 @@ mod tests {
         mark_proved(9001, "Builder (Rig agent)");
         joined(9001, JoinedBy::RigAccept);
         joined(9001, JoinedBy::Allowed);
-        assert_eq!(joined_how(9001).unwrap().words(), "Builder (Rig agent) joined: your Rig Accept, saved password", "the first way in stands");
+        let first = joined_how(9001).unwrap();
+        assert_eq!((first.title().as_str(), first.how()), ("Builder (Rig agent) joined", "your Rig Accept, saved password"), "the first way in stands");
         joined(9002, JoinedBy::OneTap);
         assert_eq!(joined_how(9002), None, "an unproved login is never told as Rig's");
         left(9001);
@@ -365,9 +370,9 @@ mod tests {
         let words = [JoinedBy::OneTap, JoinedBy::Allowed, JoinedBy::Invite, JoinedBy::Unattended]
             .iter()
             .copied()
-            .map(|by| Joined { name: "B".into(), by }.words())
+            .map(|by| Joined { name: "B".into(), by }.how())
             .collect::<Vec<_>>();
-        assert_eq!(words, vec!["B joined: your Accept on this phone", "B joined: your Allow on this phone", "B joined: this phone's invite", "B joined: saved password, nobody asked"]);
+        assert_eq!(words, vec!["your Accept on this phone", "your Allow on this phone", "this phone's invite", "saved password, nobody asked"]);
     }
 
     #[test]
