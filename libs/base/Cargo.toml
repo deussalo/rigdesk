@@ -16,6 +16,7 @@ wayland_probe = []
 
 [dependencies]
 hbb_common = { path = "../hbb_common" }
+rigdesk-consent = { path = "../consent" }
 protobuf = { version = "3.7", features = ["with-bytes"] }
 # the generated protobuf code refers to `::bytes::Bytes` (tokio_bytes codegen)
 bytes = { version = "1.10", features = ["serde"] }

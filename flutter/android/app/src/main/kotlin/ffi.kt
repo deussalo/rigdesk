@@ -30,6 +30,10 @@ object FFI {
     external fun isServiceClipboardEnabled(): Boolean
     external fun cmLoginRes(connId: Int, res: Boolean): Boolean
     external fun rigKnockProved(connId: Int): Boolean
+    external fun rigOneTapAccept(ask: String, agentId: String, agentTitle: String, graph: String, operator: String, lapseMs: Long): String
+    external fun rigOneTapWithdraw(ask: String)
+    external fun rigDisconnect(connId: Int)
+    external fun rigListening(): Boolean
     external fun invitePairKey(key: String): Boolean
     external fun inviteMint(): String
     external fun inviteMintFor(agent: String): String

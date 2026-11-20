@@ -266,18 +266,21 @@ class RigInvite(private val service: MainService) {
             .setColor(ContextCompat.getColor(service, R.color.primary))
             .setOnlyAlertOnce(true)
             .setOngoing(true)
+            // Its own group, as MainService's are: ungrouped, Android folds it under a bare "RigDesk" summary.
+            .setGroup("rig-invite")
             .setDeleteIntent(action(ACT_SWIPED))
         val offered = offeredKey
         val key: String
         val words: String
+        val title: String
         when {
             holder != null -> {
-                val title = holder.optString("title").ifEmpty { holder.optString("agent") }
+                val agent = holder.optString("title").ifEmpty { holder.optString("agent") }
                 key = "held:${holder.optString("agent")}"
-                if (key != shown) remember(holder.optString("agent"), title)
+                if (key != shown) remember(holder.optString("agent"), agent)
                 words = "A Rig agent, by your invite. End takes the phone back."
-                builder.setContentTitle("$title is using this phone")
-                    .addAction(0, "End", action(ACT_END))
+                title = "$agent is using this phone"
+                builder.addAction(0, "End", action(ACT_END))
             }
             open != null -> {
                 val forAgent = if (open.isNull("agent")) "" else open.optString("agent")
@@ -286,7 +289,7 @@ class RigInvite(private val service: MainService) {
                 val who = if (forAgent.isEmpty()) "The first Rig agent to use it gets this phone, once."
                           else "Only Rig agent $forAgent can use it, once. Revoke it if the id is wrong."
                 words = listOfNotNull(lastRefused, who, reach()).joinToString(" ")
-                builder.setContentTitle("Invite$forWho open until ${clock(open.optLong("until_ms"))}")
+                title = "Invite$forWho open until ${clock(open.optLong("until_ms"))}"
                 if (link != null) builder.addAction(0, "Copy", action(ACT_COPY))
                 builder.addAction(0, "Revoke", action(ACT_REVOKE))
             }
@@ -294,14 +297,16 @@ class RigInvite(private val service: MainService) {
                 key = "key:$offered"
                 words = "Rig now answers with key ${offered.take(KEY_SHOWN)}…, and this phone keeps ${keptKey().take(KEY_SHOWN)}…. " +
                     "Use the new one only if you reinstalled Rig or moved this phone to another Rig: whoever holds it can redeem this phone's invites."
-                builder.setContentTitle("Rig's pairing key changed")
+                title = "Rig's pairing key changed"
+                builder
                     .addAction(0, "Use new key", action(ACT_KEY_USE, key = offered))
                     .addAction(0, "Keep current", action(ACT_KEY_KEEP, key = offered))
             }
             keptKey().isEmpty() -> {
                 key = "unpaired:$pairWhy"
                 words = pairWhy
-                builder.setContentTitle("Rig invites are off")
+                title = "Rig invites are off"
+                builder
                     .setOngoing(false)
                     .setDeleteIntent(null)
             }
@@ -311,15 +316,29 @@ class RigInvite(private val service: MainService) {
                 key = "idle:$ready:$lastRefused:${last?.first}:$phoneId"
                 val next = if (ready) "Make a link and give it to an agent in Rig." else START_FIRST
                 words = listOfNotNull(lastRefused, next, reach()).joinToString(" ")
-                builder.setContentTitle("Invite a Rig agent")
+                title = "Invite a Rig agent"
                 if (ready) {
                     builder.addAction(0, "Make invite", action(ACT_MINT))
-                    last?.let { (id, title) -> builder.addAction(0, "For ${title.ifEmpty { id }}", action(ACT_MINT_FOR, id)) }
+                    last?.let { (id, name) -> builder.addAction(0, "For ${name.ifEmpty { id }}", action(ACT_MINT_FOR, id)) }
                     builder.addAction(forAgentById())
                 }
             }
         }
-        builder.setContentText(words).setStyle(NotificationCompat.BigTextStyle().bigText(words))
+        // While the screen is shared Android 15 shows only the public version, without buttons; with none it shows the bare
+        // app name. So the public one keeps the title and opens the app, and leaves out the words, which may hold the link.
+        val openApp = PendingIntent.getActivity(service, NOTIFY_ID,
+            Intent(service, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            else PendingIntent.FLAG_UPDATE_CURRENT)
+        val whileShared = NotificationCompat.Builder(service, CHANNEL)
+            .setSmallIcon(R.mipmap.ic_stat_logo)
+            .setColor(ContextCompat.getColor(service, R.color.primary))
+            .setContentTitle(title)
+            .setContentText("Open RigDesk to see it.")
+            .setContentIntent(openApp)
+            .build()
+        builder.setContentTitle(title).setContentText(words).setStyle(NotificationCompat.BigTextStyle().bigText(words))
+            .setPublicVersion(whileShared)
         if (key == shown) return
         shown = key
         notifications.notify(NOTIFY_ID, builder.build())

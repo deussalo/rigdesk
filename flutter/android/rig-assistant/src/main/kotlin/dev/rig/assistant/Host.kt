@@ -28,7 +28,7 @@ fun notification(ctx: Context, channel: String, title: String, text: String): No
         Notification.Builder(ctx, channel)
     } else Notification.Builder(ctx)
     return builder.setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(title).setContentText(text)
-        .setStyle(Notification.BigTextStyle().bigText(text)).setAutoCancel(true).build()
+        .setStyle(Notification.BigTextStyle().bigText(text)).setAutoCancel(true).setGroup(channel).build()
 }
 
 private fun channelName(channel: String) = when (channel) {

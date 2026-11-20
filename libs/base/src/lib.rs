@@ -2,6 +2,7 @@ pub mod config;
 pub mod fs;
 pub mod invite;
 pub mod keyboard;
+pub mod one_tap;
 pub mod platform;
 pub mod protos;
 pub mod rig_knock;

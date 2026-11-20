@@ -16,6 +16,10 @@ The phone's assistant inside the RigDesk Android app, as a module of its own: it
   over apps", the phone asks for it once, the first time the pill should show. For `desk/*`, Stop and the person's touches
   reach the rigdesk-bridge set in RigDesk's Share screen > Rig bridge, under the same address rule as Rig's address below:
   with plain http outside loopback and the tailnet the phone sends that bridge nothing, and the Rig bridge row says why.
+- **Join:** a Rig agent's `desk/request` for this phone (its rigdesk stock entry naming it as `assistant`) shows one
+  notification with **Accept** and **Deny**, even with RigDesk's service off. Accept opens RigDesk, asks for Input the first
+  time only, then Android's Start now, starts the service and tells Rig ready once it listens; the agent's knock that follows
+  is admitted with no second prompt. Deny, a cancelled Start now, or the request ending in Rig takes the notification away.
 - **Link:** one socket the phone dials to `<Rig>/api/contributions/rig-assistant/sockets/phone`, with Rig's access token.
 
 ## Setting a phone up

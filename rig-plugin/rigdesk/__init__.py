@@ -457,17 +457,15 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
             "Accept lets it act on that PC with no share link, across restarts, until you unassign it on the RigDesk page.")
     asks = f"Asks {'to join' if given.kind == 'join' else 'for a standing grant to'} {given.pc}: {given.why.strip()}"
     reason = Titled(asks, lets)
+    then: JsonObject = {"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind if entry["stock"] else "join", "ask": asked}
     if entry["stock"]:
-        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                         Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind, "ask": asked}, operator_only=True))
+        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id, Then(provision=REQUEST_CONFIRMED.name, given=then, operator_only=True))
     else:
-        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                         Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": "join", "ask": asked}, operator_only=True),
-                                         RIGDESK_CHOICES)
+        state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id, Then(provision=REQUEST_CONFIRMED.name, given=then, operator_only=True), RIGDESK_CHOICES)
     if unasked is not None:
         desks.unshown[given.pc] = unasked
     elif state == "active" and (given.kind == "join" or not entry["stock"]):
-        prompts.start(desks, given.pc, asked, seat, agent, graph, title)
+        prompts.start(desks, given.pc, asked, seat, agent, graph, title, then)
     return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
             "said": "Nothing is granted yet: the operator is asked to Accept, and the decision arrives as your next input."}
 
@@ -1136,7 +1134,8 @@ CONTRIBUTION = ContributionDescriptor(
     refusal_codes={REFUSED: HTTPStatus.CONFLICT, DOWN: HTTPStatus.SERVICE_UNAVAILABLE, UNSHARED: HTTPStatus.FORBIDDEN, SHELL_NOT_ALLOWED: HTTPStatus.FORBIDDEN,
                    SYSTEM_NOT_GRANTED: HTTPStatus.FORBIDDEN, **{f"{ID}.{code}": status for code, status in PC_SHELL_CODES.items()}},
     secret_files=lambda host: secret_files(host.settings(RigdeskSettings)),
-    provisions=(provider(REQUEST_CONFIRMED, _request_confirmed), provider(CONNECT_CONFIRMED, _connect_confirmed), provider(INVITE_CONFIRMED, _invite_confirmed)),
+    provisions=(provider(REQUEST_CONFIRMED, _request_confirmed), provider(CONNECT_CONFIRMED, _connect_confirmed), provider(INVITE_CONFIRMED, _invite_confirmed),
+                provider(prompts.PHONE_JOIN, prompts.phone_said)),
     routes=(RouteContribution("GET", "pcs", get_pcs), RouteContribution("GET", "session", get_session), RouteContribution("POST", "token", post_token),
             RouteContribution("POST", "viewer", post_viewer), RouteContribution("POST", "assign", post_assign),
             RouteContribution("POST", "pc", post_pc), RouteContribution("POST", "password", post_password), RouteContribution("POST", "screenshot", post_screenshot),

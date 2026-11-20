@@ -964,7 +964,10 @@ class ClientInfo extends StatelessWidget {
                       children: [
                     Text(client.name, style: const TextStyle(fontSize: 18)),
                     const SizedBox(width: 8),
-                    Text(client.peerId, style: const TextStyle(fontSize: 10))
+                    Text(client.peerId, style: const TextStyle(fontSize: 10)),
+                    if (client.rigJoined.isNotEmpty)
+                      Text('${client.rigJoined}: ${client.rigJoinedHow}',
+                          style: Theme.of(context).textTheme.bodyMedium),
                   ]))
             ],
           ),

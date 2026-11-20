@@ -1,7 +1,7 @@
 use super::{sleep, Config, Connection, FailureScope, SEND_TIMEOUT_VIDEO};
 use base::{
     message_proto::{LoginRequest, Message},
-    rig_knock,
+    one_tap, rig_knock,
 };
 use hbb_common::password_security::{approve_mode, ApproveMode};
 use std::time::Duration;
@@ -14,8 +14,9 @@ impl Connection {
     }
 
     /// RigDesk Android: a passwordless login calling itself Rig. Proved with Rig's paired key it asks the person at the
-    /// phone, who alone can let it in; anything else is refused before the person sees it. The nonce goes with the first
-    /// try, so the proof works once.
+    /// phone, who alone can let it in, unless it names an ask they already accepted on Rig Assistant's notification
+    /// (`one_tap`); anything else is refused before the person sees it. The nonce goes with the first try, so the proof
+    /// works once.
     pub(super) async fn rig_knock_login(&mut self, lr: LoginRequest) -> bool {
         rig_knock::left(self.inner.id);
         let nonce = std::mem::take(&mut self.hash.rig_knock_nonce);
@@ -64,12 +65,76 @@ impl Connection {
             }
         };
         self.update_failure_with_scope(failure, true, 0, FailureScope::Default);
+        if let Some(ask) = proved.ask.clone() {
+            if one_tap::admit(self.inner.id, &ask, &proved.agent_id) {
+                return self.rig_knock_accepted(&ask, proved).await;
+            }
+            hbb_common::log::info!("Rig agent {} knocked for {ask}, which no Accept here stands for: the person is asked", proved.agent_id);
+        }
         hbb_common::log::info!("Rig agent {} asks to join", proved.agent_id);
-        rig_knock::mark_proved(self.inner.id);
+        rig_knock::mark_proved(self.inner.id, &proved.name);
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         self.try_start_cm(rig_knock::PEER_ID.to_owned(), proved.name, false);
         self.send_login_error(crate::client::LOGIN_MSG_NO_PASSWORD_ACCESS).await;
         true
+    }
+
+    /// The person's Accept on Rig Assistant's notification was their yes for this ask: the knock is let in with no
+    /// second Allow, as an invite is, and never around a 2FA requirement.
+    async fn rig_knock_accepted(&mut self, ask: &str, proved: rig_knock::Proved) -> bool {
+        hbb_common::log::info!("Rig agent {} joins on the person's Accept for {ask}", proved.agent_id);
+        rig_knock::mark_proved(self.inner.id, &proved.name);
+        self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
+        let kept = self.send_logon_response_and_keep_alive().await;
+        if self.authorized {
+            rig_knock::joined(self.inner.id, rig_knock::JoinedBy::OneTap);
+        } else {
+            one_tap::failed(self.inner.id);
+        }
+        if !kept {
+            return false;
+        }
+        self.try_start_cm(rig_knock::PEER_ID.to_owned(), proved.name, self.authorized);
+        true
+    }
+
+    /// A login that got in with the password and carries Rig's signature names its agent, and the ask the operator accepted
+    /// when Rig signed one, so the person is told who joined and how. Unsigned, or signed wrongly, it stays unnamed.
+    pub(super) fn rig_password_joined(&mut self) {
+        if self.lr.password.is_empty() || self.lr.rig_knock.is_none() || rig_knock::proved(self.inner.id) {
+            return;
+        }
+        let nonce = std::mem::take(&mut self.hash.rig_knock_nonce);
+        let Ok(dialer) = self.ip.parse() else {
+            return;
+        };
+        let login = rig_knock::Login {
+            device: &self.lr.username,
+            salt: &self.hash.salt,
+            challenge: &self.hash.challenge,
+            nonce: &nonce,
+            dialer,
+        };
+        match rig_knock::verify(self.lr.rig_knock.as_ref(), &login) {
+            Ok(proved) => {
+                hbb_common::log::info!("Rig agent {} joined with the saved password", proved.agent_id);
+                rig_knock::mark_proved(self.inner.id, &proved.name);
+                let by = if proved.ask.is_some() { rig_knock::JoinedBy::RigAccept } else { rig_knock::JoinedBy::Unattended };
+                rig_knock::joined(self.inner.id, by);
+            }
+            Err(refusal) => hbb_common::log::warn!("A password login carried a Rig signature that does not hold: {}", refusal.words()),
+        }
+    }
+
+    /// The person's Allow let a proved knock in: the session is told as theirs, and listed again as in.
+    pub(super) fn rig_knock_allowed(&mut self) {
+        if !rig_knock::proved(self.inner.id) {
+            return;
+        }
+        rig_knock::joined(self.inner.id, rig_knock::JoinedBy::Allowed);
+        if let Some(joined) = rig_knock::joined_how(self.inner.id) {
+            self.try_start_cm(rig_knock::PEER_ID.to_owned(), joined.name, true);
+        }
     }
 
     pub(super) fn rig_knock_listed_as(&self, peer_id: String, name: String, authorized: bool) -> Option<(String, String)> {

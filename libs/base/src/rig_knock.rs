@@ -7,7 +7,14 @@
 //! the proof here itself. The knock says which address Rig signed, so a good signature from an unexpected address can be
 //! told apart from a bad one.
 //!
+//! A knock may also name the ask the person already accepted on Rig Assistant's notification (`one_tap`): Rig then signs
+//! the ask too, under its own domain, so a proof for one ask opens no other.
+//!
 //! Anything else that calls itself Rig gets no prompt, no Allow and keeps no name of its own on this device.
+//!
+//! Rig signs its saved-password login the same way, so a session it opens with the password names its agent, and the ask
+//! the operator accepted, rather than going unnamed. Each session in is then told to the person as who joined and how
+//! ([`Joined`]): never a "Do you accept?" for a login that is already in.
 
 use crate::{invite, message_proto::{LoginRequest, RigKnock}};
 use hbb_common::{
@@ -15,9 +22,10 @@ use hbb_common::{
     sodiumoxide::crypto::sign,
 };
 use lazy_static::lazy_static;
-use std::{collections::HashSet, net::IpAddr, sync::Mutex};
+use std::{collections::HashMap, net::IpAddr, sync::Mutex};
 
 const DOMAIN: &str = "rigdesk-knock-v1";
+const DOMAIN_ASK: &str = "rigdesk-knock-ask-v1";
 const NONCE_BYTES: usize = 32;
 const CLAIMED_NAME: &str = "rig agent";
 /// The login id of Rig's knock, which the phone's notification goes by.
@@ -45,11 +53,12 @@ fn plain(ip: IpAddr) -> IpAddr {
 }
 
 impl Login<'_> {
-    /// What Rig signs for this connection and this agent.
-    pub fn message(&self, agent_id: &str, agent_title: &str) -> Vec<u8> {
+    /// What Rig signs for this connection and this agent, and for the ask the person accepted when `ask` is not empty.
+    pub fn message(&self, agent_id: &str, agent_title: &str, ask: &str) -> Vec<u8> {
         let dialer = plain(self.dialer).to_string();
-        let fields: [&[u8]; 8] = [
-            DOMAIN.as_bytes(),
+        let domain = if ask.is_empty() { DOMAIN } else { DOMAIN_ASK };
+        let mut fields: Vec<&[u8]> = vec![
+            domain.as_bytes(),
             self.device.as_bytes(),
             self.salt.as_bytes(),
             self.challenge.as_bytes(),
@@ -58,6 +67,9 @@ impl Login<'_> {
             agent_id.as_bytes(),
             agent_title.as_bytes(),
         ];
+        if !ask.is_empty() {
+            fields.push(ask.as_bytes());
+        }
         let mut out = Vec::new();
         for field in fields {
             out.extend_from_slice(&(field.len() as u64).to_le_bytes());
@@ -91,6 +103,8 @@ pub struct Proved {
     pub agent_id: String,
     /// Built from the title Rig signed.
     pub name: String,
+    /// The ask Rig signed, for a knock whose person already accepted it on Rig Assistant's notification.
+    pub ask: Option<String>,
 }
 
 /// What a RigDesk desktop answers a knock, before its person sees anything: it is never paired with Rig, so it could
@@ -125,13 +139,14 @@ fn check(key: Option<&sign::PublicKey>, knock: Option<&RigKnock>, login: &Login)
     let signature = sign::Signature::from_bytes(&knock.signature).map_err(|_| Refusal::BadProof)?;
     let dialer: IpAddr = knock.dialer.parse().map_err(|_| Refusal::BadProof)?;
     let signed = Login { dialer, ..*login };
-    if !sign::verify_detached(&signature, &signed.message(&knock.agent_id, &knock.agent_title), key) {
+    if !sign::verify_detached(&signature, &signed.message(&knock.agent_id, &knock.agent_title, &knock.ask), key) {
         return Err(Refusal::BadProof);
     }
     if plain(dialer) != plain(login.dialer) {
         return Err(Refusal::OtherDialer);
     }
-    Ok(Proved { agent_id: knock.agent_id.clone(), name: format!("{} (Rig agent)", knock.agent_title) })
+    let ask = (!knock.ask.is_empty()).then(|| knock.ask.clone());
+    Ok(Proved { agent_id: knock.agent_id.clone(), name: format!("{} (Rig agent)", knock.agent_title), ask })
 }
 
 pub fn verify(knock: Option<&RigKnock>, login: &Login) -> Result<Proved, Refusal> {
@@ -153,20 +168,75 @@ pub fn may_authorize(proved: bool, claims_rig: bool, click_approves: bool) -> bo
     proved || (click_approves && !claims_rig)
 }
 
-lazy_static! {
-    static ref PROVED: Mutex<HashSet<i32>> = Mutex::new(HashSet::new());
+/// How a Rig agent's session on this device got in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinedBy {
+    /// The person's Accept on Rig Assistant's notification (`one_tap`).
+    OneTap,
+    /// The person's Allow on this device's own prompt for the knock.
+    Allowed,
+    /// An invite this device made (`invite`).
+    Invite,
+    /// Rig's saved password, signed with the ask the operator accepted in Rig.
+    RigAccept,
+    /// Rig's saved password, signed with no ask: unattended access, nobody asked.
+    Unattended,
 }
 
-pub fn mark_proved(conn: i32) {
-    PROVED.lock().unwrap().insert(conn);
+/// Who joined and how, as the person at the device reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Joined {
+    pub name: String,
+    pub by: JoinedBy,
+}
+
+impl Joined {
+    /// "<agent> joined": short enough that a collapsed notification row never cuts it.
+    pub fn title(&self) -> String {
+        format!("{} joined", self.name)
+    }
+
+    pub fn how(&self) -> &'static str {
+        match self.by {
+            JoinedBy::OneTap => "your Accept on this phone",
+            JoinedBy::Allowed => "your Allow on this phone",
+            JoinedBy::Invite => "this phone's invite",
+            JoinedBy::RigAccept => "your Rig Accept, saved password",
+            JoinedBy::Unattended => "saved password, nobody asked",
+        }
+    }
+}
+
+lazy_static! {
+    /// Each proved connection, by the name Rig signed for it.
+    static ref PROVED: Mutex<HashMap<i32, String>> = Mutex::new(HashMap::new());
+    static ref JOINED: Mutex<HashMap<i32, Joined>> = Mutex::new(HashMap::new());
+}
+
+pub fn mark_proved(conn: i32, name: &str) {
+    PROVED.lock().unwrap().insert(conn, name.to_owned());
 }
 
 pub fn proved(conn: i32) -> bool {
-    PROVED.lock().unwrap().contains(&conn)
+    PROVED.lock().unwrap().contains_key(&conn)
+}
+
+/// A proved connection is in, by `by`. A connection that proved nothing is never told as Rig's.
+pub fn joined(conn: i32, by: JoinedBy) {
+    let Some(name) = PROVED.lock().unwrap().get(&conn).cloned() else {
+        return;
+    };
+    JOINED.lock().unwrap().entry(conn).or_insert(Joined { name, by });
+}
+
+/// What the person is told of this connection once it is in; None for any login that is not a proved Rig one.
+pub fn joined_how(conn: i32) -> Option<Joined> {
+    JOINED.lock().unwrap().get(&conn).cloned()
 }
 
 pub fn left(conn: i32) {
     PROVED.lock().unwrap().remove(&conn);
+    JOINED.lock().unwrap().remove(&conn);
 }
 
 #[cfg(test)]
@@ -181,11 +251,16 @@ mod tests {
     }
 
     fn knock(key: &sign::SecretKey, login: &Login) -> RigKnock {
+        knock_for(key, login, "")
+    }
+
+    fn knock_for(key: &sign::SecretKey, login: &Login, ask: &str) -> RigKnock {
         RigKnock {
-            signature: sign::sign_detached(&login.message("agent_a", "Builder"), key).to_bytes().to_vec().into(),
+            signature: sign::sign_detached(&login.message("agent_a", "Builder", ask), key).to_bytes().to_vec().into(),
             agent_id: "agent_a".into(),
             agent_title: "Builder".into(),
             dialer: login.dialer.to_string(),
+            ask: ask.into(),
             ..Default::default()
         }
     }
@@ -199,7 +274,7 @@ mod tests {
         let (public, secret) = sign::gen_keypair();
         let here = login(NONCE, RIG);
         let proved = check(Some(&public), Some(&knock(&secret, &here)), &here).unwrap();
-        assert_eq!(proved, Proved { agent_id: "agent_a".into(), name: "Builder (Rig agent)".into() });
+        assert_eq!(proved, Proved { agent_id: "agent_a".into(), name: "Builder (Rig agent)".into(), ask: None });
         let mapped = login(NONCE, "::ffff:100.64.0.1");
         assert!(check(Some(&public), Some(&knock(&secret, &here)), &mapped).is_ok(), "the same dialer, as a dual-stack socket reports it");
     }
@@ -227,6 +302,21 @@ mod tests {
 
         let renamed = RigKnock { agent_title: "Mallory".into(), ..good };
         assert_eq!(check(Some(&public), Some(&renamed), &here), Err(Refusal::BadProof), "a name Rig did not sign");
+    }
+
+    #[test]
+    fn a_knock_for_an_accepted_ask_proves_that_ask_alone() {
+        let (public, secret) = sign::gen_keypair();
+        let here = login(NONCE, RIG);
+        let good = knock_for(&secret, &here, "desk_1");
+        assert_eq!(check(Some(&public), Some(&good), &here).unwrap().ask.as_deref(), Some("desk_1"));
+        let moved = RigKnock { ask: "desk_2".into(), ..good.clone() };
+        assert_eq!(check(Some(&public), Some(&moved), &here), Err(Refusal::BadProof), "an ask Rig did not sign");
+        let dropped = RigKnock { ask: Default::default(), ..good };
+        assert_eq!(check(Some(&public), Some(&dropped), &here), Err(Refusal::BadProof), "the ask taken off, to ask the person instead");
+        let plain_knock = knock(&secret, &here);
+        let added = RigKnock { ask: "desk_1".into(), ..plain_knock };
+        assert_eq!(check(Some(&public), Some(&added), &here), Err(Refusal::BadProof), "an ask put on a knock signed without one");
     }
 
     #[test]
@@ -266,6 +356,26 @@ mod tests {
     }
 
     #[test]
+    fn a_session_in_is_told_by_who_and_how_and_only_for_a_proved_connection() {
+        mark_proved(9001, "Builder (Rig agent)");
+        joined(9001, JoinedBy::RigAccept);
+        joined(9001, JoinedBy::Allowed);
+        let first = joined_how(9001).unwrap();
+        assert_eq!((first.title().as_str(), first.how()), ("Builder (Rig agent) joined", "your Rig Accept, saved password"), "the first way in stands");
+        joined(9002, JoinedBy::OneTap);
+        assert_eq!(joined_how(9002), None, "an unproved login is never told as Rig's");
+        left(9001);
+        assert_eq!(joined_how(9001), None);
+        assert!(!proved(9001));
+        let words = [JoinedBy::OneTap, JoinedBy::Allowed, JoinedBy::Invite, JoinedBy::Unattended]
+            .iter()
+            .copied()
+            .map(|by| Joined { name: "B".into(), by }.how())
+            .collect::<Vec<_>>();
+        assert_eq!(words, vec!["your Accept on this phone", "your Allow on this phone", "this phone's invite", "saved password, nobody asked"]);
+    }
+
+    #[test]
     fn the_persons_yes_lets_in_a_proved_knock_alone_where_passwords_rule() {
         assert!(may_authorize(true, true, false));
         assert!(!may_authorize(false, true, false), "calls itself Rig, no proof");
@@ -278,7 +388,7 @@ mod tests {
     fn a_connection_counts_as_proved_until_it_closes() {
         const CONN: i32 = 7_000_001;
         assert!(!proved(CONN));
-        mark_proved(CONN);
+        mark_proved(CONN, "B");
         assert!(proved(CONN) && !proved(CONN + 1));
         left(CONN);
         assert!(!proved(CONN));

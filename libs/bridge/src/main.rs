@@ -244,7 +244,11 @@ fn main() {
             }
         }
         let found = (!args.servers.is_empty()).then(|| Found::remote(args.servers));
-        let knocker = knock::Knocker::new(link.clone(), shared.clone(), tokio::runtime::Handle::current(), knock_key_file(std::env::var_os(PAIR_KEY_ENV)));
+        let pair_key = knock_key_file(std::env::var_os(PAIR_KEY_ENV));
+        if let Some(key_file) = pair_key.clone() {
+            link.set_pair_key(key_file);
+        }
+        let knocker = knock::Knocker::new(link.clone(), shared.clone(), tokio::runtime::Handle::current(), pair_key);
         let api = Api::hosted(shared, Arc::new(desk::RemoteDesk::new(link)), Arc::new(journal), &bearer, found);
         api.operator_joins(knocker);
         match api.serve(args.port).await {

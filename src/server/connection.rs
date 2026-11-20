@@ -766,6 +766,8 @@ impl Connection {
                             if !conn.send_logon_response_and_keep_alive().await {
                                 break;
                             }
+                            #[cfg(target_os = "android")]
+                            conn.rig_knock_allowed();
                             if conn.port_forward_socket.is_some() {
                                 break;
                             }
@@ -1257,7 +1259,10 @@ impl Connection {
         crate::agent::viewer::leave(id);
         base::invite::left(id);
         #[cfg(target_os = "android")]
-        base::rig_knock::left(id);
+        {
+            base::rig_knock::left(id);
+            base::one_tap::left(id);
+        }
         conn.on_close("End", true).await;
         log::info!("#{} connection loop exited", id);
     }
@@ -2393,6 +2398,10 @@ impl Connection {
     }
 
     fn try_start_cm(&mut self, peer_id: String, name: String, authorized: bool) {
+        #[cfg(target_os = "android")]
+        if authorized {
+            self.rig_password_joined();
+        }
         #[cfg(target_os = "android")]
         let Some((peer_id, name)) = self.rig_knock_listed_as(peer_id, name, authorized) else {
             return;

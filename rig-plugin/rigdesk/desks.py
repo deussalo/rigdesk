@@ -134,6 +134,9 @@ class StockRemote(Shape):
     viewer_port: Annotated[int | None, Field(ge=1, le=65535, description="Where the bridge relays its session to RigDesk GUIs, on loopback (publish it with tailscale serve --tcp); unset, no GUI can attach.")] = None
     viewer_password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the password GUIs log in to the bridge with.")] = None
     mcp_servers: Annotated[list[StockMcpServer], Field(description="MCP servers on the PC's own address that the bridge offers the holding agent.")] = []
+    assistant: Annotated[Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,47}$")] | None,
+                         Field(description="With peer, for a phone running RigDesk: its name in Rig Assistant (the rig-assistant plugin). desk/request's prompt then goes "
+                                           "there as one notification, even with RigDesk's screen sharing off: Accept starts sharing and lets the agent in with no second Allow.")] = None
 
     @model_validator(mode="after")
     def _viewer_whole(self) -> StockRemote:
@@ -141,6 +144,8 @@ class StockRemote(Shape):
             raise ValueError("a stock PC has a peer (direct IP over the tailnet) or an id (through the ID server), not both")
         if self.login_id is not None and self.peer is None:
             raise ValueError("login_id goes with peer; a PC reached through the ID server is named by id")
+        if self.assistant is not None and self.peer is None:
+            raise ValueError("assistant goes with peer: a phone's knock comes over the tailnet")
         if (self.viewer_port is None) != (self.viewer_password_file is None):
             raise ValueError("viewer_port and viewer_password_file go together")
         return self
@@ -199,6 +204,7 @@ class RigdeskSettings(Shape):
     health: Annotated[Thresholds, Field(description="Where a RigDesk PC's health figures warn or fault; the PC reports figures and Rig judges them.")] = Thresholds()
     connect_server: Annotated[ConnectServer | None, Field(description="Where desk/connect sends a bare RustDesk ID that is none of our PCs: an ID server's host and key. "
                                                                       "Unset, RustDesk's public server; an ID given as ID@host?key=<key> goes to that server instead.")] = None
+    operator_name: Annotated[str, Field(max_length=80, description="Who Rig's agents work for, as a phone's one-tap notification names them: \"Rig agent of <operator_name>\".")] = ""
 
     @model_validator(mode="after")
     def _ids_have_a_server(self) -> RigdeskSettings:
@@ -1643,18 +1649,19 @@ class Desks:
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via)
         self.person_answered.discard(ask)
-        await self.log_in(pc)
+        await self.log_in(pc, {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ask})
         denied_ms = denied()
         if denied_ms is not None:
             raise DeniedByPerson(f"denied by the person at {pc} at {_clock(denied_ms)}: they dismissed the request on the device before Rig's login succeeded")
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title)
 
-    async def log_in(self, pc: str) -> None:
+    async def log_in(self, pc: str, signs_for: dict[str, Any]) -> None:
         """A RustDesk login to a stock PC that has actually succeeded, before its agent is told it joined: on the connection the person there allowed,
-        or with the saved password, which the bridge tries this once."""
+        or with the saved password, which the bridge tries this once. signs_for names the agent and the ask the operator accepted (empty for a
+        standing grant), so a phone that asks for Rig's proof tells its person who joined and how."""
         link = self._link(pc)
-        async with self._client().post(f"{link.spec.url}/login", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=LOGIN_LIMIT_S)) as answer:
+        async with self._client().post(f"{link.spec.url}/login", json=signs_for, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=LOGIN_LIMIT_S)) as answer:
             said = _object(await answer.json(content_type=None)) if answer.content_type == "application/json" else {}
             status = answer.status
         if status == 200 and said.get("logged_in") is True:
@@ -1736,7 +1743,7 @@ class Desks:
         self._refuse_if_invited(pc)
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via="assigned")
-        await self.log_in(pc)
+        await self.log_in(pc, {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ""})
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title, via="assigned")
 
@@ -2029,6 +2036,14 @@ class Desks:
 
     def held_on(self, pc: str) -> Held | None:
         return self._sessions.get(pc)
+
+    def assistant_of(self, pc: str) -> str | None:
+        """The phone's name in Rig Assistant, when this device's prompt goes there as one tap."""
+        link = self._pcs.get(pc)
+        return None if link is None or link.spec.stock is None else link.spec.stock.assistant
+
+    async def operator_name(self) -> str:
+        return (await asyncio.to_thread(self.host.settings, RigdeskSettings)).operator_name
 
     def offer_at(self, pc: str) -> tuple[str, dict[str, str]]:
         link = self._link(pc)

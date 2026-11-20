@@ -48,9 +48,10 @@ import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlin.math.min
 
-const val DEFAULT_NOTIFY_TITLE = "RustDesk"
+const val DEFAULT_NOTIFY_TITLE = "RigDesk"
 const val DEFAULT_NOTIFY_TEXT = "Service is running"
 const val DEFAULT_NOTIFY_ID = 1
+const val SERVICE_GROUP = "rig-service"
 const val NOTIFY_ID_OFFSET = 100
 
 const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_VP9
@@ -137,7 +138,10 @@ class MainService : Service() {
                             !jsonObject.optBoolean("is_terminal") &&
                             !jsonObject.optBoolean("is_view_camera") &&
                             jsonObject.optString("port_forward").isEmpty()
-                        if (capturing || !seesScreen) {
+                        val rigJoined = jsonObject.optString("rig_joined")
+                        if (rigJoined.isNotEmpty()) {
+                            rigJoinedNotification(id, rigJoined, jsonObject.optString("rig_joined_how"))
+                        } else if (capturing || !seesScreen) {
                             onClientAuthorizedNotification(id, type, username, peerId)
                         } else {
                             noPictureNotification(id, username)
@@ -395,6 +399,10 @@ class MainService : Service() {
         }
         if (intent?.action == ACT_LOGIN_REQ_NOTIFY) {
             onRigRequestAnswered(intent)
+        }
+        if (intent?.action == ACT_RIG_DISCONNECT) {
+            val clientID = intent.getIntExtra(EXT_LOGIN_REQ_ID, -1)
+            if (clientID >= 0) FFI.rigDisconnect(clientID)
         }
         intent?.let { rigInvite?.handle(it) }
         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
@@ -857,12 +865,12 @@ class MainService : Service() {
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationChannel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channelId = "RustDesk"
-            val channelName = "RustDesk Service"
+            val channelName = "RigDesk service"
             val channel = NotificationChannel(
                 channelId,
                 channelName, NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "RustDesk Service Channel"
+                description = "RigDesk's screen sharing and who is connected"
             }
             channel.lightColor = Color.BLUE
             channel.lockscreenVisibility = Notification.VISIBILITY_PRIVATE
@@ -895,6 +903,7 @@ class MainService : Service() {
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentTitle(DEFAULT_NOTIFY_TITLE)
             .setContentText(translate(DEFAULT_NOTIFY_TEXT))
+            .setGroup(SERVICE_GROUP)
             .setOnlyAlertOnce(true)
             .setContentIntent(pendingIntent)
             .setColor(ContextCompat.getColor(this, R.color.primary))
@@ -973,6 +982,7 @@ class MainService : Service() {
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setContentTitle(translate("Do you accept?"))
+            .setGroup(clientGroup(clientID))
             .setContentText("$type:$username-$peerId")
             // .setStyle(MediaStyle().setShowActionsInCompactView(0, 1))
             // .addAction(R.drawable.check_blue, "check", genLoginRequestPendingIntent(true))
@@ -1001,6 +1011,7 @@ class MainService : Service() {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setContentTitle("$username is trying to join this device")
+            .setGroup(clientGroup(clientID))
             .setContentText("Allow it here, or the operator answers in Rig.")
             .setContentIntent(openApp)
             .setPublicVersion(whileHidden)
@@ -1071,8 +1082,49 @@ class MainService : Service() {
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setContentTitle("$who can't see this screen")
+            .setGroup(clientGroup(clientID))
             .setContentText(if (isReady) "RigDesk could not start screen capture" else "Screen capture is off: tap Start service in RigDesk")
             .build()
+        notificationManager.notify(getClientNotifyID(clientID), notification)
+    }
+
+    /// RigDesk: a Rig agent's session is in. The title says who ("<agent> joined") and the text opens with how ("By your Rig
+    /// Accept, saved password."), since a collapsed row cuts the title's end; with Disconnect, never a "Do you accept?" for a
+    /// login that is already in. While the screen is shared Android 15 shows only the public version, without buttons, so
+    /// that says the same and opens the app, whose connection card has Disconnect.
+    private fun rigJoinedNotification(clientID: Int, joined: String, how: String) {
+        loginPromptDone(clientID)
+        cancelNotification(clientID)
+        val openApp = rigRequestOpenApp(clientID)
+        val sharedWords = "By $how. Open RigDesk to disconnect it."
+        val whileShared = NotificationCompat.Builder(this, notificationChannel)
+            .setSmallIcon(R.mipmap.ic_stat_logo)
+            .setContentTitle(joined)
+            .setContentText(sharedWords)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(sharedWords))
+            .setContentIntent(openApp)
+            .setColor(ContextCompat.getColor(this, R.color.primary))
+            .build()
+        val disconnect = Intent(this, MainService::class.java).apply {
+            action = ACT_RIG_DISCONNECT
+            putExtra(EXT_LOGIN_REQ_ID, clientID)
+        }
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE else FLAG_UPDATE_CURRENT
+        val words = "By $how. It can see and use this phone until you disconnect it."
+        val notification = NotificationCompat.Builder(this, notificationChannel)
+            .setSmallIcon(R.mipmap.ic_stat_logo)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setContentTitle(joined)
+            .setContentText(words)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(words))
+            .setContentIntent(openApp)
+            .setPublicVersion(whileShared)
+            .setGroup(clientGroup(clientID))
+            .setColor(ContextCompat.getColor(this, R.color.primary))
+            .addAction(0, "Disconnect", PendingIntent.getService(this, clientID * 2 + 1_000_001, disconnect, flags))
+            .build()
+        rigRequests.add(clientID)
         notificationManager.notify(getClientNotifyID(clientID), notification)
     }
 
@@ -1087,6 +1139,7 @@ class MainService : Service() {
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setContentTitle("$type ${translate("Established")}")
+            .setGroup(clientGroup(clientID))
             .setContentText("$username - $peerId")
             .build()
         notificationManager.notify(getClientNotifyID(clientID), notification)
@@ -1102,10 +1155,16 @@ class MainService : Service() {
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setContentTitle(translate("Do you accept?"))
+            .setGroup(clientGroup(clientID))
             .setContentText("$type:$username-$peerId")
             .build()
         notificationManager.notify(getClientNotifyID(clientID), notification)
     }
+
+    /// Every notification here names its own group: Android autogroups an app's ungrouped notifications under a summary
+    /// whose public face, while the screen is shared, is the bare app name, which hides each one behind a "RigDesk" row.
+    /// `notificationBuilder` is shared, so each use sets the group it means rather than keeping the last one's.
+    private fun clientGroup(clientID: Int) = "rig-client-$clientID"
 
     private fun getClientNotifyID(clientID: Int): Int {
         return clientID + NOTIFY_ID_OFFSET
@@ -1135,6 +1194,7 @@ class MainService : Service() {
         val notification = notificationBuilder
             .clearActions()
             .setStyle(null)
+            .setGroup(SERVICE_GROUP)
             .setContentTitle(title)
             .setContentText(text)
             .build()

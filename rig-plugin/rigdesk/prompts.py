@@ -8,7 +8,13 @@ and that nonce. It is taken only while no agent holds a session on the PC, so no
 
 On a stock PC the operator's Accept does not take the prompt away until a RustDesk login has actually succeeded: Rig tries the saved password
 once, and if the PC refuses it, or none is kept, the prompt stays up and the agent is told the person there must Allow it. Their Allow then
-joins the agent over the connection they allowed; their Dismiss, or a prompt that lapses, is told too."""
+joins the agent over the connection they allowed; their Dismiss, or a prompt that lapses, is told too.
+
+One tap: a phone named in Rig Assistant (stock.assistant) is asked through that link instead, as one notification that shows with RigDesk's
+screen sharing off. Its Accept starts sharing and the phone says ready, with the ask and nonce; only then is the bridge sent the offer, marked
+accepted, so its knock names the ask under Rig's signature and the phone lets it in on that Accept with no second Allow. Deny, a failure, the
+operator's Deny, a login on the operator's Accept, a withdrawal and the lapse each take the notification away; an unanswered one is shown again, and after the last lapse the
+operator's ask is withdrawn and the agent told. With the phone's link down the bridge's knock asks as before."""
 from __future__ import annotations
 
 import asyncio
@@ -16,13 +22,14 @@ import hmac
 import secrets
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import aiohttp
+from pydantic import TypeAdapter
 
-from core.sdk.base import event_log, now_ms
-from core.sdk.host import scoped, TASKS
-from core.sdk.model import SeatId
+from core.sdk.base import event_log, JsonObject, now_ms
+from core.sdk.host import PluginHost, PROVIDED, Provision, scoped, TASKS
+from core.sdk.model import Refused, SeatId
 
 if TYPE_CHECKING:
     from .desks import Desks, PcLink
@@ -33,6 +40,40 @@ SHOWS = 3
 # The operator's ask stops waiting a moment before the Accept's then runs and marks the operator's yes on the prompt, so a prompt is taken away only once
 # the ask has not waited for this many looks in a row.
 SETTLE_LOOKS = 3
+# A phone's one-tap notification lapses as a PC's prompt does, after 3 minutes, and is shown again.
+ONE_TAP_LAPSE_S = 180
+# The operator's Accept goes here, as __init__.REQUEST_CONFIRMED names it.
+REQUEST_CONFIRMED = "rigdesk.request_confirmed"
+
+
+# What rig-assistant carries to and from the phone; it declares the same shapes, so neither plugin imports the other.
+class JoinAsked(TypedDict):
+    phone: str
+    ask: str
+    nonce: str
+    agent_id: str
+    agent_title: str
+    graph: str
+    operator: str
+    lapse_s: int
+
+
+class JoinEnded(TypedDict):
+    phone: str
+    ask: str
+
+
+class PhoneJoinSaid(TypedDict):
+    phone: str
+    ask: str
+    nonce: str
+    said: Literal["ready", "deny", "failed"]
+    reason: str
+
+
+JOIN_REQUEST = Provision("rig-assistant.join_request", TypeAdapter(JoinAsked), TypeAdapter(str))
+JOIN_END = Provision("rig-assistant.join_end", TypeAdapter(JoinEnded), TypeAdapter(str))
+PHONE_JOIN = Provision("rigdesk.phone_join", TypeAdapter(PhoneJoinSaid), TypeAdapter(str))
 
 
 @dataclass
@@ -52,14 +93,19 @@ class Prompt:
     password: Literal["trying", "refused", "unreached", "none"] | None = None
     # When the person dismissed it after the operator's yes: denied by the person, which a password login still under way does not override.
     denied_ms: int | None = None
+    # The operator's ask as its Accept's then names it, which a one-tap request withdraws after its last lapse.
+    then: JsonObject | None = None
+    # One tap: what the phone said of its notification, and whether its person accepted, so the bridge's offer names the ask.
+    phone_said: asyncio.Future[PhoneJoinSaid] | None = None
+    accepted: bool = False
 
 
-def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str) -> None:
+def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str, then: JsonObject | None = None) -> None:
     """Shows the agent's request on the PC too, where Rig can take the PC's answer for the operator's (a Rig with PluginHost.confirm_answered)."""
     if not hasattr(desks.host, "confirm_answered") or desks.held_on(pc) is not None:
         return
     desks.unshown.pop(pc, None)
-    prompt = desks.prompts[ask] = Prompt(pc, ask, seat, agent, graph, title)
+    prompt = desks.prompts[ask] = Prompt(pc, ask, seat, agent, graph, title, then=then)
     prompt.task = TASKS.spawn(f"rigdesk-prompt-{ask}", _prompting(desks, prompt))
 
 
@@ -121,13 +167,15 @@ async def _prompting(desks: Desks, prompt: Prompt) -> None:
     try:
         said = None
         for _ in range(SHOWS):
-            said = await _while_open(desks, prompt, _offered(desks, prompt))
+            said = await _while_open(desks, prompt, _shown(desks, prompt))
             if said != "lapsed":
                 break
         if said in ("allow", "deny"):
             await _settled(desks, prompt, said)
         elif prompt.operator_said:
             await _unjoined(desks, prompt, said)
+        elif said == "lapsed" and desks.assistant_of(prompt.pc) is not None:
+            await _lapsed(desks, prompt)
         elif said not in (None, "lapsed"):
             desks.unshown[prompt.pc] = said
             _LOG.warning("rigdesk_prompt_unshown", f"RigDesk {prompt.pc}: the request {prompt.ask} could not be shown on the PC: {said}", pc=prompt.pc)
@@ -161,11 +209,72 @@ async def _while_open(desks: Desks, prompt: Prompt, shown: Awaitable[str]) -> st
             await asyncio.gather(task, return_exceptions=True)
 
 
+def _shown(desks: Desks, prompt: Prompt) -> Awaitable[str]:
+    phone = desks.assistant_of(prompt.pc)
+    return _offered(desks, prompt) if phone is None else _one_tap(desks, prompt, phone)
+
+
+async def _one_tap(desks: Desks, prompt: Prompt, phone: str) -> str:
+    """The request as the phone's one notification; its Accept, once the phone is ready, sends the bridge's offer marked accepted, whose answer
+    is this one's. Said as the PC's offer is: allow, deny, lapsed, or why it could not be shown. The notification goes when this ends."""
+    prompt.phone_said = asyncio.get_running_loop().create_future()
+    asked = JoinAsked(phone=phone, ask=prompt.ask, nonce=prompt.nonce, agent_id=prompt.agent, agent_title=prompt.title, graph=prompt.graph,
+                      operator=await desks.operator_name(), lapse_s=ONE_TAP_LAPSE_S)
+    try:
+        await PROVIDED.ask(JOIN_REQUEST, asked)
+    except Refused as unreached:
+        _LOG.info("rigdesk_one_tap_unreached", f"RigDesk {prompt.pc}: Rig Assistant could not show {prompt.ask} on {phone} ({unreached.rendered}); the bridge's knock asks instead",
+                  pc=prompt.pc)
+        return await _offered(desks, prompt)
+    try:
+        try:
+            said = await asyncio.wait_for(asyncio.shield(prompt.phone_said), ONE_TAP_LAPSE_S)
+        except TimeoutError:
+            return "lapsed"
+        if said["said"] == "deny":
+            return "deny"
+        if said["said"] == "failed":
+            return f"refused: {said['reason'] or 'the phone could not start sharing'}"
+        prompt.accepted = True
+        return await _offered(desks, prompt)
+    finally:
+        prompt.phone_said = None
+        try:
+            await PROVIDED.ask(JOIN_END, JoinEnded(phone=phone, ask=prompt.ask))
+        except Refused as unended:
+            _LOG.warning("rigdesk_one_tap_unended", f"RigDesk {prompt.pc}: {prompt.ask} could not be taken off {phone}, it lapses there: {unended.rendered}", pc=prompt.pc)
+
+
+async def phone_said(host: PluginHost, said: PhoneJoinSaid) -> str:
+    """rig-assistant passes on what a phone said of a one-tap request: it counts only for that request's prompt, from the phone it was shown on,
+    with its nonce, while the prompt waits for it."""
+    from .desks import Desks  # noqa: PLC0415 (desks imports this module)
+    desks = host.live(Desks)
+    prompt = desks.prompts.get(said["ask"])
+    waiting = None if prompt is None else prompt.phone_said
+    if (prompt is None or waiting is None or waiting.done() or desks.assistant_of(prompt.pc) != said["phone"]
+            or not hmac.compare_digest(said["nonce"].encode(), prompt.nonce.encode())):
+        return "not waited for"
+    waiting.set_result(said)
+    return "taken"
+
+
+async def _lapsed(desks: Desks, prompt: Prompt) -> None:
+    """Nobody answered the phone's notification, shown each time it lapsed: the operator's ask is withdrawn, and the agent told."""
+    if prompt.then is not None:
+        await desks.host.route_ended(prompt.seat, REQUEST_CONFIRMED, prompt.then)
+    words = (f"RigDesk: your desk/request for {prompt.pc} lapsed: nobody answered it on the phone within {SHOWS * ONE_TAP_LAPSE_S // 60} minutes, "
+             "so the operator's ask is withdrawn and nothing was joined. desk/request asks again.")
+    await desks.tell_seat(prompt.pc, prompt.agent, prompt.seat, words, f"lapsed:{prompt.ask}")
+
+
 async def _offered(desks: Desks, prompt: Prompt) -> str:
     """The agent in the PC's own prompt, answered by an offer event; taken away with POST /offer/end when Rig answers first."""
     url, headers = desks.offer_at(prompt.pc)
     prompt.offered = asyncio.get_running_loop().create_future()
     body = {"agent": {"id": prompt.agent, "title": prompt.title, "graph": prompt.graph}, "ask": prompt.ask, "nonce": prompt.nonce}
+    if prompt.accepted:
+        body["accepted"] = True
     async with desks.http.post(f"{url}/offer", json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as answer:
         said: dict[str, Any] = await answer.json(content_type=None) if answer.content_type == "application/json" else {}
         if answer.status != 200:
