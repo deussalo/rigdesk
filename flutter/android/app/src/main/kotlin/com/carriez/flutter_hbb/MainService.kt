@@ -1110,6 +1110,9 @@ class MainService : Service() {
             .setContentText("It can see and use this phone until you disconnect it.")
             .setContentIntent(openApp)
             .setPublicVersion(whileShared)
+            // Its own group: Android's autogroup folds ungrouped notifications under a summary whose public face, while the
+            // screen is shared, is the bare app name, so the notice would not be seen.
+            .setGroup("rig-joined-$clientID")
             .setColor(ContextCompat.getColor(this, R.color.primary))
             .addAction(0, "Disconnect", PendingIntent.getService(this, clientID * 2 + 1_000_001, disconnect, flags))
             .build()
