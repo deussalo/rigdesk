@@ -84,7 +84,6 @@ impl Connection {
             let here = rig_knock::NoTapHere {
                 setting_on: hbb_common::config::LocalConfig::get_option(rig_knock::ASSIGNED_NO_TAP) == "Y",
                 sharing: sharing(),
-                click_approves: approve_mode() != ApproveMode::Password,
             };
             rig_knock::mark_proved(self.inner.id, &proved.name);
             let admitted = rig_knock::admits_assigned(&proved.vouch, here)

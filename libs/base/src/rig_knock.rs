@@ -212,28 +212,19 @@ pub struct NoTapHere {
     /// Screen sharing runs: Android's capture is granted, so its privacy chip shows. Capture can stop while the listener
     /// stays up, and then nothing tells the person an agent is in.
     pub sharing: bool,
-    /// The approve mode takes clicks: under "accept via password only" nothing gets in with no password but the person's
-    /// own Accept.
-    pub click_approves: bool,
 }
 
 /// Whether a proved knock may get in with no tap on this phone's own say: Rig vouched that the operator assigned the phone
-/// to its agent, the person turned on [`ASSIGNED_NO_TAP`], sharing runs and the approve mode takes clicks. Err says why
-/// the person is asked instead. No other Rig agent may be in either, which [`reserve`] decides as it takes the slot.
+/// to its agent, the person turned on [`ASSIGNED_NO_TAP`] and sharing runs. RigDesk pins approve-mode to password and lets
+/// a Rig knock in on the person's tap under it, so the approve mode is no choice of theirs and decides nothing here. Err
+/// says why the person is asked instead. No other Rig agent may be in either, which [`reserve`] decides as it takes the slot.
 pub fn admits_assigned(vouch: &Vouch, here: NoTapHere) -> Result<(), &'static str> {
     match () {
         _ if *vouch != Vouch::Assigned => Err("the knock is not vouched assigned"),
         _ if !here.setting_on => Err("the person's no-tap setting is off"),
         _ if !here.sharing => Err("screen sharing is off"),
-        _ if !here.click_approves => Err("the approve mode is password only"),
         _ => Ok(()),
     }
-}
-
-/// Whether the phone tells Rig its person lets assigned agents in with no tap: the setting on, and the approve mode taking
-/// clicks, so Rig never counts on a no-tap admit that [`admits_assigned`] would refuse.
-pub fn offers_no_tap(setting_on: bool, click_approves: bool) -> bool {
-    setting_on && click_approves
 }
 
 /// Takes the one Rig agent slot for connection `conn` before its login is sent, so two knocks at once cannot both get in
@@ -445,24 +436,15 @@ mod tests {
     }
 
     #[test]
-    fn only_an_assigned_knock_gets_in_with_no_tap_and_only_while_the_person_allows_it_sharing_runs_and_clicks_approve() {
-        let here = NoTapHere { setting_on: true, sharing: true, click_approves: true };
+    fn only_an_assigned_knock_gets_in_with_no_tap_and_only_while_the_person_allows_it_and_sharing_runs() {
+        let here = NoTapHere { setting_on: true, sharing: true };
         assert_eq!(admits_assigned(&Vouch::Assigned, here), Ok(()));
         let off = NoTapHere { setting_on: false, ..here };
         assert_eq!(admits_assigned(&Vouch::Assigned, off), Err("the person's no-tap setting is off"), "off, as it is by default");
         let stopped = NoTapHere { sharing: false, ..here };
         assert_eq!(admits_assigned(&Vouch::Assigned, stopped), Err("screen sharing is off"), "capture stopped, the listener up");
-        let password = NoTapHere { click_approves: false, ..here };
-        assert_eq!(admits_assigned(&Vouch::Assigned, password), Err("the approve mode is password only"));
         assert!(admits_assigned(&Vouch::Nothing, here).is_err(), "a plain knock asks the person");
         assert!(admits_assigned(&Vouch::Accepted("desk_1".into()), here).is_err(), "an accepted ask goes by one_tap alone");
-    }
-
-    #[test]
-    fn the_phone_offers_no_tap_to_rig_only_while_the_setting_is_on_and_clicks_approve() {
-        assert!(offers_no_tap(true, true));
-        assert!(!offers_no_tap(true, false), "password-only: Rig is told no tap is off");
-        assert!(!offers_no_tap(false, true));
     }
 
     #[test]
