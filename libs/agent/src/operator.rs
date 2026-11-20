@@ -203,7 +203,7 @@ pub fn words(title: &str, how: JoinedBy) -> (String, String) {
         JoinedBy::PersonAllowed => "your Allow",
     };
     (
-        format!("Rig agent {title} joined: {joined}"),
+        format!("{title} (Rig agent) joined: {joined}"),
         format!("Your own mouse and keyboard still go first, and every action is logged. Disconnect is in the tray: {} on the RigDesk icon.", disconnect(title)),
     )
 }
@@ -214,10 +214,10 @@ mod tests {
 
     #[test]
     fn the_notification_says_how_the_agent_got_in_and_where_disconnect_is() {
-        assert_eq!(words("Helper", JoinedBy::RigAccept).0, "Rig agent Helper joined: your Rig Accept, let in by this PC's -AgentJoin");
-        assert_eq!(words("Helper", JoinedBy::StandingGrant).0, "Rig agent Helper joined: Always allow in Rig, let in by -AgentJoin");
+        assert_eq!(words("Helper", JoinedBy::RigAccept).0, "Helper (Rig agent) joined: your Rig Accept, let in by this PC's -AgentJoin");
+        assert_eq!(words("Helper", JoinedBy::StandingGrant).0, "Helper (Rig agent) joined: Always allow in Rig, let in by -AgentJoin");
         let (summary, body) = words("Helper", JoinedBy::PersonAllowed);
-        assert_eq!(summary, "Rig agent Helper joined: your Allow");
+        assert_eq!(summary, "Helper (Rig agent) joined: your Allow");
         assert!(body.contains("Disconnect is in the tray: Disconnect Helper"), "{body}");
         assert!(!body.contains("Dismiss"));
     }
