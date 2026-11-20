@@ -229,12 +229,12 @@ class DeskRefused(Exception):
 
 
 class NotLoggedIn(DeskRefused):
-    """The operator's Accept found no RustDesk login to a stock PC: Rig keeps no password for it ("none"), or the PC refused the saved one ("refused").
-    The person there can still let the agent in by Allow on the device."""
+    """The operator's Accept found no RustDesk login to a stock PC: Rig keeps no password for it ("none"), nothing at the PC took the connection so no
+    password was tried ("unreached"), or the login was tried and did not succeed ("refused"). The person there can still let the agent in by Allow on the device."""
 
-    def __init__(self, words: str, password: Literal["refused", "none"]) -> None:
+    def __init__(self, words: str, password: Literal["refused", "unreached", "none"]) -> None:
         super().__init__(words)
-        self.password: Literal["refused", "none"] = password
+        self.password: Literal["refused", "unreached", "none"] = password
 
 
 class DeniedByPerson(DeskRefused):
@@ -1665,9 +1665,16 @@ class Desks:
         if status == 404 and said.get("code") is None:
             raise DeskRefused(f"{pc}'s rigdesk-bridge is older than logging in on the operator's Accept, so whether it can log in is not known; "
                               "the operator installs a current rigdesk-bridge")
-        if said.get("code") == "no_password":
-            raise NotLoggedIn(f"Rig keeps no password for {pc}", "none")
-        raise NotLoggedIn(f"Rig's saved password for {pc} did not log in: {said.get('error') or f'HTTP {status}'}", "refused")
+        error = said.get("error") or f"HTTP {status}"
+        match said.get("code"):
+            case "no_password":
+                raise NotLoggedIn(f"Rig keeps no password for {pc}", "none")
+            case "unreachable":
+                raise NotLoggedIn(f"Can't reach {pc}: {error}", "unreached")
+            case "login_refused":
+                raise NotLoggedIn(f"Rig's saved password for {pc} did not log in: {error}", "refused")
+            case _:
+                raise NotLoggedIn(f"Rig's login to {pc} did not finish: {error}", "refused")
 
     def device_unasked(self, pc: str) -> str | None:
         """Why the person at a stock PC is not asked on the device for an agent's desk/request; None when they are, or for a RigDesk PC."""

@@ -48,7 +48,12 @@ pub trait Switch: Send + Sync {
 pub enum NoLogin {
     /// Rig keeps no password for the PC and the person there has allowed no connection.
     NoPassword,
-    /// The PC refused the saved password, or did not answer, in its own words.
+    /// Nothing at the PC took the connection, or it closed before the PC asked for a login, so no login was tried and no
+    /// password used; in words that say what to start where.
+    Unreached(String),
+    /// The PC answered the login with a refusal, in its own words.
+    Refused(String),
+    /// The login was asked for and did not finish, in its words.
     Failed(String),
 }
 
@@ -56,6 +61,8 @@ impl NoLogin {
     pub fn code(&self) -> &'static str {
         match self {
             NoLogin::NoPassword => "no_password",
+            NoLogin::Unreached(_) => "unreachable",
+            NoLogin::Refused(_) => "login_refused",
             NoLogin::Failed(_) => "login_failed",
         }
     }
@@ -63,7 +70,7 @@ impl NoLogin {
     pub fn words(&self) -> String {
         match self {
             NoLogin::NoPassword => "Rig keeps no password for this PC".into(),
-            NoLogin::Failed(why) => why.clone(),
+            NoLogin::Unreached(why) | NoLogin::Refused(why) | NoLogin::Failed(why) => why.clone(),
         }
     }
 }

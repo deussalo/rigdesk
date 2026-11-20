@@ -1359,6 +1359,10 @@ def test_a_stock_pc_is_asked_through_its_bridge_and_its_allow_answers_the_ask_wi
     asyncio.run(run())
 
 
+UNREACHED = ("nothing on the phone accepts connections at phone.tail1234.ts.net:21118 (Connection refused (os error 111)), so no login was tried "
+             "and no password used. Start the service in RigDesk on the phone, with direct IP access on")
+
+
 class _StockBridge:
     """A stock PC's rigdesk-bridge on loopback: its prompt routes, its login on the operator's Accept (which logs in once the person allowed, or
     with a good saved password), and mint and claim."""
@@ -1375,7 +1379,11 @@ class _StockBridge:
                 return web.json_response({"logged_in": True})
             if self.password is None:
                 return web.json_response({"logged_in": False, "code": "no_password", "error": "Rig keeps no password for this PC"}, status=409)
-            return web.json_response({"logged_in": False, "code": "login_failed", "error": "login refused by the PC: Wrong Password"}, status=409)
+            if self.password == "down":
+                return web.json_response({"logged_in": False, "code": "unreachable", "error": UNREACHED}, status=409)
+            if self.password == "cut":
+                return web.json_response({"logged_in": False, "code": "login_failed", "error": "no login within 5s"}, status=409)
+            return web.json_response({"logged_in": False, "code": "login_refused", "error": "login refused by the PC: Wrong Password"}, status=409)
         if request.path == "/viewer/mint":
             return web.json_response({"grant": GRANT, "secret": SECRET})
         if request.path == "/claim":
@@ -1480,6 +1488,14 @@ def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_suc
         assert bridge.paths().count("/login") == 2 and "/claim" in bridge.paths(), bridge.paths()
         assert len(told) == 1 and "allowed you on the device, so you joined phone over the connection they allowed, with no password" in told[0][1], told
         assert desks.held_on("phone") is not None
+
+        said, bridge, desks, told = await accepted_then("down", "")
+        assert f"you have not joined phone: Can't reach phone: {UNREACHED}, so the person at phone must Allow" in said, said
+        assert "password for phone did not log in" not in said and desks.held_on("phone") is None, said
+
+        said, bridge, desks, told = await accepted_then("cut", "")
+        assert "you have not joined phone: Rig's login to phone did not finish: no login within 5s" in said, said
+        assert "password" not in said and desks.held_on("phone") is None, said
 
         said, bridge, desks, told = await accepted_then(None, "deny")
         assert "you have not joined phone: Rig keeps no password for phone" in said, said

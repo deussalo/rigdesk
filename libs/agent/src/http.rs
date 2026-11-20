@@ -634,7 +634,7 @@ impl Api {
                 json_response(StatusCode::OK, &json!({"logged_in": true}))
             }
             Ok(Err(no)) => {
-                self.journal.record(&Entry::new("Rig", "login", format!("refused: {}", no.code()), json!({"why": no.words()})));
+                self.journal.record(&Entry::new("Rig", "login", format!("not logged in: {}", no.code()), json!({"why": no.words()})));
                 json_response(StatusCode::CONFLICT, &json!({"logged_in": false, "code": no.code(), "error": no.words()}))
             }
             Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": format!("the login stopped: {e}"), "code": "login_failed"})),

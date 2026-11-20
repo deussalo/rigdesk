@@ -107,7 +107,7 @@ try {
     try {
       $null = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:21121/login" -Headers $auth -ContentType "application/json" -Body "{}"
     } catch { $refused = $_.ErrorDetails.Message | ConvertFrom-Json }
-    if ($null -eq $refused -or $refused.code -ne "login_failed" -or $refused.error -notmatch "Wrong Password") { Fail "a wrong saved password was not refused in the PC's words: $($refused | ConvertTo-Json -Compress)" }
+    if ($null -eq $refused -or $refused.code -ne "login_refused" -or $refused.error -notmatch "Wrong Password") { Fail "a wrong saved password was not refused in the PC's words: $($refused | ConvertTo-Json -Compress)" }
     Write-Host "wrong password: $($refused.error)"
   } finally { Stop-Process -Id $wrong.Id -Force -ErrorAction SilentlyContinue }
   $login = Post "/login" @{}
