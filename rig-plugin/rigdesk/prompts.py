@@ -12,14 +12,15 @@ joins the agent over the connection they allowed; their Dismiss, or a prompt tha
 
 One tap: a phone Rig Assistant links to is asked through that link instead, as one notification that shows with RigDesk's screen sharing
 off. The link is derived, never set: the phone's hello to Rig Assistant names the RustDesk ID its RigDesk shows, and the stock entry whose
-login_id is that ID is that phone. Its Accept starts sharing and the phone says ready, with the ask and nonce; only then is the bridge sent the offer, marked
-accepted, so its knock names the ask under Rig's signature and the phone lets it in on that Accept with no second Allow. Deny, a failure, the
-operator's Deny, a login on the operator's Accept, a withdrawal and the lapse each take the notification away; an unanswered one is shown again, and after the last lapse the
-operator's ask is withdrawn and the agent told. With the phone's link down the bridge's knock asks instead, and the agent and Rig's log are
-told why.
+login_id is that ID is that phone. Its Accept starts sharing and the phone says ready, with the ask and nonce; only then is the bridge sent the
+offer, marked accepted, so its knock names the ask under Rig's signature and the phone lets it in on that Accept with no second Allow. With
+the phone's link down the bridge's knock asks instead, and the agent and Rig's log are told why.
 
-An agent assigned the phone asks the same way: its desk/join(pc), when Rig cannot log in (sharing is off), sends the phone this request with no
-ask in Rig, as the standing grant stands in for the operator's yes but not the person's; their Accept joins it through its grant."""
+On a phone only its person says yes (who decides: the prompt's yes). An agent's desk/request raises no Accept in Rig, only a status card whose
+one choice is Cancel; Cancel takes the notification away, and the card is withdrawn when the request joins, is denied, fails or lapses. An agent
+assigned the phone asks the same way with no card: its desk/join(pc), when Rig cannot log in (sharing is off), sends the phone this request, as the
+standing grant stands in for the operator's yes but not the person's. Either way the person's Accept joins the agent; their Deny, a failure and
+the last lapse are told to it. An unanswered notification is shown again until then."""
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +35,7 @@ from pydantic import TypeAdapter
 
 from core.sdk.base import event_log, JsonObject, now_ms
 from core.sdk.host import PluginHost, PROVIDED, Provision, scoped, TASKS
-from core.sdk.model import Refused, SeatId
+from core.sdk.model import Choice, Choices, Refused, SeatId
 
 if TYPE_CHECKING:
     from .desks import Desks, PcLink
@@ -142,20 +143,25 @@ class Prompt:
     accepted: bool = False
     # The phone in Rig Assistant it was last shown on as one notification, or None while only the bridge's knock asked.
     phone: str | None = None
-    # An assigned agent's desk/join: its standing grant stands in for the operator's yes, so no ask waits in Rig and the person's answer joins it.
-    granted: bool = False
+    # Who must say yes: the operator's ask in Rig, answered there or by the person at a PC (operator); or the person alone, the operator's part
+    # being an assigned agent's grant (grant) or a phone's status card, which only cancels (person).
+    yes: Yes = "operator"
 
 
-def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str, then: JsonObject | None = None,
-          granted: Literal["refused", "unreached", "none"] | None = None) -> None:
-    """Shows the agent's request on the PC too, where Rig can take the PC's answer for the operator's (a Rig with PluginHost.confirm_answered).
-    granted, for an assigned agent's desk/join, says how Rig's login failed: the grant is the operator's yes, and only the person's is asked."""
-    if not hasattr(desks.host, "confirm_answered") or desks.held_on(pc) is not None:
+type Yes = Literal["operator", "grant", "person"]
+CANCEL_ONLY = Choices(choices=(Choice(id="cancel", label="Cancel", tone="deny"),), safe_choice="cancel")
+
+
+def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str, then: JsonObject | None = None, yes: Yes = "operator",
+          password: Literal["refused", "unreached", "none"] = "none") -> None:
+    """Shows the agent's request on the PC too, where Rig can take the PC's answer for the operator's. With yes grant or person only the person is
+    asked, and password says how Rig's own login fared."""
+    if desks.held_on(pc) is not None:
         return
     desks.unshown.pop(pc, None)
-    prompt = desks.prompts[ask] = Prompt(pc, ask, seat, agent, graph, title, then=then)
-    if granted is not None:
-        prompt.granted, prompt.operator_said, prompt.password = True, True, granted
+    prompt = desks.prompts[ask] = Prompt(pc, ask, seat, agent, graph, title, then=then, yes=yes)
+    if yes != "operator":
+        prompt.operator_said, prompt.password = True, password
     prompt.task = TASKS.spawn(f"rigdesk-prompt-{ask}", _prompting(desks, prompt))
 
 
@@ -225,15 +231,17 @@ async def _prompting(desks: Desks, prompt: Prompt) -> None:
             said = await _while_open(desks, prompt, _shown(desks, prompt))
             if said != "lapsed":
                 break
+        if said == "cancelled":
+            return  # the operator's Cancel, which core told the agent
         if said in ("allow", "deny"):
             await _settled(desks, prompt, said)
         elif prompt.operator_said:
             await _unjoined(desks, prompt, said)
-        elif said == "lapsed" and prompt.phone is not None:
-            await _lapsed(desks, prompt)
         elif said not in (None, "lapsed"):
             desks.unshown[prompt.pc] = said
             _LOG.warning("rigdesk_prompt_unshown", f"RigDesk {prompt.pc}: the request {prompt.ask} could not be shown on the PC: {said}", pc=prompt.pc)
+        if prompt.yes == "person" and prompt.then is not None:
+            await desks.host.route_ended(prompt.seat, REQUEST_CONFIRMED, prompt.then)
     except asyncio.CancelledError:
         raise
     except Exception as failed:  # noqa: BLE001
@@ -244,7 +252,8 @@ async def _prompting(desks: Desks, prompt: Prompt) -> None:
 
 
 async def _while_open(desks: Desks, prompt: Prompt, shown: Awaitable[str]) -> str | None:
-    """What the PC said, or None once the operator's ask no longer waits or an agent holds the PC: the prompt is then taken away."""
+    """What the PC said, or None once the operator's ask no longer waits or an agent holds the PC, or cancelled once a phone's status card no
+    longer waits: the prompt is then taken away."""
     task = scoped(f"rigdesk-prompt-shown-{prompt.ask}", shown)
     unwaited = 0
     try:
@@ -254,9 +263,10 @@ async def _while_open(desks: Desks, prompt: Prompt, shown: Awaitable[str]) -> st
                 break
             if desks.held_on(prompt.pc) is not None:
                 return None
-            unwaited = 0 if prompt.operator_said or await desks.host.confirming(prompt.seat, prompt.ask) is not None else unwaited + 1
+            waits = prompt.yes == "grant" or (prompt.yes == "operator" and prompt.operator_said) or await desks.host.confirming(prompt.seat, prompt.ask) is not None
+            unwaited = 0 if waits else unwaited + 1
             if unwaited >= SETTLE_LOOKS:
-                return None
+                return "cancelled" if prompt.yes == "person" else None
         return task.result()
     finally:
         if not task.done():
@@ -330,15 +340,6 @@ async def phone_said(host: PluginHost, said: PhoneJoinSaid) -> str:
     return "taken"
 
 
-async def _lapsed(desks: Desks, prompt: Prompt) -> None:
-    """Nobody answered the phone's notification, shown each time it lapsed: the operator's ask is withdrawn, and the agent told."""
-    if prompt.then is not None:
-        await desks.host.route_ended(prompt.seat, REQUEST_CONFIRMED, prompt.then)
-    words = (f"RigDesk: your desk/request for {prompt.pc} lapsed: nobody answered it on the phone within {SHOWS * ONE_TAP_LAPSE_S // 60} minutes, "
-             "so the operator's ask is withdrawn and nothing was joined. desk/request asks again.")
-    await desks.tell_seat(prompt.pc, prompt.agent, prompt.seat, words, f"lapsed:{prompt.ask}")
-
-
 async def _offered(desks: Desks, prompt: Prompt) -> str:
     """The agent in the PC's own prompt, answered by an offer event; taken away with POST /offer/end when Rig answers first."""
     url, headers = desks.offer_at(prompt.pc)
@@ -397,15 +398,15 @@ async def _answered_after_accept(desks: Desks, prompt: Prompt, said: str) -> Non
         prompt.denied_ms = now_ms()
         if prompt.password == "trying":
             return  # the operator's Accept, still logging in, drops its login and tells the agent
-        words = (f"RigDesk {pc}: denied by the person at {_clock(prompt.denied_ms)}: they dismissed your request on the device, so you did not join {pc}, "
-                 + ("though it is assigned to you. desk/join asks again." if prompt.granted else "though the operator accepted it. desk/request asks again."))
+        words = (f"RigDesk {pc}: denied by the person at {_clock(prompt.denied_ms)}: they dismissed your request on the device, so you did not join {pc}"
+                 f"{_though(prompt)}. {_again(prompt)}")
     else:
         identity = await desks.host.roster.identity(prompt.seat)
         if identity is None or identity.agent != prompt.agent:
             _LOG.warning("rigdesk_prompt_gone", f"RigDesk {pc}: the person allowed {prompt.ask}, but {prompt.agent} no longer stands at its seat, so nobody joined", pc=pc)
             return
         try:
-            await desks.join_approved(pc, prompt.agent, prompt.graph, prompt.seat.node, prompt.title, prompt.ask, via="assigned" if prompt.granted else "link")
+            await desks.join_approved(pc, prompt.agent, prompt.graph, prompt.seat.node, prompt.title, prompt.ask, via="assigned" if prompt.yes == "grant" else "link")
         except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
             mine = desks.held_by(prompt.agent, prompt.graph)
             if mine is not None and mine.pc == pc:
@@ -425,12 +426,15 @@ async def _unjoined(desks: Desks, prompt: Prompt, said: str | None) -> None:
     why = (f"{holder.title} joined {pc} while the person there was asked, so the prompt was taken away" if holder is not None else
            "nobody answered the prompt on the device by " + _clock(now_ms()) if said in (None, "lapsed") else
            f"the device could not ask the person there: {said}")
-    though = "though it is assigned to you" if prompt.granted else "though the operator accepted it"
-    await desks.tell_seat(pc, prompt.agent, prompt.seat, f"RigDesk: you did not join {pc}, {though}: {why}. {_again(prompt)}", f"prompt:{prompt.ask}")
+    await desks.tell_seat(pc, prompt.agent, prompt.seat, f"RigDesk: you did not join {pc}{_though(prompt)}: {why}. {_again(prompt)}", f"prompt:{prompt.ask}")
+
+
+def _though(prompt: Prompt) -> str:
+    return {"operator": ", though the operator accepted it", "grant": ", though it is assigned to you", "person": ""}[prompt.yes]
 
 
 def _again(prompt: Prompt) -> str:
-    return "desk/join asks again." if prompt.granted else "desk/request asks again."
+    return "desk/join asks again." if prompt.yes == "grant" else "desk/request asks again."
 
 
 def _clock(at_ms: int) -> str:
