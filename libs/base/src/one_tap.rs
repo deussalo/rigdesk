@@ -512,7 +512,7 @@ mod tests {
             let mut body = base.clone();
             body[key] = value;
             let render = tap.call(bad(body), false);
-            assert!(render.refused.is_some() && render.prompts.is_empty(), "{key}");
+            assert!(render.refused.is_some() && render.prompts.is_empty(), "{}", key);
         }
         assert!(Call::parse("{\"op\": \"pressed\"}").is_err());
 
