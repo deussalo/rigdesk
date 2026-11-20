@@ -217,6 +217,9 @@ def _shown(desks: Desks, prompt: Prompt) -> Awaitable[str]:
 async def _one_tap(desks: Desks, prompt: Prompt, phone: str) -> str:
     """The request as the phone's one notification; its Accept, once the phone is ready, sends the bridge's offer marked accepted, whose answer
     is this one's. Said as the PC's offer is: allow, deny, lapsed, or why it could not be shown. The notification goes when this ends."""
+    unnamed = await desks.one_tap_unnamed(prompt.pc)
+    if unnamed is not None:
+        return f"refused: {unnamed}"
     prompt.phone_said = asyncio.get_running_loop().create_future()
     asked = JoinAsked(phone=phone, ask=prompt.ask, nonce=prompt.nonce, agent_id=prompt.agent, agent_title=prompt.title, graph=prompt.graph,
                       operator=await desks.operator_name(), lapse_s=ONE_TAP_LAPSE_S)

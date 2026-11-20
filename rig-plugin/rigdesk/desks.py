@@ -204,7 +204,9 @@ class RigdeskSettings(Shape):
     health: Annotated[Thresholds, Field(description="Where a RigDesk PC's health figures warn or fault; the PC reports figures and Rig judges them.")] = Thresholds()
     connect_server: Annotated[ConnectServer | None, Field(description="Where desk/connect sends a bare RustDesk ID that is none of our PCs: an ID server's host and key. "
                                                                       "Unset, RustDesk's public server; an ID given as ID@host?key=<key> goes to that server instead.")] = None
-    operator_name: Annotated[str, Field(max_length=80, description="Who Rig's agents work for, as a phone's one-tap notification names them: \"Rig agent of <operator_name>\".")] = ""
+    operator_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=80), Field(
+        description="Needed for one-tap: who Rig's agents work for, as a phone's one-tap notification names them: \"Rig agent of <operator_name>\". "
+                    "Empty, Rig refuses every join request to a phone named in Rig Assistant (stock.assistant), as no prompt may name a guessed operator.")] = ""
 
     @model_validator(mode="after")
     def _ids_have_a_server(self) -> RigdeskSettings:
@@ -2044,6 +2046,13 @@ class Desks:
 
     async def operator_name(self) -> str:
         return (await asyncio.to_thread(self.host.settings, RigdeskSettings)).operator_name
+
+    async def one_tap_unnamed(self, pc: str) -> str | None:
+        """Why no join request may go to pc's phone as one tap: its prompt names the operator, and none is set. None when it may, or pc is no such phone."""
+        if self.assistant_of(pc) is None or await self.operator_name():
+            return None
+        return (f"{pc} takes join requests as one tap on the phone, whose prompt names who the agent works for, and plugins.rigdesk.operator_name is empty, "
+                f"so Rig sends {pc} no request. Only the operator can set it: rig settings --set 'plugins.rigdesk.operator_name=\"<their name>\"'")
 
     def offer_at(self, pc: str) -> tuple[str, dict[str, str]]:
         link = self._link(pc)
