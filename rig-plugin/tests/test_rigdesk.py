@@ -1656,7 +1656,7 @@ def test_deny_or_a_failed_start_on_the_phone_answers_no_and_knocks_nothing_and_t
 
                 prompts.start(desks, "moto-g57", "desk_2", seat, "a1", "g", "Builder")
                 await _until(lambda: len(assistant.shown) == 2)
-                await prompts.phone_said(desks.host, _said("desk_2", assistant.shown[1]["nonce"], "failed", reason="the person cancelled Android's Start now"))  # type: ignore[arg-type]
+                await prompts.phone_said(desks.host, _said("desk_2", assistant.shown[1]["nonce"], "failed", reason="screen sharing did not start within 15 s"))  # type: ignore[arg-type]
                 await _until(lambda: assistant.ended == ["desk_1", "desk_2"] and "desk_2" not in desks.prompts)
                 assert len(asks.answered) == 1, "a failure is not the person's no"
 
