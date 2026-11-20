@@ -3259,11 +3259,20 @@ pub mod server_side {
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_rigConfigAt(env: JNIEnv, _class: JClass, app_dir: JString) -> jboolean {
         let mut env = env;
-        let mut dir = config::APP_DIR.write().unwrap();
-        if dir.is_empty() {
-            *dir = env.get_string(&app_dir).map(String::from).unwrap_or_default();
+        {
+            let mut dir = config::APP_DIR.write().unwrap();
+            if dir.is_empty() {
+                *dir = env.get_string(&app_dir).map(String::from).unwrap_or_default();
+            }
+            if dir.is_empty() {
+                return jboolean::from(false);
+            }
         }
-        jboolean::from(!dir.is_empty())
+        // The config's file names come from RigDesk's app name, which load_custom_client sets: before it, the read
+        // would load RustDesk.toml, a config of no one, and keep it.
+        static RIGDESK_CLIENT: std::sync::Once = std::sync::Once::new();
+        RIGDESK_CLIENT.call_once(crate::load_custom_client);
+        jboolean::from(true)
     }
 
     /// RigDesk: this device's RustDesk ID, which Rig Assistant's hello names so Rig links the phone to its stock entry;
