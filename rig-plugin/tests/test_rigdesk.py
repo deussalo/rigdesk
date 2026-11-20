@@ -1394,7 +1394,7 @@ class _StockBridge:
         return [path for path, _ in self.posted]
 
 
-async def _stock_desks(state: str, bridge: _StockBridge, asks: "_Asks", told: list) -> tuple[Desks, object]:
+async def _stock_desks(state: str, bridge: _StockBridge, asks: "_Asks", told: list, assistant: str | None = None) -> tuple[Desks, object]:
     from aiohttp import ClientSession, web
     from rigdesk.desks import RigdeskSettings, StockRemote
     app = web.Application()
@@ -1406,8 +1406,9 @@ async def _stock_desks(state: str, bridge: _StockBridge, asks: "_Asks", told: li
     await site.start()
     token = Path(state) / "token"
     token.write_text("rig-bearer")
-    stock = (StockRemote(peer="phone.tail1234.ts.net") if bridge.password is None else
-             StockRemote(peer="phone.tail1234.ts.net", password_file=str(Path(state) / "phone.password")))
+    named = {} if assistant is None else {"assistant": assistant}
+    stock = (StockRemote(peer="phone.tail1234.ts.net", **named) if bridge.password is None else
+             StockRemote(peer="phone.tail1234.ts.net", password_file=str(Path(state) / "phone.password"), **named))
     spec = DeskPc(url=f"http://127.0.0.1:{runner.addresses[0][1]}", token_file=str(token), stock=stock)
     settings = RigdeskSettings(pcs={"phone": spec})
     roster = SimpleNamespace(identity=lambda seat: _now(SimpleNamespace(agent="a1", label="Builder")), closed=lambda seats: _now(set()))
@@ -1506,6 +1507,43 @@ def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_suc
         said, bridge, desks, told = await accepted_then("good", "deny", while_logging_in=True)
         assert "you did not join phone: denied by the person at phone" in said and "before Rig's login succeeded" in said, said
         assert "/claim" not in bridge.paths() and desks.held_on("phone") is None and told == [], (bridge.paths(), told)
+
+    asyncio.run(run())
+
+
+def test_rigs_accept_with_a_refused_password_keeps_a_phones_one_tap_notification_up_and_its_accept_then_joins_the_agent() -> None:
+    from rigdesk import _request_confirmed, prompts
+    seat, told = SeatId(GraphName("g"), NodeId("n")), []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks, bridge, assistant = _Asks("desk_1"), _StockBridge("stale"), _Assistant()
+            assistant.offer()
+            desks, runner = await _stock_desks(state, bridge, asks, told, assistant="moto")
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                prompts.start(desks, "phone", "desk_1", seat, "a1", "g", "Builder")
+                await _until(lambda: assistant.shown)
+                nonce = assistant.shown[0]["nonce"]
+                asks.open.discard("desk_1")
+                said = await _request_confirmed(desks.host, _accepted("desk_1"))  # type: ignore[arg-type]
+                assert "must Allow your request on the device" in said, said
+                await asyncio.sleep(0.1)
+                assert assistant.ended == [] and "desk_1" in desks.prompts, "the notification went before any login succeeded"
+                assert "/offer" not in bridge.paths() and desks.held_on("phone") is None, bridge.paths()
+                assert await prompts.phone_said(desks.host, _said("desk_1", nonce, "ready")) == "taken"  # type: ignore[arg-type]
+                await _until(lambda: "/offer" in bridge.paths())
+                assert next(body for path, body in bridge.posted if path == "/offer")["accepted"] is True
+                bridge.allowed = True
+                await desks._event(desks._pcs["phone"], {"type": "offer", "ask": "desk_1", "nonce": nonce, "answer": "allow"})
+                await _until(lambda: told and assistant.ended)
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            assert len(told) == 1 and "allowed you on the device, so you joined phone over the connection they allowed" in told[0][1], told
+            assert desks.held_on("phone") is not None and assistant.ended == ["desk_1"]
 
     asyncio.run(run())
 
