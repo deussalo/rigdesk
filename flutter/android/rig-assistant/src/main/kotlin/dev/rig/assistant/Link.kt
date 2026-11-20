@@ -24,6 +24,7 @@ object Link {
     private const val TAG = "RigAssistant"
     private val BACKOFF_MS = longArrayOf(1_000, 2_000, 5_000, 10_000, 30_000)
     private const val KEPT = 20
+    private val RUSTDESK_ID = Regex("^[A-Za-z0-9_-]{6,32}$")
     private val boot = UUID.randomUUID().toString().substring(0, 8)
     private val unacked = ArrayDeque<JSONObject>()
     private val calls = Executors.newSingleThreadExecutor { Thread(it, "rig-calls") }
@@ -162,7 +163,16 @@ object Link {
                 .put("input_schema", spec.getJSONObject("inputSchema"))
                 .put("read_only", spec.optJSONObject("annotations")?.optBoolean("readOnlyHint") ?: false))
         }
-        return JSONObject().put("type", "hello").put("phone", phone).put("boot", boot).put("app", "RigDesk ${tools.version}").put("tools", offered)
+        return JSONObject().put("type", "hello").put("phone", phone).put("boot", boot).put("app", "RigDesk ${tools.version}")
+            .put("rustdesk_id", ownId()).put("tools", offered)
+    }
+
+    /** RigDesk's ID as Rig takes it, or empty: one Rig would refuse would cost the whole hello. */
+    private fun ownId(): String = try {
+        Host.rustdeskId().filterNot { it.isWhitespace() }.takeIf { RUSTDESK_ID.matches(it) } ?: ""
+    } catch (e: Throwable) {
+        Log.w(TAG, "rustdesk id", e)
+        ""
     }
 
     private fun received(frame: JSONObject) {

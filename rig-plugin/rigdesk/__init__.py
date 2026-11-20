@@ -329,7 +329,8 @@ def _pc_entry(desks: Desks, entry: PcEntry, agent: str, graph: str, mine: set[st
     return {"name": entry["name"], "client": entry["client"], "state": entry["state"],
             "reached_by": _reached_by(entry),
             "assigned_to_you": entry["name"] in mine, "held_by": _held_words(entry, agent), "shell": _shell_words(desks, entry, agent, graph),
-            "health": None if judged is None else {"state": judged.state, "failing": [check.words for check in judged.failing]}}
+            "health": None if judged is None else {"state": judged.state, "failing": [check.words for check in judged.failing]},
+            "one_tap": None if (tap := entry["one_tap"]) is None else {"state": tap.state, "why": tap.why}}
 
 
 async def _pcs(desks: Desks, call: Call, given: PcsInput) -> Answer:
@@ -783,6 +784,12 @@ class PcHealthRow(View):
     figures: HealthFiguresRow | None
 
 
+class OneTapRow(View):
+    state: Literal["ready", "assistant_offline", "no_link_match"]
+    phone: str | None = Field(description="The phone in Rig Assistant saying the entry's RustDesk ID, or null with none.")
+    why: str
+
+
 class PcRow(View):
     name: str
     client: str
@@ -803,6 +810,8 @@ class PcRow(View):
     password_file: str | None = Field(default=None, description="Where a stock PC's saved password is kept, which POST password replaces; never the password. Null for a RigDesk PC.")
     device_unasked: str | None = Field(default=None, description="Why the person at a stock PC is not asked on the device for an agent's desk/request, as its rigdesk-bridge "
                                                                  "is too old to; null when they are, and for a RigDesk PC.")
+    one_tap: OneTapRow | None = Field(default=None, description="Whether a stock PC is a phone Rig Assistant links to by its login_id; null for a RigDesk PC, "
+                                                                "and until the first settings pass has asked.")
 
 
 class ListenerRow(View):

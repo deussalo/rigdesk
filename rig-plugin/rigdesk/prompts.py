@@ -10,11 +10,13 @@ On a stock PC the operator's Accept does not take the prompt away until a RustDe
 once, and if the PC refuses it, or none is kept, the prompt stays up and the agent is told the person there must Allow it. Their Allow then
 joins the agent over the connection they allowed; their Dismiss, or a prompt that lapses, is told too.
 
-One tap: a phone named in Rig Assistant (stock.assistant) is asked through that link instead, as one notification that shows with RigDesk's
-screen sharing off. Its Accept starts sharing and the phone says ready, with the ask and nonce; only then is the bridge sent the offer, marked
+One tap: a phone Rig Assistant links to is asked through that link instead, as one notification that shows with RigDesk's screen sharing
+off. The link is derived, never set: the phone's hello to Rig Assistant names the RustDesk ID its RigDesk shows, and the stock entry whose
+login_id is that ID is that phone. Its Accept starts sharing and the phone says ready, with the ask and nonce; only then is the bridge sent the offer, marked
 accepted, so its knock names the ask under Rig's signature and the phone lets it in on that Accept with no second Allow. Deny, a failure, the
 operator's Deny, a login on the operator's Accept, a withdrawal and the lapse each take the notification away; an unanswered one is shown again, and after the last lapse the
-operator's ask is withdrawn and the agent told. With the phone's link down the bridge's knock asks as before."""
+operator's ask is withdrawn and the agent told. With the phone's link down the bridge's knock asks instead, and the agent and Rig's log are
+told why."""
 from __future__ import annotations
 
 import asyncio
@@ -58,6 +60,12 @@ class JoinAsked(TypedDict):
     lapse_s: int
 
 
+class LinkedPhone(TypedDict):
+    name: str
+    rustdesk_id: str
+    up: bool
+
+
 class JoinEnded(TypedDict):
     phone: str
     ask: str
@@ -71,9 +79,40 @@ class PhoneJoinSaid(TypedDict):
     reason: str
 
 
+PHONES = Provision("rig-assistant.phones", TypeAdapter(type(None)), TypeAdapter(list[LinkedPhone]))
 JOIN_REQUEST = Provision("rig-assistant.join_request", TypeAdapter(JoinAsked), TypeAdapter(str))
 JOIN_END = Provision("rig-assistant.join_end", TypeAdapter(JoinEnded), TypeAdapter(str))
 PHONE_JOIN = Provision("rigdesk.phone_join", TypeAdapter(PhoneJoinSaid), TypeAdapter(str))
+
+
+type OneTapState = Literal["ready", "assistant_offline", "no_link_match"]
+ONE_TAP_STATES: tuple[OneTapState, ...] = ("ready", "assistant_offline", "no_link_match")
+
+
+@dataclass(frozen=True, slots=True)
+class OneTap:
+    """Whether a stock PC is a phone Rig Assistant links to: ready while the phone saying the entry's RustDesk ID is connected to Rig,
+    assistant_offline while it is not, no_link_match when no phone says it; why says which, in words."""
+    state: OneTapState
+    phone: str | None
+    why: str
+
+
+def one_tap_of(peer: str | None, login_id: str | None, phones: list[LinkedPhone] | str) -> OneTap:
+    """The one-tap link of a stock entry, from Rig Assistant's phones, or why they could not be read."""
+    if peer is None:
+        return OneTap("no_link_match", None, "it is reached through the ID server; one tap needs a phone on the tailnet (peer)")
+    if login_id is None:
+        return OneTap("no_link_match", None, "its entry names no login_id, the RustDesk ID that links it to a phone in Rig Assistant")
+    if isinstance(phones, str):
+        return OneTap("no_link_match", None, f"Rig Assistant's phones could not be read: {phones}")
+    said = sorted((phone for phone in phones if phone["rustdesk_id"] == login_id), key=lambda phone: not phone["up"])
+    if not said:
+        return OneTap("no_link_match", None, f"no phone in Rig Assistant says RustDesk ID {login_id}")
+    phone = said[0]
+    if not phone["up"]:
+        return OneTap("assistant_offline", phone["name"], f"phone {phone['name']} says RustDesk ID {login_id} but is not connected to Rig Assistant now")
+    return OneTap("ready", phone["name"], f"phone {phone['name']} in Rig Assistant says RustDesk ID {login_id}")
 
 
 @dataclass
@@ -98,6 +137,8 @@ class Prompt:
     # One tap: what the phone said of its notification, and whether its person accepted, so the bridge's offer names the ask.
     phone_said: asyncio.Future[PhoneJoinSaid] | None = None
     accepted: bool = False
+    # The phone in Rig Assistant it was last shown on as one notification, or None while only the bridge's knock asked.
+    phone: str | None = None
 
 
 def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str, then: JsonObject | None = None) -> None:
@@ -174,7 +215,7 @@ async def _prompting(desks: Desks, prompt: Prompt) -> None:
             await _settled(desks, prompt, said)
         elif prompt.operator_said:
             await _unjoined(desks, prompt, said)
-        elif said == "lapsed" and desks.assistant_of(prompt.pc) is not None:
+        elif said == "lapsed" and prompt.phone is not None:
             await _lapsed(desks, prompt)
         elif said not in (None, "lapsed"):
             desks.unshown[prompt.pc] = said
@@ -209,9 +250,23 @@ async def _while_open(desks: Desks, prompt: Prompt, shown: Awaitable[str]) -> st
             await asyncio.gather(task, return_exceptions=True)
 
 
-def _shown(desks: Desks, prompt: Prompt) -> Awaitable[str]:
-    phone = desks.assistant_of(prompt.pc)
-    return _offered(desks, prompt) if phone is None else _one_tap(desks, prompt, phone)
+async def _shown(desks: Desks, prompt: Prompt) -> str:
+    tap = await desks.one_tap(prompt.pc)
+    if tap is not None and tap.state == "ready" and tap.phone is not None:
+        prompt.phone = tap.phone
+        return await _one_tap(desks, prompt, tap.phone)
+    if tap is not None and tap.state == "assistant_offline":
+        await _unreached(desks, prompt, tap.why)
+    return await _offered(desks, prompt)
+
+
+async def _unreached(desks: Desks, prompt: Prompt, why: str) -> None:
+    """The phone's one notification could not be shown, so the bridge's knock asks instead: said as a warning, and told to the agent."""
+    _LOG.warning("rigdesk_one_tap_unreached", f"RigDesk {prompt.pc}: {prompt.ask} could not be shown on the phone through Rig Assistant ({why}); the bridge's knock asks instead",
+                 pc=prompt.pc)
+    words = (f"RigDesk: your desk/request for {prompt.pc} could not be shown on the phone through Rig Assistant: {why}. RigDesk on the phone is asked "
+             "instead, which the person there sees only while its screen sharing is on.")
+    await desks.tell_seat(prompt.pc, prompt.agent, prompt.seat, words, f"one-tap-unreached:{prompt.ask}")
 
 
 async def _one_tap(desks: Desks, prompt: Prompt, phone: str) -> str:
@@ -226,8 +281,7 @@ async def _one_tap(desks: Desks, prompt: Prompt, phone: str) -> str:
     try:
         await PROVIDED.ask(JOIN_REQUEST, asked)
     except Refused as unreached:
-        _LOG.info("rigdesk_one_tap_unreached", f"RigDesk {prompt.pc}: Rig Assistant could not show {prompt.ask} on {phone} ({unreached.rendered}); the bridge's knock asks instead",
-                  pc=prompt.pc)
+        await _unreached(desks, prompt, unreached.rendered)
         return await _offered(desks, prompt)
     try:
         try:
@@ -255,7 +309,7 @@ async def phone_said(host: PluginHost, said: PhoneJoinSaid) -> str:
     desks = host.live(Desks)
     prompt = desks.prompts.get(said["ask"])
     waiting = None if prompt is None else prompt.phone_said
-    if (prompt is None or waiting is None or waiting.done() or desks.assistant_of(prompt.pc) != said["phone"]
+    if (prompt is None or waiting is None or waiting.done() or prompt.phone != said["phone"]
             or not hmac.compare_digest(said["nonce"].encode(), prompt.nonce.encode())):
         return "not waited for"
     waiting.set_result(said)

@@ -41,8 +41,11 @@ your choosing for the local API in another (`POST /x/rigdesk/token` keeps one), 
                        "stock": {"peer": "front.<tailnet>.ts.net",
                                  "password_file": "~/.rig/rigdesk/front.password"}}}}
 
-A phone running RigDesk with Rig Assistant set up adds `"assistant": "<phone name>"` to `stock`, so `desk/request`
-asks it in one tap (see `desk/request`).
+A phone running RigDesk with Rig Assistant set up is asked `desk/request` in one tap (see `desk/request`) once its
+entry names `"login_id": "<the RustDesk ID the phone shows>"` in `stock`: Rig Assistant's link from the phone says the
+same ID, and that is how Rig knows the entry is that phone. Each stock PC's row on the RigDesk page, `desk/pcs` and
+the `rigdesk.pc_one_tap` state say whether it is linked: `ready`, `assistant_offline` (the phone's Rig Assistant is not
+connected, so RigDesk on the phone is asked instead, seen only while its screen sharing is on) or `no_link_match`.
 
 Each stock PC needs its own loopback port. Rig starts `rigdesk-bridge` with the plugin, restarts it if it exits, and
 writes its output to `bridge-<pc>.log` in the plugin's state directory. It connects to the PC when the agent first

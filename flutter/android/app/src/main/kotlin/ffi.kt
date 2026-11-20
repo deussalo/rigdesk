@@ -34,6 +34,7 @@ object FFI {
     external fun rigOneTapWithdraw(ask: String)
     external fun rigDisconnect(connId: Int)
     external fun rigListening(): Boolean
+    external fun rigOwnId(): String
     external fun invitePairKey(key: String): Boolean
     external fun inviteMint(): String
     external fun inviteMintFor(agent: String): String

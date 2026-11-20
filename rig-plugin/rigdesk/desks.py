@@ -26,8 +26,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstra
 
 from core.sdk.base import event_log, now_ms, replace_file
 from core.sdk.events import EventField, StateSpec
-from core.sdk.host import LiveEnding, PluginHost, PluginWords, TASKS
-from core.sdk.model import AgentId, GraphName, RefusedOutcome, SeatId
+from core.sdk.host import LiveEnding, PluginHost, PluginWords, PROVIDED, TASKS
+from core.sdk.model import AgentId, GraphName, Refused, RefusedOutcome, SeatId
 from core.sdk.nodes import Shape
 
 from . import adhoc, prompts
@@ -37,6 +37,7 @@ ID = "rigdesk"
 PC = f"{ID}.pc"
 PC_HEALTH = f"{ID}.pc_health"
 RENDEZVOUS = f"{ID}.rendezvous"
+PC_ONE_TAP = f"{ID}.pc_one_tap"
 _CLIENT = EventField(name="client", type="text", description="The client the PC belongs to")
 REPORTED = (
     StateSpec(PC, "What Rig's link to a RigDesk PC is now: connecting, up when its agent API answers, down when it does not", "pc",
@@ -46,6 +47,9 @@ REPORTED = (
     StateSpec(RENDEZVOUS, "What one of the ID server's daemons is now, up when it takes a TCP connection on its port: hbbs, the rendezvous "
               "server, or hbbr, the relay", "server", ("up", "down"), "Why it is down, or where it answers",
               (EventField(name="address", type="text", description="host:port it is asked at"),)),
+    StateSpec(PC_ONE_TAP, "Whether a stock PC is a phone Rig Assistant links to, by the RustDesk ID its entry's login_id names and the phone says: ready, "
+              "assistant_offline while that phone is not connected to Rig Assistant, so the bridge's knock asks instead, or no_link_match", "pc",
+              prompts.ONE_TAP_STATES, "Which phone says the ID, or why none links", (_CLIENT,)),
 )
 _LOG = event_log(__name__)
 RETRY_S = (1.0, 2.0, 5.0, 10.0, 30.0)
@@ -128,15 +132,14 @@ class StockRemote(Shape):
     peer: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.:\[\]-]{1,255}$")] | None, Field(description="The PC on the tailnet: its MagicDNS name or 100.x address, with :port if not 21118.")] = None
     id: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{6,32}$")] | None, Field(description="The PC's RustDesk ID, digits without spaces, for a PC registered with the id_server instead of on the tailnet.")] = None
     login_id: Annotated[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{6,32}$")] | None, Field(description="With peer: the RustDesk ID this device shows, digits without spaces. "
-                                                                                                                   "An invite the device makes is redeemed only through the entry naming its ID.")] = None
+                                                                                                                   "An invite the device makes is redeemed only through the entry naming its ID, "
+                                                                                                                   "and a phone whose Rig Assistant says this ID is asked desk/request's prompt "
+                                                                                                                   "there as one notification, even with RigDesk's screen sharing off.")] = None
     password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the PC's RustDesk permanent password, for unattended access. "
                                                        "Unset, an agent joins only when the person at the PC presses Allow on desk/request's prompt there.")] = None
     viewer_port: Annotated[int | None, Field(ge=1, le=65535, description="Where the bridge relays its session to RigDesk GUIs, on loopback (publish it with tailscale serve --tcp); unset, no GUI can attach.")] = None
     viewer_password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the password GUIs log in to the bridge with.")] = None
     mcp_servers: Annotated[list[StockMcpServer], Field(description="MCP servers on the PC's own address that the bridge offers the holding agent.")] = []
-    assistant: Annotated[Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,47}$")] | None,
-                         Field(description="With peer, for a phone running RigDesk: its name in Rig Assistant (the rig-assistant plugin). desk/request's prompt then goes "
-                                           "there as one notification, even with RigDesk's screen sharing off: Accept starts sharing and lets the agent in with no second Allow.")] = None
 
     @model_validator(mode="after")
     def _viewer_whole(self) -> StockRemote:
@@ -144,8 +147,6 @@ class StockRemote(Shape):
             raise ValueError("a stock PC has a peer (direct IP over the tailnet) or an id (through the ID server), not both")
         if self.login_id is not None and self.peer is None:
             raise ValueError("login_id goes with peer; a PC reached through the ID server is named by id")
-        if self.assistant is not None and self.peer is None:
-            raise ValueError("assistant goes with peer: a phone's knock comes over the tailnet")
         if (self.viewer_port is None) != (self.viewer_password_file is None):
             raise ValueError("viewer_port and viewer_password_file go together")
         return self
@@ -206,7 +207,7 @@ class RigdeskSettings(Shape):
                                                                       "Unset, RustDesk's public server; an ID given as ID@host?key=<key> goes to that server instead.")] = None
     operator_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=80), Field(
         description="Needed for one-tap: who Rig's agents work for, as a phone's one-tap notification names them: \"Rig agent of <operator_name>\". "
-                    "Empty, Rig refuses every join request to a phone named in Rig Assistant (stock.assistant), as no prompt may name a guessed operator.")] = ""
+                    "Empty, Rig refuses every join request to a phone Rig Assistant links to (by the entry's login_id), as no prompt may name a guessed operator.")] = ""
 
     @model_validator(mode="after")
     def _ids_have_a_server(self) -> RigdeskSettings:
@@ -386,6 +387,7 @@ class PcEntry(TypedDict):
     health: Health | None
     join: dict[str, Any] | None
     adhoc: dict[str, str] | None
+    one_tap: prompts.OneTap | None
 
 
 @dataclass
@@ -541,6 +543,8 @@ class Desks:
         self._thresholds = Thresholds()
         self._history = History(self._dir / "health")
         self._adhoc: dict[str, AdHoc] = {}
+        # Each stock PC's one-tap link as the last settings pass read it, for the page and desk/pcs; a prompt asks afresh.
+        self._one_taps: dict[str, prompts.OneTap] = {}
         self._asked: dict[str, AskedConnect] = {}
         self._adhoc_lost: list[Held] = []
         # Why an agent's session ended without its asking, by (agent, graph): its next desk call's refusal says so, until it joins again.
@@ -648,6 +652,7 @@ class Desks:
                 self._linked(link)
         self.host.forget(PC, self._pcs.keys())
         self.host.forget(PC_HEALTH, self._pcs.keys())
+        self.host.forget(PC_ONE_TAP, {name for name, link in self._pcs.items() if link.spec.stock is not None and name not in self._adhoc})
 
     def _linked(self, link: PcLink) -> None:
         """The PC's link as it is now, told to Rig, which publishes a change of it and prints it in rig status."""
@@ -1228,11 +1233,28 @@ class Desks:
         return health(newest, self._thresholds, now_ms(), link.state == "up")
 
     async def _judge(self) -> None:
-        """Each PC's health as judged now, told to Rig, which holds it, publishes a change of it and prints it in rig status; a PC Rig holds
-        no sample of is not told."""
+        """Each PC's health as judged now, and each stock PC's one-tap link, told to Rig, which holds them, publishes a change and prints them in
+        rig status; a PC Rig holds no sample of is not told its health."""
         for pc, link in sorted(self._pcs.items()):
             if (judged := self.judged(pc)) is not None:
                 self.host.report(PC_HEALTH, pc, judged.state, judged.said if judged.failing else "every check passes", {"client": link.spec.client})
+        self._one_taps = await self.one_taps()
+        for pc, tap in sorted(self._one_taps.items()):
+            self.host.report(PC_ONE_TAP, pc, tap.state, tap.why, {"client": self._pcs[pc].spec.client})
+
+    async def one_taps(self) -> dict[str, prompts.OneTap]:
+        """Each stock PC's one-tap link as Rig Assistant's phones say now."""
+        stocks = {name: link.spec.stock for name, link in self._pcs.items() if link.spec.stock is not None and name not in self._adhoc}
+        if not stocks:
+            return {}
+        try:
+            phones: list[prompts.LinkedPhone] | str = await PROVIDED.ask(prompts.PHONES, None)
+        except Refused as unread:
+            phones = unread.rendered
+        return {name: prompts.one_tap_of(stock.peer, stock.login_id, phones) for name, stock in stocks.items()}
+
+    async def one_tap(self, pc: str) -> prompts.OneTap | None:
+        return (await self.one_taps()).get(pc)
 
     def history(self, pc: str) -> list[Any]:
         return list(self._history.of(pc))
@@ -1835,7 +1857,7 @@ class Desks:
                          "owner": None if owner is None else {"id": owner.get("agent_id"), "title": owner.get("title"), "graph": owner.get("graph")},
                          "owned_here": held is not None and owner is not None and held.agent == owner.get("agent_id"), "assigned": self.granted(name),
                          "shell": None if link.spec.stock is not None else {"switch": link.shell, "granted": self.shell_granted(name)},
-                         "health": self._health_row(name, link), "adhoc": self._adhoc_row(name),
+                         "health": self._health_row(name, link), "adhoc": self._adhoc_row(name), "one_tap": self._one_tap_row(name),
                          "password_file": None if link.spec.stock is None or name in self._adhoc else link.spec.stock.password_file,
                          "device_unasked": None if name in self._adhoc else self.device_unasked(name),
                          "mcp": {"allowed": link.spec.mcp, "on": link.mcp_on, "why": link.mcp_why,
@@ -1843,6 +1865,10 @@ class Desks:
                                               "since_ms": server.since_ms, "failing": link.server_faults.get(server.name, (None,))[0],
                                               "failing_since_ms": link.server_faults.get(server.name, (None, None))[1]} for server in link.servers.values()]}})
         return rows
+
+    def _one_tap_row(self, name: str) -> dict[str, Any] | None:
+        tap = self._one_taps.get(name)
+        return None if tap is None else {"state": tap.state, "phone": tap.phone, "why": tap.why}
 
     def _health_row(self, name: str, link: PcLink) -> dict[str, Any] | None:
         """A PC's health as its row shows it: the verdict, the newest sample's headline figures and age; None for a stock PC."""
@@ -1868,7 +1894,7 @@ class Desks:
             held = self._sessions.get(name)
             rows.append(PcEntry(name=name, client=link.spec.client, stock=link.spec.stock is not None, state=link.state, why=link.remote_why or link.why,
                                 assigned=self.granted(name), held_by=None if held is None else PcHolder(agent_id=held.agent, title=held.title, graph=held.graph),
-                                shell=link.shell, os=link.os, health=self.judged(name), join=link.join, adhoc=self._adhoc_row(name)))
+                                shell=link.shell, os=link.os, health=self.judged(name), join=link.join, adhoc=self._adhoc_row(name), one_tap=self._one_taps.get(name)))
         return tuple(rows)
 
     def session_of(self, graph: str, agent: str) -> dict[str, Any] | None:
@@ -2039,17 +2065,13 @@ class Desks:
     def held_on(self, pc: str) -> Held | None:
         return self._sessions.get(pc)
 
-    def assistant_of(self, pc: str) -> str | None:
-        """The phone's name in Rig Assistant, when this device's prompt goes there as one tap."""
-        link = self._pcs.get(pc)
-        return None if link is None or link.spec.stock is None else link.spec.stock.assistant
-
     async def operator_name(self) -> str:
         return (await asyncio.to_thread(self.host.settings, RigdeskSettings)).operator_name
 
     async def one_tap_unnamed(self, pc: str) -> str | None:
         """Why no join request may go to pc's phone as one tap: its prompt names the operator, and none is set. None when it may, or pc is no such phone."""
-        if self.assistant_of(pc) is None or await self.operator_name():
+        tap = await self.one_tap(pc)
+        if tap is None or tap.state == "no_link_match" or await self.operator_name():
             return None
         return (f"{pc} takes join requests as one tap on the phone, whose prompt names who the agent works for, and plugins.rigdesk.operator_name is empty, "
                 f"so Rig sends {pc} no request. Only the operator can set it: rig settings --set 'plugins.rigdesk.operator_name=\"<their name>\"'")

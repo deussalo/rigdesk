@@ -60,6 +60,8 @@ type PcRow = {
   readonly adhoc?: { readonly id: string; readonly via: string } | null | undefined
   readonly password_file?: string | null | undefined
   readonly device_unasked?: string | null | undefined
+  /** Whether a stock PC is a phone Rig Assistant links to by its login_id; null for a RigDesk PC and until Rig first asks. */
+  readonly one_tap?: { readonly state: 'ready' | 'assistant_offline' | 'no_link_match'; readonly phone: string | null; readonly why: string } | null | undefined
 }
 type Listener = {
   readonly role: 'hbbs' | 'hbbr'
@@ -490,8 +492,10 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
     ...(pc.client ? [['client', pc.client] as const] : []),
     ['kind', pc.adhoc != null ? `ad hoc: ID ${pc.adhoc.id} through ${pc.adhoc.via}` : pc.stock ? 'Rig reaches it through the RustDesk client' : 'RigDesk'], ['address', pc.url], ['input', pc.holder === null ? 'no agent' : HOLDER[pc.holder]],
     ...(held === null ? [] : [['agent', held] as const]),
+    ...(pc.one_tap == null || pc.adhoc != null ? [] : [['one tap', pc.one_tap.state === 'ready' ? `ready: ${pc.one_tap.why}` : pc.one_tap.state === 'assistant_offline' ? 'phone offline' : `no: ${pc.one_tap.why}`] as const]),
   ]
   const problems = [...(pc.state === 'down' && pc.why !== null ? [pc.why] : []), ...(health?.why == null ? [] : [health.why]),
+    ...(pc.one_tap?.state === 'assistant_offline' ? [`One tap is down: ${pc.one_tap.why}, so an agent's desk/request asks RigDesk on the phone instead, seen only while its screen sharing is on`] : []),
     ...(pc.device_unasked == null ? [] : [`An agent's desk/request is not shown on the device, as ${pc.device_unasked}, so only Rig's saved password lets Accept join it: install a current rigdesk-bridge`]),
     ...(health?.failing ?? []).filter(check => check.state === 'fault').map(check => check.words)]
   return (
