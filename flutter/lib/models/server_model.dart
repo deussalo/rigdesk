@@ -543,6 +543,7 @@ class ServerModel with ChangeNotifier {
         } else {
           if (_clients[index].authorized) {
             _clients[index].privacyMode = client.privacyMode;
+            _clients[index].rigJoined = client.rigJoined;
             notifyListeners();
             return;
           }
