@@ -18,6 +18,12 @@ class MainApplication : Application() {
         super.onCreate()
         Log.d(TAG, "App start")
         FFI.onAppStart(applicationContext)
-        dev.rig.assistant.Host.rustdeskId = { FFI.rigOwnId() }
+        dev.rig.assistant.Host.rustdeskId = { if (configLocated()) FFI.rigOwnId() else "" }
+    }
+
+    /** Points the config at the directory Flutter recorded, as MainService does, before Rig Assistant's hello reads it. */
+    private fun configLocated(): Boolean {
+        val prefs = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+        return FFI.rigConfigAt(prefs.getString(KEY_APP_DIR_CONFIG_PATH, "") ?: "")
     }
 }
