@@ -3251,6 +3251,12 @@ pub mod server_side {
         crate::ui_cm_interface::close(conn_id);
     }
 
+    /// RigDesk: this device's RustDesk ID, which Rig Assistant's hello names so Rig links the phone to its stock entry.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_rigOwnId(env: JNIEnv, _class: JClass) -> jstring {
+        env.new_string(hbb_common::config::Config::get_id()).unwrap_or_default().into_raw()
+    }
+
     /// RigDesk: whether this phone listens for Rig's knock now (its direct server is up).
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_rigListening(_env: JNIEnv, _class: JClass) -> jboolean {

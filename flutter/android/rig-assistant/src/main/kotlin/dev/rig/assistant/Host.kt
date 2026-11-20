@@ -10,10 +10,12 @@ import android.os.Build
 
 /**
  * What Rig Assistant takes from the app it sits in, and nothing more: the app's accessibility service when the person has turned it on
- * (RigDesk's Input control), for the key tool and for starting apps. Rig Assistant works without it.
+ * (RigDesk's Input control), for the key tool and for starting apps, which Rig Assistant works without; and the RustDesk ID RigDesk
+ * shows, which its hello names so Rig knows which RigDesk entry is this phone (empty while RigDesk has none).
  */
 object Host {
     @Volatile var input: AccessibilityService? = null
+    @Volatile var rustdeskId: () -> String = { "" }
 }
 
 fun granted(ctx: Context, permission: String): Boolean =

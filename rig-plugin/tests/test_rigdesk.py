@@ -1394,7 +1394,7 @@ class _StockBridge:
         return [path for path, _ in self.posted]
 
 
-async def _stock_desks(state: str, bridge: _StockBridge, asks: "_Asks", told: list, assistant: str | None = None) -> tuple[Desks, object]:
+async def _stock_desks(state: str, bridge: _StockBridge, asks: "_Asks", told: list, login_id: str | None = None) -> tuple[Desks, object]:
     from aiohttp import ClientSession, web
     from rigdesk.desks import RigdeskSettings, StockRemote
     app = web.Application()
@@ -1406,7 +1406,7 @@ async def _stock_desks(state: str, bridge: _StockBridge, asks: "_Asks", told: li
     await site.start()
     token = Path(state) / "token"
     token.write_text("rig-bearer")
-    named = {} if assistant is None else {"assistant": assistant}
+    named = {} if login_id is None else {"login_id": login_id}
     stock = (StockRemote(peer="phone.tail1234.ts.net", **named) if bridge.password is None else
              StockRemote(peer="phone.tail1234.ts.net", password_file=str(Path(state) / "phone.password"), **named))
     spec = DeskPc(url=f"http://127.0.0.1:{runner.addresses[0][1]}", token_file=str(token), stock=stock)
@@ -1521,7 +1521,7 @@ def test_rigs_accept_with_a_refused_password_keeps_a_phones_one_tap_notification
         with tempfile.TemporaryDirectory() as state:
             asks, bridge, assistant = _Asks("desk_1"), _StockBridge("stale"), _Assistant()
             assistant.offer()
-            desks, runner = await _stock_desks(state, bridge, asks, told, assistant="moto")
+            desks, runner = await _stock_desks(state, bridge, asks, told, login_id=MOTO_ID)
             every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
             try:
                 prompts.start(desks, "phone", "desk_1", seat, "a1", "g", "Builder")
@@ -1581,18 +1581,25 @@ def test_an_accept_with_no_login_and_no_prompt_on_the_device_says_why_and_joins_
     asyncio.run(run())
 
 
+MOTO_ID = "123456789"
+
+
 class _Assistant:
-    """rig-assistant as rigdesk asks it: each request shown on a phone and each ended, refusing while the phone is down."""
-    def __init__(self, up: bool = True) -> None:
-        self.up, self.shown, self.ended = up, [], []
+    """rig-assistant as rigdesk asks it: its phone moto saying MOTO_ID, connected while up; each request shown there and each ended, refused while
+    the phone is down or refusing."""
+    def __init__(self, up: bool = True, refusing: bool = False) -> None:
+        self.up, self.refusing, self.shown, self.ended = up, refusing, [], []
 
     def offer(self) -> None:
         from core.model import Refused
         from core.provided import PROVIDED, provider
         from rigdesk import prompts
 
+        async def phones(_host: object, _asked: None) -> list:
+            return [{"name": "moto", "rustdesk_id": MOTO_ID, "up": self.up}]
+
         async def shown(_host: object, asked: dict) -> str:
-            if not self.up:
+            if not self.up or self.refusing:
                 raise Refused("rig-assistant.phone_down", "phone moto is not connected to Rig")
             self.shown.append(asked)
             return "shown"
@@ -1602,7 +1609,8 @@ class _Assistant:
             return "ended"
         host = SimpleNamespace(plugin_id="rig-assistant")
         PROVIDED.offer({prompts.JOIN_REQUEST.name: (host, provider(prompts.JOIN_REQUEST, shown)),  # type: ignore[dict-item]
-                        prompts.JOIN_END.name: (host, provider(prompts.JOIN_END, ended))})  # type: ignore[dict-item]
+                        prompts.JOIN_END.name: (host, provider(prompts.JOIN_END, ended)),  # type: ignore[dict-item]
+                        prompts.PHONES.name: (host, provider(prompts.PHONES, phones))})  # type: ignore[dict-item]
 
 
 async def _one_tap_phone(desks: Desks, posted: list[tuple[str, dict]]):
@@ -1610,7 +1618,7 @@ async def _one_tap_phone(desks: Desks, posted: list[tuple[str, dict]]):
     from rigdesk.desks import StockRemote
     runner = await _offering_pc(desks, posted)
     bridge = desks._pcs.pop("front")
-    stock = StockRemote(peer="moto-g57.tail1234.ts.net", assistant="moto")
+    stock = StockRemote(peer="moto-g57.tail1234.ts.net", login_id=MOTO_ID)
     return runner, desks._pcs.setdefault("moto-g57", PcLink("moto-g57", DeskPc(url=bridge.spec.url, token_file=bridge.spec.token_file, stock=stock)))
 
 
@@ -1793,26 +1801,92 @@ def test_an_unanswered_notification_is_shown_again_and_after_its_last_lapse_the_
     asyncio.run(run())
 
 
-def test_with_the_phones_link_down_the_bridges_knock_asks_the_person_as_before() -> None:
+def test_with_the_phones_rig_assistant_offline_or_refusing_the_bridges_knock_asks_and_the_agent_is_told_why() -> None:
     from rigdesk import prompts
-    seat, posted = SeatId(GraphName("g"), NodeId("n")), []
+    seat = SeatId(GraphName("g"), NodeId("n"))
 
-    async def run() -> None:
+    async def round(assistant: _Assistant, ask: str) -> tuple[list, list]:
+        posted: list = []
+        told: list = []
         with tempfile.TemporaryDirectory() as state:
-            asks, assistant = _Asks("desk_1"), _Assistant(up=False)
+            asks = _Asks(ask)
             assistant.offer()
             desks = _one_tap_desks(state, asks)
+
+            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
+                told.append((held.agent, words, key))
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
             runner, _link = await _one_tap_phone(desks, posted)
             try:
-                prompts.start(desks, "moto-g57", "desk_1", seat, "a1", "g", "Builder")
-                await _until(lambda: posted)
+                prompts.start(desks, "moto-g57", ask, seat, "a1", "g", "Builder")
+                await _until(lambda: posted and told)
             finally:
                 await prompts.end_all(desks)
                 await desks._http.close()
                 await runner.cleanup()
-            path, body = posted[0]
-            assert path == "/offer" and "accepted" not in body, body
-            assert assistant.shown == [] and assistant.ended == []
+        return posted, told
+
+    async def run() -> None:
+        offline = _Assistant(up=False)
+        posted, told = await round(offline, "desk_1")
+        path, body = posted[0]
+        assert path == "/offer" and "accepted" not in body, body
+        assert offline.shown == [] and offline.ended == []
+        assert told == [("a1", told[0][1], "one-tap-unreached:desk_1")], told
+        assert "could not be shown on the phone through Rig Assistant: phone moto says RustDesk ID 123456789 but is not connected" in told[0][1], told
+        assert "only while its screen sharing is on" in told[0][1], told
+
+        refusing = _Assistant(refusing=True)
+        posted, told = await round(refusing, "desk_2")
+        assert posted[0][0] == "/offer" and "accepted" not in posted[0][1], posted
+        assert told == [("a1", told[0][1], "one-tap-unreached:desk_2")] and "phone moto is not connected to Rig" in told[0][1], told
+
+    asyncio.run(run())
+
+
+def test_a_stock_entry_is_a_phone_in_rig_assistant_by_the_rustdesk_id_both_say_and_rig_reports_the_link() -> None:
+    from pydantic import ValidationError
+    from core.provided import PROVIDED
+    from rigdesk.desks import PC_ONE_TAP, StockRemote
+    try:
+        StockRemote(peer="moto-g57.tail1234.ts.net", assistant="moto")
+        raise AssertionError("stock.assistant is gone: the link is derived")
+    except ValidationError:
+        pass
+    reports: list = []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            desks = _one_tap_desks(state, _Asks(), report=lambda *said: reports.append(said), forget=lambda *_: None)
+            for name, stock in {"moto-g57": StockRemote(peer="moto-g57.tail1234.ts.net", login_id=MOTO_ID),
+                                "tablet": StockRemote(peer="tablet.tail1234.ts.net"),
+                                "front": StockRemote(peer="front.tail1234.ts.net", login_id="987654321"),
+                                "far": StockRemote(id=MOTO_ID)}.items():
+                desks._pcs[name] = PcLink(name, DeskPc(url="http://127.0.0.1:1", token_file="/dev/null", stock=stock))
+            desks._pcs["rigdesk"] = PcLink("rigdesk", DeskPc(url="http://127.0.0.1:2", token_file="/dev/null"))
+            PROVIDED.offer({})
+            unread = await desks.one_taps()
+            assert set(unread) == {"moto-g57", "tablet", "front", "far"}, unread
+            assert unread["moto-g57"].state == "no_link_match" and "Rig Assistant's phones could not be read" in unread["moto-g57"].why, unread
+            assistant = _Assistant()
+            assistant.offer()
+            taps = await desks.one_taps()
+            assert (taps["moto-g57"].state, taps["moto-g57"].phone) == ("ready", "moto"), taps
+            assert taps["tablet"].state == "no_link_match" and "names no login_id" in taps["tablet"].why, taps
+            assert taps["front"].state == "no_link_match" and "no phone in Rig Assistant says RustDesk ID 987654321" in taps["front"].why, taps
+            assert taps["far"].state == "no_link_match" and "ID server" in taps["far"].why, taps
+            assistant.up = False
+            await desks._judge()
+            assert (await desks.one_tap("moto-g57")).state == "assistant_offline"  # type: ignore[union-attr]
+            assert await desks.one_tap("rigdesk") is None
+            told = {said[1]: said[2] for said in reports if said[0] == PC_ONE_TAP}
+            assert told == {"moto-g57": "assistant_offline", "tablet": "no_link_match", "front": "no_link_match", "far": "no_link_match"}, reports
+            rows = {row["name"]: row["one_tap"] for row in desks.pcs()}
+            assert rows["moto-g57"] == {"state": "assistant_offline", "phone": "moto",
+                                        "why": "phone moto says RustDesk ID 123456789 but is not connected to Rig Assistant now"} and rows["rigdesk"] is None, rows
+
+    asyncio.run(run())
 def test_a_stock_pcs_bridge_gets_rigs_pairing_key_in_its_environment_and_its_arguments_stay_as_they_were() -> None:
     from rigdesk.desks import PAIR_KEY, PAIR_KEY_ENV, SECRETS, StockRemote
 
