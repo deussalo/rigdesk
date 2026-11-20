@@ -16,9 +16,9 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
-from core.base import event_log
-from core.model import SeatId
-from core.tasks import TASKS, scoped
+from core.sdk.base import event_log
+from core.sdk.host import scoped, TASKS
+from core.sdk.model import SeatId
 
 if TYPE_CHECKING:
     from .desks import Desks, PcLink

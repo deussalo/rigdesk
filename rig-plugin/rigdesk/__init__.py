@@ -15,18 +15,15 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
-from core.ask_said import Confirmed, Then, Titled
-from core.base import JsonObject, ToolAnswer, View, as_object, new_id, now_ms, replace_file
-from core.boundary import BranchTool, NoParams, Params
-from core.kernel_api import RigReach, mcp_capability, plugin_capability
-from core.contrib import ContributionDescriptor, RouteContribution, ToolBranch
-from core.endpoint import Request, endpoint
-from core.model import AgentId, Choice, Choices, GraphName, NodeId, Refused, RefusedOutcome, SeatId
-from core.mcp_call import TOOL_LIMIT_S, Answer, Call, ImageContent, TextContent, ToolContent, ToolDef, ToolInput, gloss_of
-from core.plugin_host import Live, PluginHost
-from core.provided import Provision, provider
-from core.policy import OPERATOR
-from core.refusal import PluginCode
+from core.sdk.attention import Confirmed, Then, Titled
+from core.sdk.base import as_object, JsonObject, new_id, now_ms, replace_file, View
+from core.sdk.contrib import ContributionDescriptor, RouteContribution, ToolBranch
+from core.sdk.host import Live, mcp_capability, plugin_capability, PluginHost, provider, Provision, RigReach
+from core.sdk.model import AgentId, Choice, Choices, GraphName, NodeId, PluginCode, Refused, RefusedOutcome, SeatId
+from core.sdk.policy import OPERATOR
+from core.sdk.routes import endpoint, NoParams, Params, Request
+from core.sdk.tools import (Answer, BranchTool, Call, gloss_of, ImageContent, TextContent, TOOL_LIMIT_S, ToolAnswer, ToolContent, ToolDef,
+                            ToolInput)
 
 from . import adhoc, prompts
 from .desks import CALL_LIMIT_S, CONNECT_ASK_S, ID, MCP_CALL_LIMIT_S, NATIVE, REPORTED, SHELL_LIMIT_S, ConnectAsk, Desks, DeskRefused, Grantee, InviteAsk, Held, PcEntry, PcServer, RigdeskSettings, ShellLevel, failure
