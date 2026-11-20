@@ -3275,20 +3275,27 @@ pub mod server_side {
         jboolean::from(true)
     }
 
+    /// Whether the config may be read: its directory is set, so the first read loads the device's own.
+    fn config_located() -> bool {
+        !config::APP_DIR.read().unwrap().is_empty()
+    }
+
     /// RigDesk: this device's RustDesk ID, which Rig Assistant's hello names so Rig links the phone to its stock entry;
     /// empty while the config's directory is unknown, so the read never loads a config from nowhere.
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_rigOwnId(env: JNIEnv, _class: JClass) -> jstring {
-        let located = !config::APP_DIR.read().unwrap().is_empty();
-        let id = if located { config::Config::get_id() } else { String::new() };
+        let id = if config_located() { config::Config::get_id() } else { String::new() };
         env.new_string(id).unwrap_or_default().into_raw()
     }
 
     /// RigDesk: whether Rig Assistant's hello tells Rig that assigned agents join with no tap (base::rig_knock::offers_no_tap):
-    /// never while the approve mode is password only.
+    /// never while the approve mode is password only, nor while the config's directory is unknown.
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_rigOffersNoTap(_env: JNIEnv, _class: JClass) -> jboolean {
         use hbb_common::password_security::{approve_mode, ApproveMode};
+        if !config_located() {
+            return jboolean::from(false);
+        }
         let setting_on = hbb_common::config::LocalConfig::get_option(base::rig_knock::ASSIGNED_NO_TAP) == "Y";
         jboolean::from(base::rig_knock::offers_no_tap(setting_on, approve_mode() != ApproveMode::Password))
     }
