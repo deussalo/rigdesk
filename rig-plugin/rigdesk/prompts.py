@@ -29,7 +29,7 @@ import hmac
 import secrets
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 import aiohttp
 from pydantic import TypeAdapter
@@ -69,6 +69,8 @@ class LinkedPhone(TypedDict):
     name: str
     rustdesk_id: str
     up: bool
+    # The phone's person lets an agent assigned it in Rig join with no tap while sharing runs; absent from a rig-assistant that predates it.
+    assigned_no_tap: NotRequired[bool]
 
 
 class JoinEnded(TypedDict):
@@ -97,10 +99,12 @@ ONE_TAP_STATES: tuple[OneTapState, ...] = ("ready", "assistant_offline", "no_lin
 @dataclass(frozen=True, slots=True)
 class OneTap:
     """Whether a stock PC is a phone Rig Assistant links to: ready while the phone saying the entry's RustDesk ID is connected to Rig,
-    assistant_offline while it is not, no_link_match when no phone says it; why says which, in words."""
+    assistant_offline while it is not, no_link_match when no phone says it; why says which, in words. no_tap: the ready phone's person lets
+    an agent assigned it join with no tap while sharing runs, as its hello said."""
     state: OneTapState
     phone: str | None
     why: str
+    no_tap: bool = False
 
 
 def one_tap_of(peer: str | None, login_id: str | None, phones: list[LinkedPhone] | str) -> OneTap:
@@ -117,7 +121,9 @@ def one_tap_of(peer: str | None, login_id: str | None, phones: list[LinkedPhone]
     phone = said[0]
     if not phone["up"]:
         return OneTap("assistant_offline", phone["name"], f"phone {phone['name']} says RustDesk ID {login_id} but is not connected to Rig Assistant now")
-    return OneTap("ready", phone["name"], f"phone {phone['name']} in Rig Assistant says RustDesk ID {login_id}")
+    no_tap = phone.get("assigned_no_tap", False)
+    return OneTap("ready", phone["name"], f"phone {phone['name']} in Rig Assistant says RustDesk ID {login_id}"
+                  + ("; its person lets assigned agents join with no tap while sharing runs" if no_tap else ""), no_tap)
 
 
 @dataclass
@@ -142,6 +148,8 @@ class Prompt:
     # One tap: what the phone said of its notification, and whether its person accepted, so the bridge's offer names the ask.
     phone_said: asyncio.Future[PhoneJoinSaid] | None = None
     accepted: bool = False
+    # An assigned agent's knock was sent first, for a phone whose person lets assigned agents in with no tap while sharing runs.
+    knocked_assigned: bool = False
     # The phone in Rig Assistant it was last shown on as one notification, or None while only the bridge's knock asked.
     phone: str | None = None
     # Who must say yes: the operator's ask in Rig, answered there or by the person at a PC (operator); or the person alone, the operator's part
@@ -277,6 +285,13 @@ async def _while_open(desks: Desks, prompt: Prompt, shown: Awaitable[str]) -> st
 
 async def _shown(desks: Desks, prompt: Prompt) -> str:
     tap = await desks.one_tap(prompt.pc)
+    if prompt.yes == "grant" and tap is not None and tap.no_tap and not prompt.knocked_assigned:
+        prompt.knocked_assigned = True
+        said = await _offered(desks, prompt)
+        if not said.startswith(("refused:", "lapsed:")):
+            return said
+        _LOG.info("rigdesk_no_tap_unreached", f"RigDesk {prompt.pc}: the no-tap knock for {prompt.ask} did not reach the phone ({said}), so it is asked by notification",
+                  pc=prompt.pc)
     if tap is not None and tap.state == "ready" and tap.phone is not None:
         prompt.phone = tap.phone
         return await _one_tap(desks, prompt, tap.phone)
@@ -348,6 +363,8 @@ async def _offered(desks: Desks, prompt: Prompt) -> str:
     body = {"agent": {"id": prompt.agent, "title": prompt.title, "graph": prompt.graph}, "ask": prompt.ask, "nonce": prompt.nonce}
     if prompt.accepted:
         body["accepted"] = True
+    elif prompt.yes == "grant":
+        body["assigned"] = True
     async with desks.http.post(f"{url}/offer", json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as answer:
         said: dict[str, Any] = await answer.json(content_type=None) if answer.content_type == "application/json" else {}
         if answer.status != 200:
@@ -414,8 +431,10 @@ async def _answered_after_accept(desks: Desks, prompt: Prompt, said: str) -> Non
                 return  # the operator's Accept logged in meanwhile, and said so
             words = f"RigDesk: the person at {pc} allowed you on the device, but you did not join {pc}: {failed}. {_again(prompt)}"
         else:
-            words = (f"RigDesk: the person at {pc} allowed you on the device, so you joined {pc} over the connection they allowed, with no password. "
-                     "Its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there.")
+            how = (f"{pc} let you in as assigned to you, by its person's no-tap setting or their Allow, so you joined {pc} with no password. "
+                   if prompt.knocked_assigned and not prompt.accepted else
+                   f"the person at {pc} allowed you on the device, so you joined {pc} over the connection they allowed, with no password. ")
+            words = f"RigDesk: {how}Its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there."
     await desks.tell_seat(pc, prompt.agent, prompt.seat, words, f"prompt:{prompt.ask}")
 
 

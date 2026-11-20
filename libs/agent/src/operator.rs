@@ -93,21 +93,28 @@ pub struct Offer {
     /// The person already accepted this ask on Rig Assistant's notification: the knock names it, so the phone lets it in
     /// with no second Allow.
     pub accepted: bool,
+    /// The operator assigned this PC to the agent, and this is its desk/join: the knock says so under Rig's signature, and a
+    /// phone whose person allows it lets the agent in with no tap. Never with accepted.
+    pub assigned: bool,
 }
 
-/// The offer in an `/offer` body: `{agent, ask, nonce, accepted?}`.
+/// The offer in an `/offer` body: `{agent, ask, nonce, accepted?, assigned?}`.
 pub fn offer_request(body: &Value) -> Result<Offer, String> {
     let (owner, ask) = request(body)?;
     let nonce = body.get("nonce").and_then(Value::as_str).filter(|nonce| nonce.len() >= 16).ok_or("offer wants a nonce of 16 characters or more")?;
     if ask.is_empty() {
         return Err("offer wants the ask it is for".into());
     }
-    let accepted = match body.get("accepted") {
-        None => false,
-        Some(Value::Bool(accepted)) => *accepted,
-        Some(_) => return Err("offer's accepted is true or false".into()),
+    let flag = |name: &str| match body.get(name) {
+        None => Ok(false),
+        Some(Value::Bool(set)) => Ok(*set),
+        Some(_) => Err(format!("offer's {name} is true or false")),
     };
-    Ok(Offer { owner, ask, nonce: nonce.to_string(), accepted })
+    let (accepted, assigned) = (flag("accepted")?, flag("assigned")?);
+    if accepted && assigned {
+        return Err("an offer is accepted on the phone or assigned, not both".into());
+    }
+    Ok(Offer { owner, ask, nonce: nonce.to_string(), accepted, assigned })
 }
 
 /// The agent a `/login` is for and the operator's ask, from its body when Rig sends one: `{agent, ask}` as `/join`'s.
@@ -260,6 +267,21 @@ mod tests {
         assert!(offer_request(&accepted).unwrap().accepted);
         accepted["accepted"] = "yes".into();
         assert!(offer_request(&accepted).is_err());
+    }
+
+    #[test]
+    fn an_offer_says_whether_its_agent_is_assigned_the_pc_and_never_also_accepted() {
+        let body = serde_json::json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk_1", "nonce": "0123456789abcdef"});
+        assert!(!offer_request(&body).unwrap().assigned);
+        let mut assigned = body.clone();
+        assigned["assigned"] = true.into();
+        let offer = offer_request(&assigned).unwrap();
+        assert!(offer.assigned && !offer.accepted);
+        let mut both = assigned.clone();
+        both["accepted"] = true.into();
+        assert!(offer_request(&both).is_err(), "accepted and assigned together");
+        assigned["assigned"] = 1.into();
+        assert!(offer_request(&assigned).is_err());
     }
 
     #[test]

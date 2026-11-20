@@ -7,8 +7,10 @@
 //! the proof here itself. The knock says which address Rig signed, so a good signature from an unexpected address can be
 //! told apart from a bad one.
 //!
-//! A knock may also name the ask the person already accepted on Rig Assistant's notification (`one_tap`): Rig then signs
-//! the ask too, under its own domain, so a proof for one ask opens no other.
+//! A knock may also vouch for one more fact, under a domain of its own, so a proof for one fact proves no other
+//! ([`Vouch`]): the ask the person already accepted on Rig Assistant's notification (`one_tap`), which opens that ask
+//! alone, or that the operator assigned this phone to the agent, which the phone may let in with no tap while its person
+//! allows it in their settings.
 //!
 //! Anything else that calls itself Rig gets no prompt, no Allow and keeps no name of its own on this device.
 //!
@@ -26,6 +28,7 @@ use std::{collections::HashMap, net::IpAddr, sync::Mutex};
 
 const DOMAIN: &str = "rigdesk-knock-v1";
 const DOMAIN_ASK: &str = "rigdesk-knock-ask-v1";
+const DOMAIN_ASSIGNED: &str = "rigdesk-knock-assigned-v1";
 const NONCE_BYTES: usize = 32;
 const CLAIMED_NAME: &str = "rig agent";
 /// The login id of Rig's knock, which the phone's notification goes by.
@@ -33,6 +36,9 @@ pub const PEER_ID: &str = "rig";
 /// What the device shows for a login that got in by password while calling itself Rig.
 pub const NEUTRAL_PEER_ID: &str = "password login";
 pub const NEUTRAL_NAME: &str = "Remote session";
+/// The person's own setting on this phone, a local option they alone change here, off unless "Y": an agent Rig says the
+/// operator assigned this phone to joins with no tap while sharing runs. Rig reads it from Rig Assistant's hello.
+pub const ASSIGNED_NO_TAP: &str = "rig-assigned-no-tap";
 
 /// One connection's side of a knock: what the device greeted with and whom it is talking to.
 pub struct Login<'a> {
@@ -52,11 +58,47 @@ fn plain(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// What Rig vouches for in a knock beyond its agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Vouch {
+    /// Nothing: the person at the phone is asked.
+    Nothing,
+    /// The ask the person accepted on Rig Assistant's notification, or the operator accepted in Rig for a password login.
+    Accepted(String),
+    /// The operator assigned this phone to the agent: a desk/join under its standing grant.
+    Assigned,
+}
+
+impl Vouch {
+    /// A knock's vouch, as its fields say it: an ask and assigned together are no knock Rig makes.
+    pub fn of(knock: &RigKnock) -> Result<Vouch, Refusal> {
+        match (knock.ask.is_empty(), knock.assigned) {
+            (true, false) => Ok(Vouch::Nothing),
+            (false, false) => Ok(Vouch::Accepted(knock.ask.clone())),
+            (true, true) => Ok(Vouch::Assigned),
+            (false, true) => Err(Refusal::BadProof),
+        }
+    }
+
+    /// The knock's fields for this vouch: its ask and assigned.
+    pub fn fields(&self) -> (String, bool) {
+        match self {
+            Vouch::Nothing => (String::new(), false),
+            Vouch::Accepted(ask) => (ask.clone(), false),
+            Vouch::Assigned => (String::new(), true),
+        }
+    }
+}
+
 impl Login<'_> {
-    /// What Rig signs for this connection and this agent, and for the ask the person accepted when `ask` is not empty.
-    pub fn message(&self, agent_id: &str, agent_title: &str, ask: &str) -> Vec<u8> {
+    /// What Rig signs for this connection and this agent, and for what it vouches for.
+    pub fn message(&self, agent_id: &str, agent_title: &str, vouch: &Vouch) -> Vec<u8> {
         let dialer = plain(self.dialer).to_string();
-        let domain = if ask.is_empty() { DOMAIN } else { DOMAIN_ASK };
+        let domain = match vouch {
+            Vouch::Nothing => DOMAIN,
+            Vouch::Accepted(_) => DOMAIN_ASK,
+            Vouch::Assigned => DOMAIN_ASSIGNED,
+        };
         let mut fields: Vec<&[u8]> = vec![
             domain.as_bytes(),
             self.device.as_bytes(),
@@ -67,7 +109,7 @@ impl Login<'_> {
             agent_id.as_bytes(),
             agent_title.as_bytes(),
         ];
-        if !ask.is_empty() {
+        if let Vouch::Accepted(ask) = vouch {
             fields.push(ask.as_bytes());
         }
         let mut out = Vec::new();
@@ -103,8 +145,8 @@ pub struct Proved {
     pub agent_id: String,
     /// Built from the title Rig signed.
     pub name: String,
-    /// The ask Rig signed, for a knock whose person already accepted it on Rig Assistant's notification.
-    pub ask: Option<String>,
+    /// What Rig signed beyond the agent.
+    pub vouch: Vouch,
 }
 
 /// What a RigDesk desktop answers a knock, before its person sees anything: it is never paired with Rig, so it could
@@ -139,14 +181,14 @@ fn check(key: Option<&sign::PublicKey>, knock: Option<&RigKnock>, login: &Login)
     let signature = sign::Signature::from_bytes(&knock.signature).map_err(|_| Refusal::BadProof)?;
     let dialer: IpAddr = knock.dialer.parse().map_err(|_| Refusal::BadProof)?;
     let signed = Login { dialer, ..*login };
-    if !sign::verify_detached(&signature, &signed.message(&knock.agent_id, &knock.agent_title, &knock.ask), key) {
+    let vouch = Vouch::of(knock)?;
+    if !sign::verify_detached(&signature, &signed.message(&knock.agent_id, &knock.agent_title, &vouch), key) {
         return Err(Refusal::BadProof);
     }
     if plain(dialer) != plain(login.dialer) {
         return Err(Refusal::OtherDialer);
     }
-    let ask = (!knock.ask.is_empty()).then(|| knock.ask.clone());
-    Ok(Proved { agent_id: knock.agent_id.clone(), name: format!("{} (Rig agent)", knock.agent_title), ask })
+    Ok(Proved { agent_id: knock.agent_id.clone(), name: format!("{} (Rig agent)", knock.agent_title), vouch })
 }
 
 pub fn verify(knock: Option<&RigKnock>, login: &Login) -> Result<Proved, Refusal> {
@@ -160,6 +202,18 @@ pub fn listed_as(peer_id: String, name: String, authorized: bool, proved: bool) 
         return Some((peer_id, name));
     }
     authorized.then(|| (NEUTRAL_PEER_ID.to_owned(), NEUTRAL_NAME.to_owned()))
+}
+
+/// Whether a proved knock gets in with no tap on this phone's own say: Rig vouched that the operator assigned the phone to
+/// its agent, the person turned on [`ASSIGNED_NO_TAP`], and no other Rig agent is in now, which the person would then be
+/// asked to hand over. Anything else asks the person.
+pub fn admits_assigned(vouch: &Vouch, no_tap: bool, another_in: bool) -> bool {
+    *vouch == Vouch::Assigned && no_tap && !another_in
+}
+
+/// Whether any Rig agent's session is in on this device now.
+pub fn anyone_in() -> bool {
+    !JOINED.lock().unwrap().is_empty()
 }
 
 /// Whether the person's yes may let this login in: a proved knock always, anything else only where the approve mode
@@ -181,6 +235,8 @@ pub enum JoinedBy {
     RigAccept,
     /// Rig's saved password, signed with no ask: unattended access, nobody asked.
     Unattended,
+    /// An agent the operator assigned this phone to, with no tap, as the person's own setting allows.
+    Assigned,
 }
 
 /// Who joined and how, as the person at the device reads it.
@@ -203,6 +259,7 @@ impl Joined {
             JoinedBy::Invite => "this phone's invite",
             JoinedBy::RigAccept => "your Rig Accept, saved password",
             JoinedBy::Unattended => "saved password, nobody asked",
+            JoinedBy::Assigned => "assigned in Rig, no tap: your setting",
         }
     }
 }
@@ -251,16 +308,22 @@ mod tests {
     }
 
     fn knock(key: &sign::SecretKey, login: &Login) -> RigKnock {
-        knock_for(key, login, "")
+        vouching(key, login, Vouch::Nothing)
     }
 
     fn knock_for(key: &sign::SecretKey, login: &Login, ask: &str) -> RigKnock {
+        vouching(key, login, Vouch::Accepted(ask.into()))
+    }
+
+    fn vouching(key: &sign::SecretKey, login: &Login, vouch: Vouch) -> RigKnock {
+        let (ask, assigned) = vouch.fields();
         RigKnock {
-            signature: sign::sign_detached(&login.message("agent_a", "Builder", ask), key).to_bytes().to_vec().into(),
+            signature: sign::sign_detached(&login.message("agent_a", "Builder", &vouch), key).to_bytes().to_vec().into(),
             agent_id: "agent_a".into(),
             agent_title: "Builder".into(),
             dialer: login.dialer.to_string(),
-            ask: ask.into(),
+            ask,
+            assigned,
             ..Default::default()
         }
     }
@@ -274,7 +337,7 @@ mod tests {
         let (public, secret) = sign::gen_keypair();
         let here = login(NONCE, RIG);
         let proved = check(Some(&public), Some(&knock(&secret, &here)), &here).unwrap();
-        assert_eq!(proved, Proved { agent_id: "agent_a".into(), name: "Builder (Rig agent)".into(), ask: None });
+        assert_eq!(proved, Proved { agent_id: "agent_a".into(), name: "Builder (Rig agent)".into(), vouch: Vouch::Nothing });
         let mapped = login(NONCE, "::ffff:100.64.0.1");
         assert!(check(Some(&public), Some(&knock(&secret, &here)), &mapped).is_ok(), "the same dialer, as a dual-stack socket reports it");
     }
@@ -309,7 +372,7 @@ mod tests {
         let (public, secret) = sign::gen_keypair();
         let here = login(NONCE, RIG);
         let good = knock_for(&secret, &here, "desk_1");
-        assert_eq!(check(Some(&public), Some(&good), &here).unwrap().ask.as_deref(), Some("desk_1"));
+        assert_eq!(check(Some(&public), Some(&good), &here).unwrap().vouch, Vouch::Accepted("desk_1".into()));
         let moved = RigKnock { ask: "desk_2".into(), ..good.clone() };
         assert_eq!(check(Some(&public), Some(&moved), &here), Err(Refusal::BadProof), "an ask Rig did not sign");
         let dropped = RigKnock { ask: Default::default(), ..good };
@@ -317,6 +380,33 @@ mod tests {
         let plain_knock = knock(&secret, &here);
         let added = RigKnock { ask: "desk_1".into(), ..plain_knock };
         assert_eq!(check(Some(&public), Some(&added), &here), Err(Refusal::BadProof), "an ask put on a knock signed without one");
+    }
+
+    #[test]
+    fn a_knock_for_an_assigned_agent_proves_the_assignment_alone_and_no_ask() {
+        let (public, secret) = sign::gen_keypair();
+        let here = login(NONCE, RIG);
+        let good = vouching(&secret, &here, Vouch::Assigned);
+        assert_eq!(check(Some(&public), Some(&good), &here).unwrap().vouch, Vouch::Assigned);
+        let dropped = RigKnock { assigned: false, ..good.clone() };
+        assert_eq!(check(Some(&public), Some(&dropped), &here), Err(Refusal::BadProof), "the assignment taken off");
+        let added = RigKnock { assigned: true, ..knock(&secret, &here) };
+        assert_eq!(check(Some(&public), Some(&added), &here), Err(Refusal::BadProof), "assigned put on a knock signed without it");
+        let to_ask = RigKnock { assigned: false, ask: "desk_1".into(), ..good.clone() };
+        assert_eq!(check(Some(&public), Some(&to_ask), &here), Err(Refusal::BadProof), "an assignment's proof read as an accepted ask");
+        let both = RigKnock { assigned: true, ..knock_for(&secret, &here, "desk_1") };
+        assert_eq!(check(Some(&public), Some(&both), &here), Err(Refusal::BadProof), "an ask and an assignment together");
+        let elsewhere = vouching(&secret, &login(b"another connection's nonce", RIG), Vouch::Assigned);
+        assert_eq!(check(Some(&public), Some(&elsewhere), &here), Err(Refusal::BadProof), "replayed from another connection");
+    }
+
+    #[test]
+    fn only_an_assigned_knock_gets_in_with_no_tap_and_only_while_the_person_allows_it_and_no_other_agent_is_in() {
+        assert!(admits_assigned(&Vouch::Assigned, true, false));
+        assert!(!admits_assigned(&Vouch::Assigned, false, false), "the person's setting is off, as it is by default");
+        assert!(!admits_assigned(&Vouch::Assigned, true, true), "another agent is in: the person is asked");
+        assert!(!admits_assigned(&Vouch::Nothing, true, false), "a plain knock asks the person");
+        assert!(!admits_assigned(&Vouch::Accepted("desk_1".into()), true, false), "an accepted ask goes by one_tap alone");
     }
 
     #[test]
@@ -367,12 +457,13 @@ mod tests {
         left(9001);
         assert_eq!(joined_how(9001), None);
         assert!(!proved(9001));
-        let words = [JoinedBy::OneTap, JoinedBy::Allowed, JoinedBy::Invite, JoinedBy::Unattended]
+        let words = [JoinedBy::OneTap, JoinedBy::Allowed, JoinedBy::Invite, JoinedBy::Unattended, JoinedBy::Assigned]
             .iter()
             .copied()
             .map(|by| Joined { name: "B".into(), by }.how())
             .collect::<Vec<_>>();
-        assert_eq!(words, vec!["your Accept on this phone", "your Allow on this phone", "this phone's invite", "saved password, nobody asked"]);
+        assert_eq!(words, vec!["your Accept on this phone", "your Allow on this phone", "this phone's invite", "saved password, nobody asked",
+                               "assigned in Rig, no tap: your setting"]);
     }
 
     #[test]

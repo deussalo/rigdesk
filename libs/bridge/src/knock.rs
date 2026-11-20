@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use base::{
     message_proto::{login_response, message, misc, Hash, Message, OptionMessage, RigKnock},
-    rig_knock,
+    rig_knock::{self, Vouch},
 };
 use hbb_common::{
     log,
@@ -73,28 +73,30 @@ struct Proof {
     key_file: PathBuf,
     agent_id: String,
     agent_title: String,
-    /// The ask the person accepted on Rig Assistant's notification, signed in so the phone admits this knock alone; empty to ask them.
-    ask: String,
+    /// What Rig vouches for: the ask the person accepted on Rig Assistant's notification, so the phone admits this knock
+    /// alone; the operator's assignment, for an assigned agent's desk/join; or nothing, to ask the person.
+    vouch: Vouch,
 }
 
 /// Rig's signature over one login to `device`, for the connection its greeting `hash` opened from `dialer`, naming the
-/// agent it is for and the ask accepted for it (empty for none). A knock carries it, and so does a password login, which
-/// the phone then names.
-pub(crate) fn signed(key: &sign::SecretKey, agent_id: &str, agent_title: &str, ask: &str, device: &str, hash: &Hash, dialer: IpAddr) -> RigKnock {
+/// agent it is for and what Rig vouches for. A knock carries it, and so does a password login, which the phone then names.
+pub(crate) fn signed(key: &sign::SecretKey, agent_id: &str, agent_title: &str, vouch: &Vouch, device: &str, hash: &Hash, dialer: IpAddr) -> RigKnock {
     let login = rig_knock::Login { device, salt: &hash.salt, challenge: &hash.challenge, nonce: &hash.rig_knock_nonce, dialer };
+    let (ask, assigned) = vouch.fields();
     RigKnock {
-        signature: sign::sign_detached(&login.message(agent_id, agent_title, ask), key).to_bytes().to_vec().into(),
+        signature: sign::sign_detached(&login.message(agent_id, agent_title, vouch), key).to_bytes().to_vec().into(),
         agent_id: agent_id.to_owned(),
         agent_title: agent_title.to_owned(),
         dialer: dialer.to_string(),
-        ask: ask.to_owned(),
+        ask,
+        assigned,
         ..Default::default()
     }
 }
 
 impl Proof {
     fn knock(&self, key: &sign::SecretKey, device: &str, hash: &Hash, dialer: IpAddr) -> RigKnock {
-        signed(key, &self.agent_id, &self.agent_title, &self.ask, device, hash, dialer)
+        signed(key, &self.agent_id, &self.agent_title, &self.vouch, device, hash, dialer)
     }
 
     /// The login with the proof in it. The key is read for each knock, so one made after the bridge started counts.
@@ -137,8 +139,12 @@ impl Switch for Knocker {
         let (link, shared, taken) = (self.link.clone(), self.shared.clone(), self.allowed.clone());
         let name = format!("{} (Rig agent)", offer.owner.title);
         let ask = offer.ask.clone();
-        let accepted = if offer.accepted { offer.ask.clone() } else { String::new() };
-        let proof = self.pair_key.clone().map(|key_file| Proof { key_file, agent_id: offer.owner.agent_id.clone(), agent_title: offer.owner.title.clone(), ask: accepted });
+        let vouch = match (offer.accepted, offer.assigned) {
+            (true, _) => Vouch::Accepted(offer.ask.clone()),
+            (false, true) => Vouch::Assigned,
+            (false, false) => Vouch::Nothing,
+        };
+        let proof = self.pair_key.clone().map(|key_file| Proof { key_file, agent_id: offer.owner.agent_id.clone(), agent_title: offer.owner.title.clone(), vouch });
         let task = self.runtime.spawn(async move {
             let (answer, shown, allowed) = knock(&link, &name, proof.as_ref()).await;
             let adopted = allowed.is_some();
@@ -356,7 +362,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let key_file = dir.join("pair.key");
-        let proof = Proof { key_file: key_file.clone(), agent_id: "agent_a".into(), agent_title: "Builder".into(), ask: String::new() };
+        let proof = Proof { key_file: key_file.clone(), agent_id: "agent_a".into(), agent_title: "Builder".into(), vouch: Vouch::Nothing };
         let greeting = Hash { salt: "s".into(), challenge: "c".into(), rig_knock_nonce: b"nonce".to_vec().into(), ..Default::default() };
         assert!(login_after_greeting(greeting.clone(), Some(&proof)).await.0.rig_knock.is_none(), "the key file is not there yet");
 
@@ -368,20 +374,29 @@ mod tests {
         assert_eq!((knocked.agent_id.as_str(), knocked.agent_title.as_str(), knocked.dialer.as_str()), ("agent_a", "Builder", dialer.to_string().as_str()));
         let signature = sign::Signature::from_bytes(&knocked.signature).unwrap();
         let mut signed = rig_knock::Login { device: &login.username, salt: "s", challenge: "c", nonce: b"nonce", dialer };
-        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder", ""), &public));
-        assert!(knocked.ask.is_empty(), "an offer not accepted on the phone asks the person there");
+        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder", &Vouch::Nothing), &public));
+        assert!(knocked.ask.is_empty() && !knocked.assigned, "an offer not accepted on the phone asks the person there");
         signed.nonce = b"another connection";
-        assert!(!sign::verify_detached(&signature, &signed.message("agent_a", "Builder", ""), &public));
+        assert!(!sign::verify_detached(&signature, &signed.message("agent_a", "Builder", &Vouch::Nothing), &public));
         signed.nonce = b"nonce";
 
-        let accepted = Proof { ask: "desk_1".into(), ..proof };
+        let assigned = Proof { vouch: Vouch::Assigned, ..proof };
+        let (login, dialer) = login_after_greeting(greeting.clone(), Some(&assigned)).await;
+        let knocked = login.rig_knock.clone().into_option().unwrap();
+        assert!(knocked.assigned && knocked.ask.is_empty(), "an assigned agent's knock says so, and names no ask");
+        let signature = sign::Signature::from_bytes(&knocked.signature).unwrap();
+        let signed = rig_knock::Login { device: &login.username, salt: "s", challenge: "c", nonce: b"nonce", dialer };
+        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder", &Vouch::Assigned), &public), "the assignment is signed in");
+        assert!(!sign::verify_detached(&signature, &signed.message("agent_a", "Builder", &Vouch::Nothing), &public));
+
+        let accepted = Proof { vouch: Vouch::Accepted("desk_1".into()), ..assigned };
         let (login, dialer) = login_after_greeting(greeting.clone(), Some(&accepted)).await;
         let knocked = login.rig_knock.clone().into_option().unwrap();
         assert_eq!(knocked.ask, "desk_1");
         let signature = sign::Signature::from_bytes(&knocked.signature).unwrap();
         let signed = rig_knock::Login { device: &login.username, salt: "s", challenge: "c", nonce: b"nonce", dialer };
-        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder", "desk_1"), &public), "the accepted ask is signed in");
-        assert!(!sign::verify_detached(&signature, &signed.message("agent_a", "Builder", ""), &public));
+        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder", &Vouch::Accepted("desk_1".into())), &public), "the accepted ask is signed in");
+        assert!(!sign::verify_detached(&signature, &signed.message("agent_a", "Builder", &Vouch::Nothing), &public));
         let proof = accepted;
 
         let stock = Hash { rig_knock_nonce: Default::default(), ..greeting.clone() };

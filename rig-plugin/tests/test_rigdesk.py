@@ -1626,8 +1626,8 @@ MOTO_ID = "123456789"
 class _Assistant:
     """rig-assistant as rigdesk asks it: its phone moto saying MOTO_ID, connected while up; each request shown there and each ended, refused while
     the phone is down or refusing."""
-    def __init__(self, up: bool = True, refusing: bool = False) -> None:
-        self.up, self.refusing, self.shown, self.ended = up, refusing, [], []
+    def __init__(self, up: bool = True, refusing: bool = False, no_tap: bool = False) -> None:
+        self.up, self.refusing, self.no_tap, self.shown, self.ended = up, refusing, no_tap, [], []
 
     def offer(self) -> None:
         from core.model import Refused
@@ -1635,7 +1635,7 @@ class _Assistant:
         from rigdesk import prompts
 
         async def phones(_host: object, _asked: None) -> list:
-            return [{"name": "moto", "rustdesk_id": MOTO_ID, "up": self.up}]
+            return [{"name": "moto", "rustdesk_id": MOTO_ID, "up": self.up, "assigned_no_tap": self.no_tap}]
 
         async def shown(_host: object, asked: dict) -> str:
             if not self.up or self.refusing:
@@ -1670,6 +1670,77 @@ def _one_tap_desks(state: str, asks: "_Asks", operator: str = "Arian", **more: o
 
 def _said(ask: str, nonce: str, said: str, phone: str = "moto", reason: str = "") -> dict:
     return {"phone": phone, "ask": ask, "nonce": nonce, "said": said, "reason": reason}
+
+
+def test_an_assigned_agents_desk_join_on_a_phone_whose_person_allows_no_tap_knocks_as_assigned_first_and_falls_back_to_the_notification() -> None:
+    """Q3: a phone's person lets an agent the operator assigned it join with no tap while sharing runs, as its hello says. desk/join(pc) then sends
+    the bridge's knock marked assigned, and no notification; the phone's yes joins the agent. A knock that reaches nothing (sharing off) asks
+    the person by notification instead, whose Accept sends the knock marked accepted, not assigned. With the setting off, as by default, no
+    knock is marked assigned while Rig Assistant reaches the phone."""
+    from rigdesk import JoinInput, _join, prompts
+    seat = SeatId(GraphName("g"), NodeId("n"))
+
+    async def caller_title() -> str:
+        return "Builder"
+    call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1", seat=seat)), graph="g", node="n",
+                           kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"), refused=lambda code, words, *_: {"refused": code, "said": words})
+
+    async def round(no_tap: bool, sharing: bool) -> dict:
+        told: list = []
+        with tempfile.TemporaryDirectory() as state:
+            bridge, assistant = _StockBridge("down"), _Assistant(no_tap=no_tap)
+            assistant.offer()
+            desks, runner = await _stock_desks(state, bridge, _Asks(), told, login_id=MOTO_ID)
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                await desks.assign("phone", "agent:a1")
+                desks._one_taps = await desks.one_taps()
+                assert desks._one_tap_row("phone")["no_tap"] is no_tap, desks._one_tap_row("phone")
+                answer = await _join(desks, call, JoinInput(pc="phone"))  # type: ignore[arg-type]
+                ask = answer["ask"]
+                if no_tap:
+                    await _until(lambda: "/offer" in bridge.paths())
+                    knocked = next(body for path, body in bridge.posted if path == "/offer")
+                    assert knocked.get("assigned") is True and "accepted" not in knocked and assistant.shown == [], (knocked, assistant.shown)
+                    if sharing:
+                        bridge.allowed = True
+                        await desks._event(desks._pcs["phone"], {"type": "offer", "ask": ask, "nonce": knocked["nonce"], "answer": "allow"})
+                    else:
+                        await desks._event(desks._pcs["phone"], {"type": "offer", "ask": ask, "nonce": knocked["nonce"], "answer": "refused: Can't reach phone"})
+                if not (no_tap and sharing):
+                    await _until(lambda: assistant.shown)
+                    shown = assistant.shown[0]
+                    assert await prompts.phone_said(desks.host, _said(ask, shown["nonce"], "ready")) == "taken"  # type: ignore[arg-type]
+                    await _until(lambda: [body for path, body in bridge.posted if path == "/offer" and body.get("accepted")])
+                    bridge.allowed = True
+                    await desks._event(desks._pcs["phone"], {"type": "offer", "ask": ask, "nonce": shown["nonce"], "answer": "allow"})
+                await _until(lambda: told)
+                held = desks.held_on("phone")
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+        offers = [body for path, body in bridge.posted if path == "/offer"]
+        return {"answer": answer, "offers": offers, "shown": assistant.shown, "held": held, "told": told}
+
+    async def run() -> None:
+        sharing = await round(no_tap=True, sharing=True)
+        assert "knocked as assigned to you" in sharing["answer"]["said"], sharing["answer"]
+        assert sharing["shown"] == [] and len(sharing["offers"]) == 1, (sharing["shown"], sharing["offers"])
+        assert sharing["held"] is not None and sharing["held"].via == "assigned", sharing["held"]
+        assert len(sharing["told"]) == 1 and "let you in as assigned to you" in sharing["told"][0][1], sharing["told"]
+
+        off = await round(no_tap=True, sharing=False)
+        assert len(off["shown"]) == 1 and [("assigned" in body, body.get("accepted")) for body in off["offers"]] == [(True, None), (False, True)], off["offers"]
+        assert off["held"] is not None and "allowed you on the device" in off["told"][0][1], off["told"]
+
+        unset = await round(no_tap=False, sharing=True)
+        assert "is asked on the phone" in unset["answer"]["said"], unset["answer"]
+        assert all("assigned" not in body for body in unset["offers"]) and unset["offers"][0]["accepted"] is True, unset["offers"]
+        assert unset["held"] is not None
+
+    asyncio.run(run())
 
 
 def test_with_no_operator_name_rig_itself_refuses_a_join_to_a_one_tap_phone_naming_the_setting_and_sends_the_phone_nothing() -> None:
@@ -1917,7 +1988,7 @@ def test_a_stock_entry_is_a_phone_in_rig_assistant_by_the_rustdesk_id_both_say_a
             assert told == {"moto-g57": "assistant_offline", "tablet": "no_link_match", "front": "no_link_match", "far": "no_link_match"}, reports
             rows = {row["name"]: row["one_tap"] for row in desks.pcs()}
             assert rows["moto-g57"] == {"state": "assistant_offline", "phone": "moto",
-                                        "why": "phone moto says RustDesk ID 123456789 but is not connected to Rig Assistant now"} and rows["rigdesk"] is None, rows
+                                        "why": "phone moto says RustDesk ID 123456789 but is not connected to Rig Assistant now", "no_tap": False} and rows["rigdesk"] is None, rows
 
     asyncio.run(run())
 def test_a_stock_pcs_bridge_gets_rigs_pairing_key_in_its_environment_and_its_arguments_stay_as_they_were() -> None:

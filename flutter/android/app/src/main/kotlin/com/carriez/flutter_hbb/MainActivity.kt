@@ -393,6 +393,10 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "rig_bridge_refused" -> result.success(AgentStop.refused())
+                "rig_hello_again" -> {
+                    dev.rig.assistant.Link.redial()
+                    result.success(true)
+                }
                 "try_sync_clipboard" -> {
                     rdClipboardManager?.syncClipboard(true)
                     result.success(true)

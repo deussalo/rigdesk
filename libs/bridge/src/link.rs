@@ -652,7 +652,10 @@ impl Link {
         let accepted = self.signs_for.lock().unwrap().clone();
         let (owner, ask) = accepted.or_else(|| self.shared.standing().owner.map(|owner| (owner, String::new())))?;
         match crate::invite::read_key(key_file) {
-            Ok((_, key)) => Some(crate::knock::signed(&key, &owner.agent_id, &owner.title, &ask, &self.username, hash, dialer)),
+            Ok((_, key)) => {
+                let vouch = if ask.is_empty() { base::rig_knock::Vouch::Nothing } else { base::rig_knock::Vouch::Accepted(ask) };
+                Some(crate::knock::signed(&key, &owner.agent_id, &owner.title, &vouch, &self.username, hash, dialer))
+            }
             Err(e) => {
                 log::warn!("the password login goes without Rig's signature: {e}");
                 None
@@ -1171,7 +1174,7 @@ mod tests {
         assert_eq!((knock.agent_id.as_str(), knock.ask.as_str()), ("agent_a", "desk_1"));
         let signature = sign::Signature::from_bytes(&knock.signature).unwrap();
         let signed = base::rig_knock::Login { device: &login.username, salt: "s", challenge: "c", nonce: b"nonce", dialer };
-        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder", "desk_1"), &public));
+        assert!(sign::verify_detached(&signature, &signed.message("agent_a", "Builder", &base::rig_knock::Vouch::Accepted("desk_1".into())), &public));
         assert!(link.signs_for.lock().unwrap().is_none(), "the Accept's agent is not carried into a later login");
 
         let (addr, logins) = signing_phone().await;
