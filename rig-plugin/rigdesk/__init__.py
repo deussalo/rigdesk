@@ -498,7 +498,7 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
                 if prompts.denied_by_person(device) is not None:
                     return f"The operator accepted, but you did not join {given['pc']}: {unlogged}, and the person there dismissed your request on the device."
                 said = prompts.waiting(desks, device, given["pc"], str(unlogged), unlogged.password)
-                kept = True
+                kept = unlogged.password != "unreached"
                 return said
             except DeniedByPerson as denied:
                 return f"The operator accepted, but you did not join {given['pc']}: {denied}. desk/request asks again."

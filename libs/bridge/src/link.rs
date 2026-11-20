@@ -396,6 +396,17 @@ impl Link {
         })
     }
 
+    /// What made a dial fail, in the OS's words where it has them.
+    async fn dial_cause(&self, e: hbb_common::anyhow::Error) -> String {
+        let Route::Direct { addr } = &self.route else { return e.to_string() };
+        // hbb_common's FramedStream::new drops the OS error and says only "Failed to connect to <addr>": a second connect learns it.
+        match tokio::time::timeout(PROBE_WAIT, tokio::net::TcpStream::connect(addr.as_str())).await {
+            Ok(Err(refused)) => refused.to_string(),
+            Err(_) => format!("no answer within {} s", PROBE_WAIT.as_secs()),
+            Ok(Ok(_)) => e.to_string(),
+        }
+    }
+
     /// Whether the PC answers, found without logging in: its direct-IP port takes a connection, or the ID server has it.
     async fn probe(&self) {
         let down = match &self.route {
@@ -429,7 +440,10 @@ impl Link {
                 self.on_message(allowed.peer_info, &tx)?;
                 allowed.stream
             }
-            None => self.dial().await.map_err(|e| Unreached(e.to_string()))?,
+            None => match self.dial().await {
+                Ok(stream) => stream,
+                Err(e) => return Err(Unreached(self.dial_cause(e).await).into()),
+            },
         };
         if self.invite.get().is_some() {
             *self.invite_login.lock().unwrap() = InviteLogin { dialer: Some(stream.local_addr().ip()), ..Default::default() };
@@ -448,8 +462,8 @@ impl Link {
                             answered = true;
                             bytes
                         }
-                        Some(Err(e)) if !answered => return Err(Unreached(format!("the connection closed before the PC asked for a login: {e}")).into()),
-                        None if !answered => return Err(Unreached("the connection closed before the PC asked for a login".into()).into()),
+                        Some(Err(e)) if !answered => return Err(Unreached(format!("it closed the connection before asking for a login: {e}")).into()),
+                        None if !answered => return Err(Unreached("it closed the connection before asking for a login".into()).into()),
                         Some(Err(e)) => bail!("connection error: {e}"),
                         None => bail!("the PC went silent or closed the connection"),
                     };
@@ -701,26 +715,28 @@ impl Link {
             self.last_use_ms.store(0, Ordering::SeqCst);
             let state = self.state.lock().unwrap();
             match state.failure.as_ref().filter(|(_, at)| *at >= asked).map(|(failure, _)| failure) {
-                Some(Failure::Unreached(cause)) => NoLogin::Unreached(self.unreached(cause, state.platform.as_deref())),
+                Some(Failure::Unreached(cause)) => self.unreached(cause, state.platform.as_deref()),
                 Some(refused @ Failure::Refused(_)) => NoLogin::Refused(refused.to_string()),
                 _ => NoLogin::Failed(why),
             }
         })
     }
 
-    /// Why Rig's Accept found nothing at the PC to log in to, and what to start where: on a phone that is RigDesk.
-    fn unreached(&self, cause: &str, platform: Option<&str>) -> String {
-        let (device, app) = match platform {
-            Some("Android") => ("phone", "RigDesk"),
-            Some(_) => ("PC", "RustDesk"),
-            None => ("PC", "RustDesk (or RigDesk on a phone)"),
+    /// Rig's Accept found nothing at the PC to log in to: what failed where, and what to start, for the device the PC last said it is.
+    fn unreached(&self, cause: &str, platform: Option<&str>) -> NoLogin {
+        const UNTRIED: &str = "No login was tried, and no password was sent.";
+        let (at, why) = match (&self.route, platform) {
+            (Route::Direct { addr }, Some("Android")) => {
+                (addr.clone(), format!("RigDesk on the phone isn't accepting connections ({cause}). {UNTRIED} Start the service in RigDesk on the phone."))
+            }
+            (Route::Direct { addr }, Some(_)) => (addr.clone(), format!("RustDesk on the PC isn't accepting connections ({cause}). {UNTRIED} \
+                                                                          Start the RustDesk service on the PC, with direct IP access on.")),
+            (Route::Direct { addr }, None) => (addr.clone(), format!("Nothing there is accepting connections ({cause}). {UNTRIED} \
+                                                                       Start the service in RigDesk on a phone, or the RustDesk service on a PC, with direct IP access on.")),
+            (Route::Id { id, .. }, _) => (format!("ID {id}"), format!("The ID server didn't put Rig through ({cause}). {UNTRIED} \
+                                                                        Start the RustDesk service on the PC, and check that it's online.")),
         };
-        match &self.route {
-            Route::Direct { addr } => format!("nothing on the {device} accepts connections at {addr} ({cause}), so no login was tried and no password used. \
-                                               Start the service in {app} on the {device}, with direct IP access on"),
-            Route::Id { id, .. } => format!("the ID server did not put Rig through to {id} ({cause}), so no login was tried and no password used. \
-                                            Start the service in {app} on the {device}, and check it is online"),
-        }
+        NoLogin::Unreached { at, why }
     }
 
     /// Open the session if it is not, and wait for the login, up to `wait`.
@@ -917,8 +933,14 @@ mod tests {
     }
 
     async fn logged_in_with(addr: &str, password: &str) -> (Arc<Link>, Result<(), NoLogin>) {
+        logged_in_as(addr, password, None).await
+    }
+
+    /// A login from a bridge that saw the PC say `platform` at an earlier login.
+    async fn logged_in_as(addr: &str, password: &str, platform: Option<&str>) -> (Arc<Link>, Result<(), NoLogin>) {
         let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
         let link = Link::new(Route::direct(addr), password.into(), "Rig agent".into(), shared);
+        link.state.lock().unwrap().platform = platform.map(str::to_string);
         tokio::spawn(link.clone().run());
         let trying = link.clone();
         let said = tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10))).await.unwrap();
@@ -951,10 +973,21 @@ mod tests {
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = closed.local_addr().unwrap().to_string();
         drop(closed);
-        let (_, said) = logged_in_with(&addr, "saved").await;
-        let Err(NoLogin::Unreached(why)) = said else { panic!("a closed port is not told as unreached: {said:?}") };
-        assert!(why.starts_with(&format!("nothing on the PC accepts connections at {addr} (")), "{why}");
-        assert!(why.contains("so no login was tried and no password used") && !why.contains("refused by the PC"), "{why}");
+        let untried = "No login was tried, and no password was sent.";
+        let told = |said: Result<(), NoLogin>| match said {
+            Err(NoLogin::Unreached { at, why }) => (at, why),
+            other => panic!("a closed port is not told as unreached: {other:?}"),
+        };
+        let (at, why) = told(logged_in_as(&addr, "saved", Some("Android")).await.1);
+        assert_eq!(at, addr);
+        let cause = why.strip_prefix("RigDesk on the phone isn't accepting connections (").and_then(|rest| rest.split_once("). ")).map(|(cause, _)| cause);
+        let cause = cause.unwrap_or_else(|| panic!("{why}"));
+        assert!(!cause.contains(&addr) && !cause.is_empty(), "the cause repeats the address or is empty: {why}");
+        assert_eq!(why, format!("RigDesk on the phone isn't accepting connections ({cause}). {untried} Start the service in RigDesk on the phone."));
+        let (_, why) = told(logged_in_as(&addr, "saved", Some("Windows")).await.1);
+        assert_eq!(why, format!("RustDesk on the PC isn't accepting connections ({cause}). {untried} Start the RustDesk service on the PC, with direct IP access on."));
+        let (_, why) = told(logged_in_with(&addr, "saved").await.1);
+        assert!(why.starts_with("Nothing there is accepting connections (") && why.contains(untried), "{why}");
 
         let hanging_up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = hanging_up.local_addr().unwrap().to_string();
@@ -963,9 +996,8 @@ mod tests {
                 drop(socket);
             }
         });
-        let (_, said) = logged_in_with(&addr, "saved").await;
-        let Err(NoLogin::Unreached(why)) = said else { panic!("a hang-up before any login is not told as unreached: {said:?}") };
-        assert!(why.contains("the connection closed before the PC asked for a login") && why.contains("no password used"), "{why}");
+        let (_, why) = told(logged_in_as(&addr, "saved", Some("Windows")).await.1);
+        assert!(why.starts_with("RustDesk on the PC isn't accepting connections (it closed the connection before asking for a login") && why.contains(untried), "{why}");
     }
 
     /// A stock PC on loopback that logs in every dial and, on the first session only, then closes it as its person does.

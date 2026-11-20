@@ -1359,8 +1359,8 @@ def test_a_stock_pc_is_asked_through_its_bridge_and_its_allow_answers_the_ask_wi
     asyncio.run(run())
 
 
-UNREACHED = ("nothing on the phone accepts connections at phone.tail1234.ts.net:21118 (Connection refused (os error 111)), so no login was tried "
-             "and no password used. Start the service in RigDesk on the phone, with direct IP access on")
+UNREACHED = ("RigDesk on the phone isn't accepting connections (Connection refused (os error 111)). No login was tried, and no password was sent. "
+             "Start the service in RigDesk on the phone.")
 
 
 class _StockBridge:
@@ -1380,7 +1380,7 @@ class _StockBridge:
             if self.password is None:
                 return web.json_response({"logged_in": False, "code": "no_password", "error": "Rig keeps no password for this PC"}, status=409)
             if self.password == "down":
-                return web.json_response({"logged_in": False, "code": "unreachable", "error": UNREACHED}, status=409)
+                return web.json_response({"logged_in": False, "code": "unreachable", "at": "phone.tail1234.ts.net:21118", "error": UNREACHED}, status=409)
             if self.password == "cut":
                 return web.json_response({"logged_in": False, "code": "login_failed", "error": "no login within 5s"}, status=409)
             return web.json_response({"logged_in": False, "code": "login_refused", "error": "login refused by the PC: Wrong Password"}, status=409)
@@ -1490,8 +1490,9 @@ def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_suc
         assert desks.held_on("phone") is not None
 
         said, bridge, desks, told = await accepted_then("down", "")
-        assert f"you have not joined phone: Can't reach phone: {UNREACHED}, so the person at phone must Allow" in said, said
-        assert "password for phone did not log in" not in said and desks.held_on("phone") is None, said
+        assert said == (f"The operator accepted, but you have not joined phone. Can't reach phone at phone.tail1234.ts.net:21118: {UNREACHED} "
+                        "Your request can't show on phone until that service runs. Once it runs, desk/request asks again."), said
+        assert "/offer/end" in bridge.paths() and desks.prompts == {} and desks.held_on("phone") is None, (bridge.paths(), desks.prompts)
 
         said, bridge, desks, told = await accepted_then("cut", "")
         assert "you have not joined phone: Rig's login to phone did not finish: no login within 5s" in said, said

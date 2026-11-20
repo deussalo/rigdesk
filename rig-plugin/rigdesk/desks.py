@@ -1670,7 +1670,7 @@ class Desks:
             case "no_password":
                 raise NotLoggedIn(f"Rig keeps no password for {pc}", "none")
             case "unreachable":
-                raise NotLoggedIn(f"Can't reach {pc}: {error}", "unreached")
+                raise NotLoggedIn(f"Can't reach {pc} at {said.get('at') or 'its address'}: {error}", "unreached")
             case "login_refused":
                 raise NotLoggedIn(f"Rig's saved password for {pc} did not log in: {error}", "refused")
             case _:
