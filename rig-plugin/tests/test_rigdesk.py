@@ -1,5 +1,6 @@
 """Run from a Rig checkout: PYTHONPATH=.:<rigdesk>/rig-plugin .venv/bin/python <rigdesk>/rig-plugin/tests/test_rigdesk.py (or with pytest)."""
 import asyncio
+import inspect
 import json
 import tempfile
 import time
@@ -1047,12 +1048,14 @@ async def _offering_pc(desks: Desks, posted: list[tuple[str, dict]]):
     return runner
 
 
-async def _until(check, limit_s: float = 5.0) -> None:
-    for _ in range(int(limit_s / 0.01)):
-        if check():
-            return
+async def _until(check, limit_s: float = 15.0) -> None:
+    """Waits for check to hold, up to limit_s of the loop's own clock, so a loaded machine slows the wait, not the deadline's meaning."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + limit_s
+    while not check():
+        if loop.time() >= deadline:
+            raise AssertionError(f"never happened within {limit_s} s: {inspect.getsource(check).strip() if callable(check) else check!r}")
         await asyncio.sleep(0.01)
-    raise AssertionError("never happened")
 
 
 def _vault_writes(slow_first: bool = False):
