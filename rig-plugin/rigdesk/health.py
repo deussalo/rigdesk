@@ -9,8 +9,8 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from core.base import JsonObject, event_log, replace_file
-from core.node_data import Shape
+from core.sdk.base import event_log, JsonObject, replace_file
+from core.sdk.nodes import Shape
 
 SCHEMA = 1
 KEPT_MS = 7 * 24 * 3600_000
