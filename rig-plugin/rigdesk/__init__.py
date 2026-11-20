@@ -817,8 +817,8 @@ class PcsView(View):
 
 
 # The script's own commit on GitHub, so the line runs exactly what was reviewed; a new script is a new commit here and its hash.
-STOCK_SCRIPT = "https://raw.githubusercontent.com/deussalo/rigdesk/d62a30eda697a3cfb734c1cfb10ce72eff769348/install/stock-rustdesk.ps1"
-STOCK_SCRIPT_SHA256 = "991779686CACC64E7D6312184E211E3BD45121C3A49DCF464AFE5226B4B12A3F"
+STOCK_SCRIPT = "https://raw.githubusercontent.com/deussalo/rigdesk/115856446a704bc787beb39a492d18c961fe0ff1/install/stock-rustdesk.ps1"
+STOCK_SCRIPT_SHA256 = "FDB8A79D16F25D8B2BF7803B142559F7D609DFABB5D8EE45EE7DCD9D9D0ADF5A"
 
 
 def install_line(config: str) -> str:
