@@ -1821,13 +1821,13 @@ def test_unassigning_a_phone_ends_the_assigned_agents_request_there_and_a_yes_af
                     bridge.allowed = True
                     await desks._event(desks._pcs["phone"], {"type": "offer", "ask": ask, "nonce": knocked["nonce"], "answer": "allow"})
                     await _until(lambda: told)
-                held, open_ = desks.held_on("phone"), dict(desks.prompts)
+                held, open_, hung_up = desks.held_on("phone"), dict(desks.prompts), [body for path, body in bridge.posted if path == "/offer/end"]
             finally:
                 prompts.OPEN_EVERY_S = every
                 await prompts.end_all(desks)
                 await desks._http.close()
                 await runner.cleanup()
-        return {"told": told, "held": held, "open": open_, "ended": assistant.ended, "offers": [body for path, body in bridge.posted if path == "/offer"]}
+        return {"told": told, "held": held, "open": open_, "ended": assistant.ended, "hung_up": hung_up, "ask": ask, "offers": [body for path, body in bridge.posted if path == "/offer"]}
 
     async def run() -> None:
         gone = await round(unassign=True)
@@ -1837,6 +1837,7 @@ def test_unassigning_a_phone_ends_the_assigned_agents_request_there_and_a_yes_af
         later = await round(unassign=False)
         assert all("assigned" not in body for body in later["offers"]), later["offers"]
         assert later["held"] is None, later["held"]
+        assert [body["ask"] for body in later["hung_up"]] == [later["ask"]], later["hung_up"]
         assert len(later["told"]) == 1 and "unassigned phone from you meanwhile" in later["told"][0][1], later["told"]
 
     asyncio.run(run())

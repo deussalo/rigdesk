@@ -122,13 +122,16 @@ impl Connection {
     /// The person's Accept on Rig Assistant's notification was their yes for this ask: the knock is let in with no
     /// second Allow, as an invite is, and never around a 2FA requirement.
     async fn rig_knock_accepted(&mut self, ask: &str, proved: rig_knock::Proved) -> bool {
-        hbb_common::log::info!("Rig agent {} joins on the person's Accept for {ask}", proved.agent_id);
         rig_knock::mark_proved(self.inner.id, &proved.name);
+        if !rig_knock::reserve(self.inner.id, rig_knock::JoinedBy::OneTap) {
+            one_tap::failed(self.inner.id);
+            return self.refuse_rig_knock("another Rig agent is in on this phone").await;
+        }
+        hbb_common::log::info!("Rig agent {} joins on the person's Accept for {ask}", proved.agent_id);
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         let kept = self.send_logon_response_and_keep_alive().await;
-        if self.authorized {
-            rig_knock::joined(self.inner.id, rig_knock::JoinedBy::OneTap);
-        } else {
+        if !self.authorized {
+            rig_knock::release(self.inner.id);
             one_tap::failed(self.inner.id);
         }
         if !kept {
@@ -164,6 +167,16 @@ impl Connection {
             }
             Err(refusal) => hbb_common::log::warn!("A password login carried a Rig signature that does not hold: {}", refusal.words()),
         }
+    }
+
+    /// The person's Allow is about to let a proved knock in: it takes the one Rig agent slot first, so it cannot race an
+    /// assigned knock or a one-tap Accept into a second seat. False refuses the Allow; any other login goes on as before.
+    pub(super) fn rig_knock_reserve_allowed(&self) -> bool {
+        let reserved = !rig_knock::proved(self.inner.id) || rig_knock::reserve(self.inner.id, rig_knock::JoinedBy::Allowed);
+        if !reserved {
+            hbb_common::log::info!("The person's Allow for a Rig agent was not taken: another Rig agent is in");
+        }
+        reserved
     }
 
     /// The person's Allow let a proved knock in: the session is told as theirs, and listed again as in.

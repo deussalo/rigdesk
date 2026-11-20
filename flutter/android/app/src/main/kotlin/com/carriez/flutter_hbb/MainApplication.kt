@@ -19,7 +19,7 @@ class MainApplication : Application() {
         Log.d(TAG, "App start")
         FFI.onAppStart(applicationContext)
         dev.rig.assistant.Host.rustdeskId = { if (configLocated()) FFI.rigOwnId() else "" }
-        dev.rig.assistant.Host.assignedNoTap = { FFI.getLocalOption("rig-assigned-no-tap") == "Y" }
+        dev.rig.assistant.Host.assignedNoTap = { configLocated() && FFI.rigOffersNoTap() }
     }
 
     /** Points the config at the directory Flutter recorded, as MainService does, before Rig Assistant's hello reads it. */

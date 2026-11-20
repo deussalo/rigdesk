@@ -393,6 +393,16 @@ async def _offered(desks: Desks, prompt: Prompt) -> str:
         raise
 
 
+async def _hang_up(desks: Desks, prompt: Prompt) -> None:
+    """The PC let the agent in, but Rig will not join it: the bridge hangs up the connection it holds for the ask, so the PC's "joined" goes now."""
+    url, headers = desks.offer_at(prompt.pc)
+    try:
+        async with desks.http.post(f"{url}/offer/end", json={"ask": prompt.ask}, headers=headers, timeout=aiohttp.ClientTimeout(total=15)):
+            pass
+    except (aiohttp.ClientError, TimeoutError, OSError) as failed:
+        _LOG.warning("rigdesk_prompt_unended", f"RigDesk {prompt.pc}: the connection let in for {prompt.ask} could not be hung up, it lapses there: {failed}", pc=prompt.pc)
+
+
 async def _settled(desks: Desks, prompt: Prompt, said: str) -> None:
     """The person at the PC answered first: the operator's ask is answered as they did. Taken off the open prompts first, so the Then's end()
     does not cancel this answer while it runs."""
@@ -437,6 +447,7 @@ async def _answered_after_accept(desks: Desks, prompt: Prompt, said: str) -> Non
             _LOG.warning("rigdesk_prompt_gone", f"RigDesk {pc}: the person allowed {prompt.ask}, but {prompt.agent} no longer stands at its seat, so nobody joined", pc=pc)
             return
         if prompt.yes == "grant" and pc not in desks.assigned_pcs(prompt.agent, prompt.graph):
+            await _hang_up(desks, prompt)
             words = (f"RigDesk: the person at {pc} allowed you on the device, but the operator unassigned {pc} from you meanwhile, so you did not join {pc}. "
                      "desk/request asks the operator to let you join it.")
             await desks.tell_seat(pc, prompt.agent, prompt.seat, words, f"prompt:{prompt.ask}")

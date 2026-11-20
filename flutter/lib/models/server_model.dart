@@ -108,6 +108,8 @@ class ServerModel with ChangeNotifier {
 
   setApproveMode(String mode) async {
     await bind.mainSetOption(key: kOptionApproveMode, value: mode);
+    // Rig Assistant's hello says whether assigned agents join with no tap, which password-only turns off.
+    if (isAndroid) gFFI.invokeMethod(kRigHelloAgain);
     /*
     if (mode != 'password') {
       await bind.mainSetOption(

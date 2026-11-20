@@ -3284,6 +3284,15 @@ pub mod server_side {
         env.new_string(id).unwrap_or_default().into_raw()
     }
 
+    /// RigDesk: whether Rig Assistant's hello tells Rig that assigned agents join with no tap (base::rig_knock::offers_no_tap):
+    /// never while the approve mode is password only.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_rigOffersNoTap(_env: JNIEnv, _class: JClass) -> jboolean {
+        use hbb_common::password_security::{approve_mode, ApproveMode};
+        let setting_on = hbb_common::config::LocalConfig::get_option(base::rig_knock::ASSIGNED_NO_TAP) == "Y";
+        jboolean::from(base::rig_knock::offers_no_tap(setting_on, approve_mode() != ApproveMode::Password))
+    }
+
     /// RigDesk: whether this phone listens for Rig's knock now (its direct server is up).
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_rigListening(_env: JNIEnv, _class: JClass) -> jboolean {

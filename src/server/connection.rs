@@ -757,7 +757,7 @@ impl Connection {
                     match data {
                         ipc::Data::Authorize => {
                             #[cfg(target_os = "android")]
-                            if !conn.rig_knock_may_authorize() {
+                            if !conn.rig_knock_may_authorize() || !conn.rig_knock_reserve_allowed() {
                                 continue;
                             }
                             conn.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);

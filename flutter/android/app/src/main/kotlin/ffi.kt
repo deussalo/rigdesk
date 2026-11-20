@@ -35,6 +35,7 @@ object FFI {
     external fun rigDisconnect(connId: Int)
     external fun rigListening(): Boolean
     external fun rigConfigAt(appDir: String): Boolean
+    external fun rigOffersNoTap(): Boolean
     external fun rigOwnId(): String
     external fun invitePairKey(key: String): Boolean
     external fun inviteMint(): String

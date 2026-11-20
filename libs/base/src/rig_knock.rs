@@ -230,6 +230,12 @@ pub fn admits_assigned(vouch: &Vouch, here: NoTapHere) -> Result<(), &'static st
     }
 }
 
+/// Whether the phone tells Rig its person lets assigned agents in with no tap: the setting on, and the approve mode taking
+/// clicks, so Rig never counts on a no-tap admit that [`admits_assigned`] would refuse.
+pub fn offers_no_tap(setting_on: bool, click_approves: bool) -> bool {
+    setting_on && click_approves
+}
+
 /// Takes the one Rig agent slot for connection `conn` before its login is sent, so two knocks at once cannot both get in
 /// as assigned: false while another connection's Rig agent is in or on its way in.
 pub fn reserve(conn: i32, by: JoinedBy) -> bool {
@@ -450,6 +456,13 @@ mod tests {
         assert_eq!(admits_assigned(&Vouch::Assigned, password), Err("the approve mode is password only"));
         assert!(admits_assigned(&Vouch::Nothing, here).is_err(), "a plain knock asks the person");
         assert!(admits_assigned(&Vouch::Accepted("desk_1".into()), here).is_err(), "an accepted ask goes by one_tap alone");
+    }
+
+    #[test]
+    fn the_phone_offers_no_tap_to_rig_only_while_the_setting_is_on_and_clicks_approve() {
+        assert!(offers_no_tap(true, true));
+        assert!(!offers_no_tap(true, false), "password-only: Rig is told no tap is off");
+        assert!(!offers_no_tap(false, true));
     }
 
     #[test]
