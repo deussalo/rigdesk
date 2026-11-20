@@ -89,6 +89,18 @@ fn the_persons_dismiss_denies_and_takes_the_prompt_down() {
 }
 
 #[test]
+fn the_person_takes_back_their_own_yes_before_its_login_and_a_late_login_is_dropped() {
+    let mut desk = Desk::new();
+    prompting(&mut desk, "a", "x");
+    desk.step(T0, Event::Allow { ask: ask("a"), agent_can_press: false });
+    let step = desk.step(T0, Event::Dismiss { ask: ask("a"), agent_can_press: false });
+    assert_eq!(step.changes[0].state, State::Denied { by: By::Person });
+    assert_eq!(step.effects, [Effect::DropLogin(ask("a"))]);
+    let step = desk.step(T0, Event::LoginOk { ask: ask("a"), route: Route::Adopted });
+    assert_eq!(step.refused, Some(Refusal::NotOpen(ask("a"))));
+}
+
+#[test]
 fn the_operators_accept_with_a_password_keeps_the_prompt_up_while_it_is_tried() {
     let mut desk = Desk::new();
     prompting(&mut desk, "a", "x");

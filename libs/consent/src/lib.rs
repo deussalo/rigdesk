@@ -337,12 +337,15 @@ impl Desk {
             }
             Event::Dismiss { ask, agent_can_press } => {
                 let state = self.current(&ask)?;
-                if !state.prompt_may_show() {
+                // Before the login is in, the person at the device wins over a yes, theirs too: a phone's Accept, then
+                // Cancel on Android's Start now.
+                if !state.prompt_may_show() && !matches!(state, State::Allowed { .. }) {
                     return Err(Refusal::OutOfTurn(ask));
                 }
                 if agent_can_press {
                     return Err(Refusal::AgentCanPress(ask));
                 }
+                self.drop_login_if_under_way(&ask, &state, step);
                 self.set(now, &ask, State::Denied { by: By::Person }, step);
                 Ok(())
             }

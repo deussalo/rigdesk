@@ -12,12 +12,15 @@ import android.os.Build
  * What Rig Assistant takes from the app it sits in, and nothing more: the app's accessibility service when the person has turned it on
  * (RigDesk's Input control), for the key tool and for starting apps, which Rig Assistant works without; the RustDesk ID RigDesk
  * shows, which its hello names so Rig knows which RigDesk entry is this phone (empty while RigDesk has none); and whether the
- * person lets an agent assigned this phone in Rig join with no tap while sharing runs, which the hello says too.
+ * person lets an agent assigned this phone in Rig join with no tap while sharing runs, which the hello says too; and RigDesk's
+ * one-tap desk, which holds Rig's requests to use this phone.
  */
 object Host {
     @Volatile var input: AccessibilityService? = null
     @Volatile var rustdeskId: () -> String = { "" }
     @Volatile var assignedNoTap: () -> Boolean = { false }
+    /** One call to RigDesk's one-tap desk (base::one_tap): `{op, ...}` JSON in, what to draw and say as JSON out. */
+    @Volatile var oneTap: (String) -> String = { """{"refused": "RigDesk's one-tap desk is not here"}""" }
 }
 
 fun granted(ctx: Context, permission: String): Boolean =
