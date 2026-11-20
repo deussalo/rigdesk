@@ -82,7 +82,9 @@ $secrets = Join-Path $env:RUNNER_TEMP "stock-secrets"
 New-Item -ItemType Directory -Force $secrets | Out-Null
 [IO.File]::WriteAllText((Join-Path $secrets "password"), $password, $utf8)
 [IO.File]::WriteAllText((Join-Path $secrets "token"), $token, $utf8)
-$remote = Start-Process $Remote -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $out "remote.err.log") -RedirectStandardOutput (Join-Path $out "remote.out.log") `
+# PowerShell names are case-blind: $remote, the process, would replace the $Remote path.
+$bridgeExe = $Remote
+$remote = Start-Process $bridgeExe -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $out "remote.err.log") -RedirectStandardOutput (Join-Path $out "remote.out.log") `
   -ArgumentList @("--peer", "127.0.0.1", "--password-file", (Join-Path $secrets "password"), "--token-file", (Join-Path $secrets "token"),
                   "--port", "21120", "--journal", (Join-Path $out "actions.jsonl"))
 try {
@@ -97,7 +99,7 @@ try {
   # Rig's Accept: a login that actually succeeded before any agent is told it joined. A wrong saved password is refused in
   # the PC's own words, on a second bridge.
   [IO.File]::WriteAllText((Join-Path $secrets "wrong"), "not-$password", $utf8)
-  $wrong = Start-Process $Remote -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $out "wrong.err.log") -RedirectStandardOutput (Join-Path $out "wrong.out.log") `
+  $wrong = Start-Process $bridgeExe -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $out "wrong.err.log") -RedirectStandardOutput (Join-Path $out "wrong.out.log") `
     -ArgumentList @("--peer", "127.0.0.1", "--password-file", (Join-Path $secrets "wrong"), "--token-file", (Join-Path $secrets "token"), "--port", "21121")
   try {
     foreach ($i in 1..30) { try { $null = Invoke-RestMethod -Uri "http://127.0.0.1:21121/health" -Headers $auth; break } catch { Start-Sleep 1 } }
