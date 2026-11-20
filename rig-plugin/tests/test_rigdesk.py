@@ -1541,6 +1541,198 @@ def test_an_accept_with_no_login_and_no_prompt_on_the_device_says_why_and_joins_
     asyncio.run(run())
 
 
+class _Assistant:
+    """rig-assistant as rigdesk asks it: each request shown on a phone and each ended, refusing while the phone is down."""
+    def __init__(self, up: bool = True) -> None:
+        self.up, self.shown, self.ended = up, [], []
+
+    def offer(self) -> None:
+        from core.model import Refused
+        from core.provided import PROVIDED, provider
+        from rigdesk import prompts
+
+        async def shown(_host: object, asked: dict) -> str:
+            if not self.up:
+                raise Refused("rig-assistant.phone_down", "phone moto is not connected to Rig")
+            self.shown.append(asked)
+            return "shown"
+
+        async def ended(_host: object, asked: dict) -> str:
+            self.ended.append(asked["ask"])
+            return "ended"
+        host = SimpleNamespace(plugin_id="rig-assistant")
+        PROVIDED.offer({prompts.JOIN_REQUEST.name: (host, provider(prompts.JOIN_REQUEST, shown)),  # type: ignore[dict-item]
+                        prompts.JOIN_END.name: (host, provider(prompts.JOIN_END, ended))})  # type: ignore[dict-item]
+
+
+async def _one_tap_phone(desks: Desks, posted: list[tuple[str, dict]]):
+    """A phone named in Rig Assistant, whose bridge takes /offer on loopback."""
+    from rigdesk.desks import StockRemote
+    runner = await _offering_pc(desks, posted)
+    bridge = desks._pcs.pop("front")
+    stock = StockRemote(peer="moto-g57.tail1234.ts.net", assistant="moto")
+    return runner, desks._pcs.setdefault("moto-g57", PcLink("moto-g57", DeskPc(url=bridge.spec.url, token_file=bridge.spec.token_file, stock=stock)))
+
+
+def _one_tap_desks(state: str, asks: "_Asks", **more: object) -> Desks:
+    from rigdesk.desks import RigdeskSettings
+    host = SimpleNamespace(state_dir=Path(state), confirming=asks.confirming, confirm_answered=asks.confirm_answered,
+                           settings=lambda _model: RigdeskSettings(operator_name="Arian"), **more)
+    return Desks(host)  # type: ignore[arg-type]
+
+
+def _said(ask: str, nonce: str, said: str, phone: str = "moto", reason: str = "") -> dict:
+    return {"phone": phone, "ask": ask, "nonce": nonce, "said": said, "reason": reason}
+
+
+def test_a_phone_in_rig_assistant_is_asked_by_one_notification_and_its_accept_sends_the_bridge_an_offer_naming_the_ask() -> None:
+    from rigdesk import prompts
+    seat, posted, told = SeatId(GraphName("g"), NodeId("n")), [], []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks, assistant = _Asks("desk_1"), _Assistant()
+            assistant.offer()
+            desks = _one_tap_desks(state, asks)
+
+            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
+                told.append((held.agent, words, key))
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
+            desks.host.live = lambda _kind: desks  # type: ignore[attr-defined]
+            runner, link = await _one_tap_phone(desks, posted)
+            try:
+                prompts.start(desks, "moto-g57", "desk_1", seat, "a1", "g", "Builder")
+                await _until(lambda: assistant.shown)
+                shown = assistant.shown[0]
+                assert {key: shown[key] for key in ("phone", "ask", "agent_id", "agent_title", "graph", "operator", "lapse_s")} == {
+                    "phone": "moto", "ask": "desk_1", "agent_id": "a1", "agent_title": "Builder", "graph": "g", "operator": "Arian", "lapse_s": prompts.ONE_TAP_LAPSE_S}
+                nonce = shown["nonce"]
+                assert len(nonce) >= 16 and posted == [], "the bridge knocks only once the phone is ready"
+                assert await prompts.phone_said(desks.host, _said("desk_1", "f" * 32, "ready")) == "not waited for", "another nonce"  # type: ignore[arg-type]
+                assert await prompts.phone_said(desks.host, _said("desk_1", nonce, "ready", phone="other")) == "not waited for", "another phone"  # type: ignore[arg-type]
+                assert await prompts.phone_said(desks.host, _said("desk_2", nonce, "ready")) == "not waited for", "another ask"  # type: ignore[arg-type]
+                await asyncio.sleep(0.05)
+                assert posted == []
+                assert await prompts.phone_said(desks.host, _said("desk_1", nonce, "ready")) == "taken"  # type: ignore[arg-type]
+                await _until(lambda: posted)
+                path, body = posted[0]
+                assert path == "/offer" and body["ask"] == "desk_1" and body["nonce"] == nonce and body["accepted"] is True, body
+                await desks._event(link, {"type": "offer", "ask": "desk_1", "nonce": nonce, "answer": "allow"})
+                await _until(lambda: told and assistant.ended)
+            finally:
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            assert asks.answered == [(seat, "desk_1", "accept", "rigdesk:moto-g57")]
+            assert assistant.ended == ["desk_1"] and desks.prompts == {}
+            assert "person at moto-g57 allowed" in told[0][1], told
+
+    asyncio.run(run())
+
+
+def test_deny_or_a_failed_start_on_the_phone_answers_no_and_knocks_nothing_and_the_operators_answer_takes_the_notification_away() -> None:
+    from rigdesk import prompts
+    seat, posted = SeatId(GraphName("g"), NodeId("n")), []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks, assistant = _Asks("desk_1", "desk_2", "desk_3"), _Assistant()
+            assistant.offer()
+            desks = _one_tap_desks(state, asks)
+
+            async def tell(*_args: object, **_kw: object) -> bool:
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
+            desks.host.live = lambda _kind: desks  # type: ignore[attr-defined]
+            runner, _link = await _one_tap_phone(desks, posted)
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                prompts.start(desks, "moto-g57", "desk_1", seat, "a1", "g", "Builder")
+                await _until(lambda: len(assistant.shown) == 1)
+                await prompts.phone_said(desks.host, _said("desk_1", assistant.shown[0]["nonce"], "deny"))  # type: ignore[arg-type]
+                await _until(lambda: asks.answered and assistant.ended == ["desk_1"])
+                assert asks.answered == [(seat, "desk_1", "deny", "rigdesk:moto-g57")]
+
+                prompts.start(desks, "moto-g57", "desk_2", seat, "a1", "g", "Builder")
+                await _until(lambda: len(assistant.shown) == 2)
+                await prompts.phone_said(desks.host, _said("desk_2", assistant.shown[1]["nonce"], "failed", reason="the person cancelled Android's Start now"))  # type: ignore[arg-type]
+                await _until(lambda: assistant.ended == ["desk_1", "desk_2"] and "desk_2" not in desks.prompts)
+                assert len(asks.answered) == 1, "a failure is not the person's no"
+
+                prompts.start(desks, "moto-g57", "desk_3", seat, "a1", "g", "Builder")
+                await _until(lambda: len(assistant.shown) == 3)
+                asks.open.discard("desk_3")
+                await _until(lambda: assistant.ended == ["desk_1", "desk_2", "desk_3"])
+                assert await prompts.phone_said(desks.host, _said("desk_3", assistant.shown[2]["nonce"], "ready")) == "not waited for"  # type: ignore[arg-type]
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            assert posted == [], "nothing knocked"
+            assert len(asks.answered) == 1 and desks.prompts == {}
+
+    asyncio.run(run())
+
+
+def test_an_unanswered_notification_is_shown_again_and_after_its_last_lapse_the_operators_ask_is_withdrawn_and_the_agent_told() -> None:
+    from rigdesk import prompts
+    seat, posted, told, withdrawn = SeatId(GraphName("g"), NodeId("n")), [], [], []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks, assistant = _Asks("desk_1"), _Assistant()
+            assistant.offer()
+
+            async def route_ended(at: SeatId, provision: str, given: object) -> int:
+                withdrawn.append((at, provision, given))
+                return 1
+            desks = _one_tap_desks(state, asks, route_ended=route_ended)
+
+            async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
+                told.append((held.agent, words, key))
+                return True
+            desks._tell = tell  # type: ignore[method-assign]
+            runner, _link = await _one_tap_phone(desks, posted)
+            lapse, prompts.ONE_TAP_LAPSE_S = prompts.ONE_TAP_LAPSE_S, 1
+            then = {"pc": "moto-g57", "agent": "a1", "graph": "g", "kind": "join", "ask": "desk_1"}
+            try:
+                prompts.start(desks, "moto-g57", "desk_1", seat, "a1", "g", "Builder", then)
+                await _until(lambda: told, limit_s=10)
+            finally:
+                prompts.ONE_TAP_LAPSE_S = lapse
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            assert [shown["ask"] for shown in assistant.shown] == ["desk_1"] * prompts.SHOWS and assistant.ended == ["desk_1"] * prompts.SHOWS
+            assert withdrawn == [(seat, "rigdesk.request_confirmed", then)]
+            assert told == [("a1", told[0][1], "lapsed:desk_1")] and "lapsed" in told[0][1] and "withdrawn" in told[0][1], told
+            assert posted == [] and asks.answered == []
+
+    asyncio.run(run())
+
+
+def test_with_the_phones_link_down_the_bridges_knock_asks_the_person_as_before() -> None:
+    from rigdesk import prompts
+    seat, posted = SeatId(GraphName("g"), NodeId("n")), []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as state:
+            asks, assistant = _Asks("desk_1"), _Assistant(up=False)
+            assistant.offer()
+            desks = _one_tap_desks(state, asks)
+            runner, _link = await _one_tap_phone(desks, posted)
+            try:
+                prompts.start(desks, "moto-g57", "desk_1", seat, "a1", "g", "Builder")
+                await _until(lambda: posted)
+            finally:
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            path, body = posted[0]
+            assert path == "/offer" and "accepted" not in body, body
+            assert assistant.shown == [] and assistant.ended == []
 def test_a_stock_pcs_bridge_gets_rigs_pairing_key_in_its_environment_and_its_arguments_stay_as_they_were() -> None:
     from rigdesk.desks import PAIR_KEY, PAIR_KEY_ENV, SECRETS, StockRemote
 

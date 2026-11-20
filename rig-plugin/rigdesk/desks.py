@@ -134,6 +134,9 @@ class StockRemote(Shape):
     viewer_port: Annotated[int | None, Field(ge=1, le=65535, description="Where the bridge relays its session to RigDesk GUIs, on loopback (publish it with tailscale serve --tcp); unset, no GUI can attach.")] = None
     viewer_password_file: Annotated[str | None, Field(description="A file readable by this user alone holding the password GUIs log in to the bridge with.")] = None
     mcp_servers: Annotated[list[StockMcpServer], Field(description="MCP servers on the PC's own address that the bridge offers the holding agent.")] = []
+    assistant: Annotated[Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,47}$")] | None,
+                         Field(description="With peer, for a phone running RigDesk: its name in Rig Assistant (the rig-assistant plugin). desk/request's prompt then goes "
+                                           "there as one notification, even with RigDesk's screen sharing off: Accept starts sharing and lets the agent in with no second Allow.")] = None
 
     @model_validator(mode="after")
     def _viewer_whole(self) -> StockRemote:
@@ -141,6 +144,8 @@ class StockRemote(Shape):
             raise ValueError("a stock PC has a peer (direct IP over the tailnet) or an id (through the ID server), not both")
         if self.login_id is not None and self.peer is None:
             raise ValueError("login_id goes with peer; a PC reached through the ID server is named by id")
+        if self.assistant is not None and self.peer is None:
+            raise ValueError("assistant goes with peer: a phone's knock comes over the tailnet")
         if (self.viewer_port is None) != (self.viewer_password_file is None):
             raise ValueError("viewer_port and viewer_password_file go together")
         return self
@@ -199,6 +204,7 @@ class RigdeskSettings(Shape):
     health: Annotated[Thresholds, Field(description="Where a RigDesk PC's health figures warn or fault; the PC reports figures and Rig judges them.")] = Thresholds()
     connect_server: Annotated[ConnectServer | None, Field(description="Where desk/connect sends a bare RustDesk ID that is none of our PCs: an ID server's host and key. "
                                                                       "Unset, RustDesk's public server; an ID given as ID@host?key=<key> goes to that server instead.")] = None
+    operator_name: Annotated[str, Field(max_length=80, description="Who Rig's agents work for, as a phone's one-tap notification names them: \"Rig agent of <operator_name>\".")] = ""
 
     @model_validator(mode="after")
     def _ids_have_a_server(self) -> RigdeskSettings:
@@ -2033,6 +2039,14 @@ class Desks:
 
     def held_on(self, pc: str) -> Held | None:
         return self._sessions.get(pc)
+
+    def assistant_of(self, pc: str) -> str | None:
+        """The phone's name in Rig Assistant, when this device's prompt goes there as one tap."""
+        link = self._pcs.get(pc)
+        return None if link is None or link.spec.stock is None else link.spec.stock.assistant
+
+    async def operator_name(self) -> str:
+        return (await asyncio.to_thread(self.host.settings, RigdeskSettings)).operator_name
 
     def offer_at(self, pc: str) -> tuple[str, dict[str, str]]:
         link = self._link(pc)

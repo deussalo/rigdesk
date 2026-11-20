@@ -87,6 +87,10 @@
         </service>
 
         <receiver
+            android:name="dev.rig.assistant.JoinDeny"
+            android:exported="false" />
+
+        <receiver
             android:name="dev.rig.assistant.Configure"
             android:exported="true"
             android:permission="android.permission.WRITE_SECURE_SETTINGS" />

@@ -89,16 +89,24 @@ pub struct Offer {
     pub owner: Owner,
     pub ask: String,
     pub nonce: String,
+    /// The person already accepted this ask on Rig Assistant's notification: the knock names it, so the phone lets it in
+    /// with no second Allow.
+    pub accepted: bool,
 }
 
-/// The offer in an `/offer` body: `{agent, ask, nonce}`.
+/// The offer in an `/offer` body: `{agent, ask, nonce, accepted?}`.
 pub fn offer_request(body: &Value) -> Result<Offer, String> {
     let (owner, ask) = request(body)?;
     let nonce = body.get("nonce").and_then(Value::as_str).filter(|nonce| nonce.len() >= 16).ok_or("offer wants a nonce of 16 characters or more")?;
     if ask.is_empty() {
         return Err("offer wants the ask it is for".into());
     }
-    Ok(Offer { owner, ask, nonce: nonce.to_string() })
+    let accepted = match body.get("accepted") {
+        None => false,
+        Some(Value::Bool(accepted)) => *accepted,
+        Some(_) => return Err("offer's accepted is true or false".into()),
+    };
+    Ok(Offer { owner, ask, nonce: nonce.to_string(), accepted })
 }
 
 /// Why a `/join` was refused.
@@ -235,6 +243,17 @@ mod tests {
         assert_eq!(summary, "Helper (Rig agent) joined: your Allow");
         assert!(body.contains("Disconnect is in the tray: Disconnect Helper"), "{body}");
         assert!(!body.contains("Dismiss"));
+    }
+
+    #[test]
+    fn an_offer_says_whether_the_person_accepted_its_ask_already() {
+        let body = serde_json::json!({"agent": {"id": "a1", "title": "Helper", "graph": "g"}, "ask": "desk_1", "nonce": "0123456789abcdef"});
+        assert!(!offer_request(&body).unwrap().accepted);
+        let mut accepted = body.clone();
+        accepted["accepted"] = true.into();
+        assert!(offer_request(&accepted).unwrap().accepted);
+        accepted["accepted"] = "yes".into();
+        assert!(offer_request(&accepted).is_err());
     }
 
     #[test]

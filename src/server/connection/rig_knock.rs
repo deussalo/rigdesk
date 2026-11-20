@@ -1,7 +1,7 @@
 use super::{sleep, Config, Connection, FailureScope, SEND_TIMEOUT_VIDEO};
 use base::{
     message_proto::{LoginRequest, Message},
-    rig_knock,
+    one_tap, rig_knock,
 };
 use hbb_common::password_security::{approve_mode, ApproveMode};
 use std::time::Duration;
@@ -14,8 +14,9 @@ impl Connection {
     }
 
     /// RigDesk Android: a passwordless login calling itself Rig. Proved with Rig's paired key it asks the person at the
-    /// phone, who alone can let it in; anything else is refused before the person sees it. The nonce goes with the first
-    /// try, so the proof works once.
+    /// phone, who alone can let it in, unless it names an ask they already accepted on Rig Assistant's notification
+    /// (`one_tap`); anything else is refused before the person sees it. The nonce goes with the first try, so the proof
+    /// works once.
     pub(super) async fn rig_knock_login(&mut self, lr: LoginRequest) -> bool {
         rig_knock::left(self.inner.id);
         let nonce = std::mem::take(&mut self.hash.rig_knock_nonce);
@@ -64,11 +65,34 @@ impl Connection {
             }
         };
         self.update_failure_with_scope(failure, true, 0, FailureScope::Default);
+        if let Some(ask) = proved.ask.clone() {
+            if one_tap::admit(self.inner.id, &ask, &proved.agent_id) {
+                return self.rig_knock_accepted(&ask, proved).await;
+            }
+            hbb_common::log::info!("Rig agent {} knocked for {ask}, which no Accept here stands for: the person is asked", proved.agent_id);
+        }
         hbb_common::log::info!("Rig agent {} asks to join", proved.agent_id);
         rig_knock::mark_proved(self.inner.id);
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         self.try_start_cm(rig_knock::PEER_ID.to_owned(), proved.name, false);
         self.send_login_error(crate::client::LOGIN_MSG_NO_PASSWORD_ACCESS).await;
+        true
+    }
+
+    /// The person's Accept on Rig Assistant's notification was their yes for this ask: the knock is let in with no
+    /// second Allow, as an invite is, and never around a 2FA requirement.
+    async fn rig_knock_accepted(&mut self, ask: &str, proved: rig_knock::Proved) -> bool {
+        hbb_common::log::info!("Rig agent {} joins on the person's Accept for {ask}", proved.agent_id);
+        rig_knock::mark_proved(self.inner.id);
+        self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
+        let kept = self.send_logon_response_and_keep_alive().await;
+        if !self.authorized {
+            one_tap::failed(self.inner.id);
+        }
+        if !kept {
+            return false;
+        }
+        self.try_start_cm(rig_knock::PEER_ID.to_owned(), proved.name, self.authorized);
         true
     }
 

@@ -3201,6 +3201,56 @@ pub mod server_side {
         jboolean::from(base::rig_knock::proved(conn_id))
     }
 
+    /// RigDesk: the person tapped Accept on Rig Assistant's notification for this request (base::one_tap). Answers empty
+    /// when it was taken, else why not. It counts for nothing while anyone controls this phone, since they could have tapped it.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_rigOneTapAccept(
+        env: JNIEnv,
+        _class: JClass,
+        ask: JString,
+        agent_id: JString,
+        agent_title: JString,
+        graph: JString,
+        operator: JString,
+        lapse_ms: jni::sys::jlong,
+    ) -> jstring {
+        let mut env = env;
+        let mut text = |s: &JString| env.get_string(s).map(String::from).unwrap_or_default();
+        let accepted = base::one_tap::Accepted {
+            ask: text(&ask),
+            agent_id: text(&agent_id),
+            agent_title: text(&agent_title),
+            graph: text(&graph),
+            operator: text(&operator),
+            lapse_ms: lapse_ms.max(0) as u64,
+        };
+        let controlled = crate::server::AUTHED_CONNS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|conn| conn.conn_type == crate::server::AuthConnType::Remote);
+        let said = match base::one_tap::accept(&accepted, controlled) {
+            Ok(()) => String::new(),
+            Err(refused) => refused.words(),
+        };
+        env.new_string(said).unwrap_or_default().into_raw()
+    }
+
+    /// RigDesk: Rig took this request back, or it was answered another way: an Accept not yet used is gone.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_rigOneTapWithdraw(env: JNIEnv, _class: JClass, ask: JString) {
+        let mut env = env;
+        if let Ok(ask) = env.get_string(&ask) {
+            base::one_tap::withdraw(&String::from(ask));
+        }
+    }
+
+    /// RigDesk: whether this phone listens for Rig's knock now (its direct server is up).
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_rigListening(_env: JNIEnv, _class: JClass) -> jboolean {
+        jboolean::from(crate::rendezvous_mediator::is_direct_listening())
+    }
+
     /// RigDesk: keeps Rig's public key, which invites made here must be redeemed with.
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_invitePairKey(env: JNIEnv, _class: JClass, key: JString) -> jboolean {

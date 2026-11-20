@@ -89,6 +89,19 @@
             android:excludeFromRecents="true"
             android:theme="@style/Transparent" />
 
+        <!-- RigDesk one tap: Accept on Rig Assistant's notification (dev.rig.assistant.Join) opens it, from this app alone. -->
+        <activity
+            android:name=".OneTapActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity="com.carriez.flutter_hbb.onetap"
+            android:theme="@style/Transparent">
+            <intent-filter>
+                <action android:name="dev.rig.assistant.ONE_TAP" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".MainService"
             android:enabled="true"

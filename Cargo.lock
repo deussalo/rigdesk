@@ -663,6 +663,7 @@ dependencies = [
  "osascript",
  "protobuf",
  "protobuf-codegen",
+ "rigdesk-consent",
  "serde 1.0.228",
  "serde_derive",
  "serde_json 1.0.118",

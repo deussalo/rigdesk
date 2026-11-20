@@ -41,6 +41,9 @@ your choosing for the local API in another (`POST /x/rigdesk/token` keeps one), 
                        "stock": {"peer": "front.<tailnet>.ts.net",
                                  "password_file": "~/.rig/rigdesk/front.password"}}}}
 
+A phone running RigDesk with Rig Assistant set up adds `"assistant": "<phone name>"` to `stock`, so `desk/request`
+asks it in one tap (see `desk/request`).
+
 Each stock PC needs its own loopback port. Rig starts `rigdesk-bridge` with the plugin, restarts it if it exits, and
 writes its output to `bridge-<pc>.log` in the plugin's state directory. It connects to the PC when the agent first
 acts and leaves after ten idle minutes, so the PC shows a RustDesk session only while the agent works.
@@ -188,6 +191,15 @@ Known limits against a RigDesk PC:
   and only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
   RigDesk on Android takes passwords only, so it shows Allow only for a knock signed with Rig's pairing key over that connection's
   greeting and Rig's address, which the bridge makes with the key file named by `RIGDESK_PAIR_KEY_FILE`, read at each knock. A phone not paired refuses the knock, and the operator answers in Rig.
+  **One tap on a phone.** A phone whose stock entry names `assistant` (its name in Rig Assistant, with `peer`) is asked
+  by Rig Assistant instead: one notification, "<agent> — Rig agent of <operator_name>" (`operator_name` in the plugin's
+  settings), with **Accept** and **Deny**, even while RigDesk's service is off. Accept turns on Input the first time only,
+  then Android's own **Start now** for screen sharing, starts RigDesk's service, and once it listens tells Rig ready; Rig
+  then sends the bridge `POST /offer` marked `accepted`, whose knock the phone admits with no second Allow, because its
+  signed knock names the very ask the person accepted. Deny answers no; a cancelled Start now refuses the request with
+  why. The notification goes when the request ends either way, the operator's answer included. Unanswered, it lapses
+  after 3 minutes and is shown again, three times in all; after the last, the operator's ask is withdrawn and the agent
+  told. With the phone's link to Rig down, the bridge's knock asks as above.
   A login there calling itself Rig with no proof is refused; with the right password it is an ordinary session, listed as "Remote session".
   Known limits:
   * a stock PC whose RustDesk approves by password only shows no Accept, so only the operator can answer;

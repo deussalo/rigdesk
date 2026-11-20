@@ -70,6 +70,15 @@ object Link {
     fun event(kind: String, text: String, image: JSONObject?) {
         val event = JSONObject().put("type", "event").put("kind", kind).put("text", text).put("at_ms", System.currentTimeMillis())
         if (image != null) event.put("image", image)
+        queue(event)
+    }
+
+    /** What the phone says of a Rig agent's request to use it (Join): ready, deny, or failed with why. Kept and resent as an event is. */
+    fun join(ask: String, nonce: String, said: String, reason: String) {
+        queue(JSONObject().put("type", "join").put("ask", ask).put("nonce", nonce).put("said", said).put("reason", reason))
+    }
+
+    private fun queue(event: JSONObject) {
         synchronized(this) {
             event.put("seq", ++seq)
             unacked.add(event)
@@ -174,6 +183,8 @@ object Link {
             }
             "welcome" -> resident = frame.optString("resident", "")
             "say" -> tools.tellQuietly(frame.optString("text"))
+            "join_request" -> Join.requested(ctx, frame)
+            "join_end" -> Join.ended(ctx, frame.optString("ask"))
             else -> Log.w(TAG, "unknown frame $frame")
         }
     }

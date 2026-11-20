@@ -1257,7 +1257,10 @@ impl Connection {
         crate::agent::viewer::leave(id);
         base::invite::left(id);
         #[cfg(target_os = "android")]
-        base::rig_knock::left(id);
+        {
+            base::rig_knock::left(id);
+            base::one_tap::left(id);
+        }
         conn.on_close("End", true).await;
         log::info!("#{} connection loop exited", id);
     }
