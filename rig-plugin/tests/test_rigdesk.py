@@ -1355,6 +1355,155 @@ def test_a_stock_pc_is_asked_through_its_bridge_and_its_allow_answers_the_ask_wi
     asyncio.run(run())
 
 
+class _StockBridge:
+    """A stock PC's rigdesk-bridge on loopback: its prompt routes, its login on the operator's Accept (which logs in once the person allowed, or
+    with a good saved password), and mint and claim."""
+    def __init__(self, password: str | None) -> None:
+        self.password, self.allowed, self.posted = password, False, []
+
+    async def took(self, request) -> object:
+        from aiohttp import web
+        body = await request.json() if request.can_read_body else {}
+        self.posted.append((request.path, body))
+        if request.path == "/login":
+            if self.allowed or self.password == "good":
+                return web.json_response({"logged_in": True})
+            if self.password is None:
+                return web.json_response({"logged_in": False, "code": "no_password", "error": "Rig keeps no password for this PC"}, status=409)
+            return web.json_response({"logged_in": False, "code": "login_failed", "error": "login refused by the PC: Wrong Password"}, status=409)
+        if request.path == "/viewer/mint":
+            return web.json_response({"grant": GRANT, "secret": SECRET})
+        if request.path == "/claim":
+            return web.json_response({"session": "s", "standing": {"holder": "agent"}})
+        return web.json_response({"shown": True} if request.path == "/offer" else {"ended": True})
+
+    def paths(self) -> list[str]:
+        return [path for path, _ in self.posted]
+
+
+async def _stock_desks(state: str, bridge: _StockBridge, asks: "_Asks", told: list) -> tuple[Desks, object]:
+    from aiohttp import ClientSession, web
+    from rigdesk.desks import RigdeskSettings, StockRemote
+    app = web.Application()
+    for path in ("/offer", "/offer/end", "/login", "/viewer/mint", "/claim"):
+        app.router.add_post(path, bridge.took)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    token = Path(state) / "token"
+    token.write_text("rig-bearer")
+    stock = (StockRemote(peer="phone.tail1234.ts.net") if bridge.password is None else
+             StockRemote(peer="phone.tail1234.ts.net", password_file=str(Path(state) / "phone.password")))
+    spec = DeskPc(url=f"http://127.0.0.1:{runner.addresses[0][1]}", token_file=str(token), stock=stock)
+    settings = RigdeskSettings(pcs={"phone": spec})
+    roster = SimpleNamespace(identity=lambda seat: _now(SimpleNamespace(agent="a1", label="Builder")), closed=lambda seats: _now(set()))
+    host = SimpleNamespace(state_dir=Path(state), docs=_Docs(), settings=lambda _shape: settings, report=lambda *_: None, forget=lambda *_: None,
+                           confirming=asks.confirming, confirm_answered=asks.confirm_answered, roster=roster)
+    desks = Desks(host)  # type: ignore[arg-type]
+    host.live = lambda _kind: desks
+    desks._pcs["phone"] = PcLink("phone", spec)
+    desks._resync = lambda *_: None  # type: ignore[method-assign]
+    desks._http = ClientSession()
+
+    async def tell(held: Held, words: str, key: str, timing: str = "steer") -> bool:
+        told.append((held.agent, words))
+        return True
+    desks._tell = tell  # type: ignore[method-assign]
+    return desks, runner
+
+
+async def _now(value: object) -> object:
+    return value
+
+
+def _accepted(ask: str) -> dict:
+    return {"given": {"pc": "phone", "agent": "a1", "graph": "g", "kind": "join", "ask": ask}, "graph": "g", "node": "n", "choice": "accept"}
+
+
+def test_rigs_accept_on_a_stock_pc_keeps_the_devices_prompt_up_until_a_login_succeeds_and_says_joined_only_then() -> None:
+    from rigdesk import _request_confirmed, prompts
+    seat = SeatId(GraphName("g"), NodeId("n"))
+
+    async def accepted_then(password: str | None, device: str) -> tuple[str, _StockBridge, Desks, list]:
+        """The operator accepts while the device's prompt is up; the person there then answers device ("allow", "deny" or "" for nothing)."""
+        told: list = []
+        with tempfile.TemporaryDirectory() as state:
+            asks, bridge = _Asks("desk_1"), _StockBridge(password)
+            desks, runner = await _stock_desks(state, bridge, asks, told)
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                prompts.start(desks, "phone", "desk_1", seat, "a1", "g", "Builder")
+                await _until(lambda: "/offer" in bridge.paths())
+                asks.open.discard("desk_1")
+                said = await _request_confirmed(desks.host, _accepted("desk_1"))  # type: ignore[arg-type]
+                await asyncio.sleep(0.1)
+                if device:
+                    assert "/offer/end" not in bridge.paths() and "desk_1" in desks.prompts, "the device's prompt went away before any login succeeded"
+                    assert desks.held_on("phone") is None, "the agent holds the PC before any login succeeded"
+                    bridge.allowed = device == "allow"
+                    nonce = next(body["nonce"] for path, body in bridge.posted if path == "/offer")
+                    await desks._event(desks._pcs["phone"], {"type": "offer", "ask": "desk_1", "nonce": nonce, "answer": device})
+                    await _until(lambda: told)
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+            return said, bridge, desks, told
+
+    async def run() -> None:
+        said, bridge, desks, told = await accepted_then("good", "")
+        assert said.startswith("You joined phone"), said
+        assert bridge.paths()[1:] == ["/login", "/viewer/mint", "/claim", "/offer/end"], bridge.paths()
+        assert desks.held_on("phone") is not None and told == [], told
+
+        said, bridge, desks, told = await accepted_then("stale", "allow")
+        assert "you have not joined phone: Rig's saved password for phone did not log in: login refused by the PC: Wrong Password" in said, said
+        assert "must Allow your request on the device" in said and "joined phone" not in said.replace("not joined phone", ""), said
+        assert bridge.paths().count("/login") == 2 and "/claim" in bridge.paths(), bridge.paths()
+        assert len(told) == 1 and "allowed you on the device, so you joined phone over the connection they allowed, with no password" in told[0][1], told
+        assert desks.held_on("phone") is not None
+
+        said, bridge, desks, told = await accepted_then(None, "deny")
+        assert "you have not joined phone: Rig keeps no password for phone" in said, said
+        assert len(told) == 1 and "dismissed your request on the device, so you did not join phone" in told[0][1], told
+        assert "/claim" not in bridge.paths() and desks.held_on("phone") is None
+
+    asyncio.run(run())
+
+
+def test_an_accept_with_no_login_and_no_prompt_on_the_device_says_why_and_joins_nothing() -> None:
+    from rigdesk import _request_confirmed
+    from core.sdk.model import Refused
+
+    async def run() -> None:
+        told: list = []
+        with tempfile.TemporaryDirectory() as state:
+            bridge = _StockBridge(None)
+            desks, runner = await _stock_desks(state, bridge, _Asks(), told)
+            try:
+                desks._pcs["phone"].prompt = False
+                assert desks.device_unasked("phone") == "its rigdesk-bridge predates showing requests on the device (/offer)"
+                assert desks.pcs()[0]["device_unasked"] == desks.device_unasked("phone")
+                desks.unshown["phone"] = str(desks.device_unasked("phone"))
+                try:
+                    await _request_confirmed(desks.host, _accepted("desk_1"))  # type: ignore[arg-type]
+                except Refused as refused:
+                    words = str(refused)
+                else:
+                    raise AssertionError("an Accept with no login and nobody asked on the device said it joined")
+                desks._pcs["phone"].prompt = True
+                assert desks.device_unasked("phone") is None
+            finally:
+                await desks._http.close()
+                await runner.cleanup()
+        assert "Rig keeps no password for phone, and the person at phone is not asked on the device: its rigdesk-bridge predates" in words, words
+        assert "/claim" not in bridge.paths() and desks.held_on("phone") is None and told == []
+
+    asyncio.run(run())
+
+
 def test_a_stock_pcs_bridge_gets_rigs_pairing_key_in_its_environment_and_its_arguments_stay_as_they_were() -> None:
     from rigdesk.desks import PAIR_KEY, PAIR_KEY_ENV, SECRETS, StockRemote
 

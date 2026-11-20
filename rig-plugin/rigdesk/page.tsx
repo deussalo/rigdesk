@@ -59,6 +59,7 @@ type PcRow = {
   readonly health?: PcHealth | null | undefined
   readonly adhoc?: { readonly id: string; readonly via: string } | null | undefined
   readonly password_file?: string | null | undefined
+  readonly device_unasked?: string | null | undefined
 }
 type Listener = {
   readonly role: 'hbbs' | 'hbbr'
@@ -491,6 +492,7 @@ function Pc({ pc, now, forFleet }: { readonly pc: PcRow; readonly now: number; r
     ...(held === null ? [] : [['agent', held] as const]),
   ]
   const problems = [...(pc.state === 'down' && pc.why !== null ? [pc.why] : []), ...(health?.why == null ? [] : [health.why]),
+    ...(pc.device_unasked == null ? [] : [`An agent's desk/request is not shown on the device, as ${pc.device_unasked}, so only Rig's saved password lets Accept join it: install a current rigdesk-bridge`]),
     ...(health?.failing ?? []).filter(check => check.state === 'fault').map(check => check.words)]
   return (
     <BoardRow label={pc.name} open={open} onOpen={setOpen} mark={<Mark kind="status" shape="square" label={standing} ink={ink} fill={pc.state === 'up' && standing !== 'blocked' ? 'solid' : 'open'} />}

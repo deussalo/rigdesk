@@ -163,7 +163,13 @@ Known limits against a RigDesk PC:
   accept prompt, where Rig is new enough to have plugins answer their own asks (`PluginHost.confirm_answered`). Its
   Accept answers the request as the operator's Accept (Join once) would, and its Dismiss as Deny; the agent is told the
   person at the PC answered. The first answer wins: when the operator answers first, the prompt is taken off the PC
-  within 2 s, and an answer either side gives later changes nothing. A prompt the PC lets lapse (after 3 minutes) is shown again, three
+  within 6 s, and an answer either side gives later changes nothing. On a stock PC, the operator's Accept takes the prompt
+  away only once a RustDesk login has actually succeeded: Rig asks the bridge for one (`POST /login`), which tries the
+  saved password once and does not dial it again on its own when the PC refuses it. If the PC refuses it, or no password
+  is kept, the prompt stays up and the agent is told the operator accepted but it has not joined, so the person at the PC
+  must Allow it there; their Allow then joins it over that connection, and their Dismiss, or a prompt that lapses, is told
+  to it too. The agent is told it joined only after a login has succeeded. A stock PC whose rigdesk-bridge is too old to
+  show requests (its `/health` has no `prompt: true`) is said in the operator's ask and on its row on the RigDesk page. A prompt the PC lets lapse (after 3 minutes) is shown again, three
   times in all. Either PC is sent `POST /offer {agent, ask, nonce}` over Rig's bearer; `POST /offer/end {ask}` takes
   the prompt away. A RigDesk PC shows the agent in its connection manager. A stock PC's rigdesk-bridge (a phone among
   them, as a notification with Allow) logs in to it with no password, so the PC shows RustDesk's own prompt, and on

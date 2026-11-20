@@ -1,7 +1,8 @@
 # Stock-PC smoke test (plan S9): unmodified RustDesk runs --server on the runner with direct IP access and a permanent
 # password, as an operator would set up a client's PC; rigdesk-bridge logs in to it over 127.0.0.1 and serves the agent
-# API. Checks a screenshot, a click and typing into Notepad, the clipboard both ways, the shell, a takeover by someone at
-# the PC, hand-back, Block, and the action log.
+# API. Checks the login Rig's Accept asks for (a wrong saved password refused in the PC's words, the right one logged in),
+# a screenshot, a click and typing into Notepad, the clipboard both ways, the shell, a takeover by someone at the PC,
+# hand-back, Block, and the action log.
 param([Parameter(Mandatory = $true)][string]$Version, [string]$Remote = ".\target\release\rigdesk-bridge.exe")
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -27,7 +28,7 @@ $auth = @{ Authorization = "Bearer $token" }
 
 function Fail($why) {
   Write-Host "::error::stock $Version smoke: $why"
-  foreach ($f in @("remote.err.log", "remote.out.log")) {
+  foreach ($f in @("remote.err.log", "remote.out.log", "wrong.err.log")) {
     $p = Join-Path $out $f
     if (Test-Path $p) { Write-Host "--- $f"; Get-Content $p -Tail 80 | ForEach-Object { Write-Host $_ } }
   }
@@ -91,6 +92,24 @@ try {
   }
   if (-not $up) { Fail "rigdesk-bridge did not answer on $base within 30 s" }
   Write-Host "health: $($health | ConvertTo-Json -Compress)"
+  if ($health.prompt -ne $true) { Fail "/health does not say this bridge shows an agent's request on the PC: $($health | ConvertTo-Json -Compress)" }
+
+  # Rig's Accept: a login that actually succeeded before any agent is told it joined. A wrong saved password is refused in
+  # the PC's own words, on a second bridge.
+  [IO.File]::WriteAllText((Join-Path $secrets "wrong"), "not-$password", $utf8)
+  $wrong = Start-Process $Remote -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $out "wrong.err.log") -RedirectStandardOutput (Join-Path $out "wrong.out.log") `
+    -ArgumentList @("--peer", "127.0.0.1", "--password-file", (Join-Path $secrets "wrong"), "--token-file", (Join-Path $secrets "token"), "--port", "21121")
+  try {
+    foreach ($i in 1..30) { try { $null = Invoke-RestMethod -Uri "http://127.0.0.1:21121/health" -Headers $auth; break } catch { Start-Sleep 1 } }
+    $refused = $null
+    try {
+      $null = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:21121/login" -Headers $auth -ContentType "application/json" -Body "{}"
+    } catch { $refused = $_.ErrorDetails.Message | ConvertFrom-Json }
+    if ($null -eq $refused -or $refused.code -ne "login_failed" -or $refused.error -notmatch "Wrong Password") { Fail "a wrong saved password was not refused in the PC's words: $($refused | ConvertTo-Json -Compress)" }
+    Write-Host "wrong password: $($refused.error)"
+  } finally { Stop-Process -Id $wrong.Id -Force -ErrorAction SilentlyContinue }
+  $login = Post "/login" @{}
+  if ($login.logged_in -ne $true) { Fail "Rig's Accept did not log in with the saved password: $($login | ConvertTo-Json -Compress)" }
 
   $minted = Post "/viewer/mint" @{}
   $claim = Post "/claim" @{ grant = $minted.grant; secret = $minted.secret; agent = @{ id = "smoke"; title = "Smoke"; graph = "ci" } }

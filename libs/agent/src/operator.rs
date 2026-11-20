@@ -29,6 +29,43 @@ pub trait Switch: Send + Sync {
     fn offer_end(&self, _ask: &str) -> bool {
         false
     }
+
+    /// Whether `offer` shows the person at the PC a prompt, as `/health` says it.
+    fn offers(&self) -> bool {
+        false
+    }
+
+    /// A RustDesk login to the PC that has actually succeeded, made now unless one is up, for a host that logs in to the PC
+    /// rather than being it: Rig asks for it on the operator's Accept, before the agent is told it joined. It blocks while
+    /// it dials.
+    fn log_in(&self) -> Result<(), NoLogin> {
+        Err(NoLogin::Failed("this host is the PC itself, so there is no login to make".into()))
+    }
+}
+
+/// Why no RustDesk login to the PC stands (`Switch::log_in`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoLogin {
+    /// Rig keeps no password for the PC and the person there has allowed no connection.
+    NoPassword,
+    /// The PC refused the saved password, or did not answer, in its own words.
+    Failed(String),
+}
+
+impl NoLogin {
+    pub fn code(&self) -> &'static str {
+        match self {
+            NoLogin::NoPassword => "no_password",
+            NoLogin::Failed(_) => "login_failed",
+        }
+    }
+
+    pub fn words(&self) -> String {
+        match self {
+            NoLogin::NoPassword => "Rig keeps no password for this PC".into(),
+            NoLogin::Failed(why) => why.clone(),
+        }
+    }
 }
 
 /// An agent's request shown at the PC: `nonce` is Rig's, carried back with the answer, so only Rig's own ask is settled by it.

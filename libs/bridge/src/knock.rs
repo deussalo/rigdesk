@@ -25,7 +25,7 @@ use hbb_common::{
     tcp::FramedStream,
     tokio::{self, runtime::Handle, task::AbortHandle},
 };
-use rigdesk_agent::operator::{Closed, Offer, Switch};
+use rigdesk_agent::operator::{Closed, NoLogin, Offer, Switch};
 use rigdesk_agent::{EventKind, Shared};
 
 use crate::link::Link;
@@ -38,6 +38,8 @@ const CLOSED_BY_PERSON: &str = "Closed manually by the peer";
 const READ_TIMEOUT_MS: u64 = 30_000;
 /// An allowed connection no agent has claimed by then is hung up: Rig settled the ask another way, or never claimed it.
 const UNCLAIMED: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long Rig's Accept waits for the login it asks for.
+const LOGIN_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Debug, PartialEq)]
 pub enum Answer {
@@ -166,6 +168,14 @@ impl Switch for Knocker {
             }
         };
         hang_up_unclaimed(&self.link, &self.shared, &self.allowed, ask) || ended
+    }
+
+    fn offers(&self) -> bool {
+        true
+    }
+
+    fn log_in(&self) -> Result<(), NoLogin> {
+        self.link.log_in(LOGIN_WAIT)
     }
 }
 
