@@ -498,6 +498,11 @@ async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:
                 said = prompts.waiting(desks, device, given["pc"], str(unlogged))
                 kept = True
                 return said
+            except DeskRefused:
+                mine = desks.held_by(given["agent"], given["graph"])
+                if mine is None or mine.pc != given["pc"] or device is None:
+                    raise
+                held = mine  # the person's Allow on the device joined it while Rig logged in
             return f"You joined {held.pc}: its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there."
         changed = await desks.assign(given["pc"], f"agent:{given['agent']}")
     except DeskRefused as refused:

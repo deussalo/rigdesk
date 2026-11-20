@@ -54,6 +54,7 @@ def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str,
     """Shows the agent's request on the PC too, where Rig can take the PC's answer for the operator's (a Rig with PluginHost.confirm_answered)."""
     if not hasattr(desks.host, "confirm_answered") or desks.held_on(pc) is not None:
         return
+    desks.unshown.pop(pc, None)
     prompt = desks.prompts[ask] = Prompt(pc, ask, seat, agent, graph, title)
     prompt.task = TASKS.spawn(f"rigdesk-prompt-{ask}", _prompting(desks, prompt))
 
@@ -208,6 +209,9 @@ async def _answered_after_accept(desks: Desks, prompt: Prompt, said: str) -> Non
         try:
             await desks.join_approved(pc, prompt.agent, prompt.graph, prompt.seat.node, prompt.title, prompt.ask)
         except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
+            mine = desks.held_by(prompt.agent, prompt.graph)
+            if mine is not None and mine.pc == pc:
+                return  # the operator's Accept logged in meanwhile, and said so
             words = f"RigDesk: the person at {pc} allowed you on the device, but you did not join {pc}: {failed}. desk/request asks again."
         else:
             words = (f"RigDesk: the person at {pc} allowed you on the device, so you joined {pc} over the connection they allowed, with no password. "
