@@ -39,6 +39,10 @@ impl Switch for PcSwitch {
     fn offer_end(&self, ask: &str) -> bool {
         super::offer::end(ask)
     }
+
+    fn offers(&self) -> bool {
+        true
+    }
 }
 
 /// For the tray: who holds a session the operator started, as `session_line` writes it; empty when nobody does.

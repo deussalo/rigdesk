@@ -88,6 +88,7 @@ type Grantee = Annotated[str, StringConstraints(pattern=r"^(agent|graph):[A-Za-z
 type ShellLevel = Literal["user", "system"]
 GRANTS_DOC = "grants"
 SAMPLES_LIMIT_S = 30.0
+LOGIN_LIMIT_S = 30.0  # the bridge waits 20 s on the PC's login
 SHELL_LOG_READ = 2000
 SHELL_LOG_SHOWN = 25
 
@@ -226,6 +227,19 @@ class DeskRefused(Exception):
     """A call that cannot go through, with the words the agent reads."""
 
 
+class NotLoggedIn(DeskRefused):
+    """The operator's Accept found no RustDesk login to a stock PC: Rig keeps no password for it ("none"), or the PC refused the saved one ("refused").
+    The person there can still let the agent in by Allow on the device."""
+
+    def __init__(self, words: str, password: Literal["refused", "none"]) -> None:
+        super().__init__(words)
+        self.password: Literal["refused", "none"] = password
+
+
+class DeniedByPerson(DeskRefused):
+    """The person at the PC dismissed the request on the device while the operator's Accept was logging in: their no wins, and the login is not used."""
+
+
 class RedirectRefused(DeskRefused, aiohttp.ClientError):
     """A PC or bridge answered a request carrying its token with a redirect. A ClientError too, so every caller that handles an unreachable PC handles it."""
 
@@ -306,6 +320,9 @@ class PcLink:
     lane: asyncio.Task[None] | None = None
     # The PC's switch for sessions the operator starts from Rig, as it last said: {open, code, words}; None for a RigDesk without /join, or a stock PC.
     join: dict[str, Any] | None = None
+    # Whether the PC shows an agent's desk/request in its own prompt and its bridge logs in on the operator's Accept, as /health last said; None until it
+    # answers. False from a stock PC's rigdesk-bridge older than both.
+    prompt: bool | None = None
     sampling: asyncio.Lock = field(default_factory=asyncio.Lock)
     samples_why: str | None = None
     # The newest password asked for and not yet saved, and the one task saving it, which takes any that arrive meanwhile, so saves at once start one bridge.
@@ -510,6 +527,8 @@ class Desks:
         self._ended_why: dict[tuple[str, str], str] = {}
         self.prompts: dict[str, prompts.Prompt] = {}
         self.person_answered: set[str] = set()
+        # Why the PC's own prompt for the last request on it could not be shown, by PC, for the operator's Accept that then finds no login.
+        self.unshown: dict[str, str] = {}
         self._read_state()
 
     # --- state kept across restarts ---
@@ -992,6 +1011,7 @@ class Desks:
         if link.spec.lane_token_file is None:
             link.shell = _object(health["shell"]) if isinstance(health.get("shell"), dict) else None
         link.join = _object(health["join"]) if isinstance(health.get("join"), dict) else None
+        link.prompt = health.get("prompt") is True
         down = health.get("down")
         boot = str(health.get("boot", ""))
         if boot != self._boots.get(link.name):
@@ -1607,7 +1627,8 @@ class Desks:
         await self._ended(held, f"RigDesk {held.pc}: the operator took away your standing access to {held.pc}, so your session there ended. "
                                 "desk/request(pc, why) asks them again.")
 
-    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "", via: Literal["link", "assigned"] = "link") -> Held:
+    async def join_approved(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str = "", via: Literal["link", "assigned"] = "link",
+                            denied: Callable[[], int | None] = lambda: None) -> Held:
         """The operator accepted this agent's request to join a PC: on a stock PC a share link is minted and claimed for it, as the human would;
         a RigDesk PC is asked for the session itself."""
         mine = self.held_by(agent, graph)
@@ -1620,8 +1641,35 @@ class Desks:
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via)
         self.person_answered.discard(ask)
+        await self.log_in(pc)
+        denied_ms = denied()
+        if denied_ms is not None:
+            raise DeniedByPerson(f"denied by the person at {pc} at {_clock(denied_ms)}: they dismissed the request on the device before Rig's login succeeded")
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title)
+
+    async def log_in(self, pc: str) -> None:
+        """A RustDesk login to a stock PC that has actually succeeded, before its agent is told it joined: on the connection the person there allowed,
+        or with the saved password, which the bridge tries this once."""
+        link = self._link(pc)
+        async with self._client().post(f"{link.spec.url}/login", headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=LOGIN_LIMIT_S)) as answer:
+            said = _object(await answer.json(content_type=None)) if answer.content_type == "application/json" else {}
+            status = answer.status
+        if status == 200 and said.get("logged_in") is True:
+            return
+        if status == 404 and said.get("code") is None:
+            raise DeskRefused(f"{pc}'s rigdesk-bridge is older than logging in on the operator's Accept, so whether it can log in is not known; "
+                              "the operator installs a current rigdesk-bridge")
+        if said.get("code") == "no_password":
+            raise NotLoggedIn(f"Rig keeps no password for {pc}", "none")
+        raise NotLoggedIn(f"Rig's saved password for {pc} did not log in: {said.get('error') or f'HTTP {status}'}", "refused")
+
+    def device_unasked(self, pc: str) -> str | None:
+        """Why the person at a stock PC is not asked on the device for an agent's desk/request; None when they are, or for a RigDesk PC."""
+        link = self._pcs.get(pc)
+        if link is None or link.spec.stock is None or link.prompt is not False:
+            return None
+        return "its rigdesk-bridge predates showing requests on the device (/offer)"
 
     async def join_switch(self, pc: str) -> dict[str, Any] | None:
         """A RigDesk PC's switch for sessions the operator starts, read from it now: {open, code, words}; None for a RigDesk without /join."""
@@ -1679,6 +1727,7 @@ class Desks:
         self._refuse_if_invited(pc)
         if self._link(pc).spec.stock is None:
             return await self._join_operator(pc, agent, graph, node, title, ask, via="assigned")
+        await self.log_in(pc)
         minted = await self.viewer(pc, "mint")
         return await self.join(minted["link"], agent, graph, node, title, via="assigned")
 
@@ -1771,6 +1820,7 @@ class Desks:
                          "shell": None if link.spec.stock is not None else {"switch": link.shell, "granted": self.shell_granted(name)},
                          "health": self._health_row(name, link), "adhoc": self._adhoc_row(name),
                          "password_file": None if link.spec.stock is None or name in self._adhoc else link.spec.stock.password_file,
+                         "device_unasked": None if name in self._adhoc else self.device_unasked(name),
                          "mcp": {"allowed": link.spec.mcp, "on": link.mcp_on, "why": link.mcp_why,
                                  "servers": [{"name": server.name, "key": server.key, "says": server.says, "tools": [tool["name"] for tool in server.tools],
                                               "since_ms": server.since_ms, "failing": link.server_faults.get(server.name, (None,))[0],

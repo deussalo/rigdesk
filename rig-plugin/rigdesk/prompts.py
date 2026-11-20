@@ -4,7 +4,11 @@ names the agent, and its Allow or Deny answers the operator's ask as the operato
 Either PC is sent POST /offer with the ask and a nonce Rig keeps to itself, over Rig's bearer: a RigDesk PC shows the agent in its connection
 manager; a stock PC's rigdesk-bridge logs in to it with no password, so it shows RustDesk's own accept prompt, and on Allow that connection
 carries the session, so no password is used. The answer comes back on the PC's /events stream, and counts only when it names that PC, that ask
-and that nonce. It is taken only while no agent holds a session on the PC, so no agent can click it."""
+and that nonce. It is taken only while no agent holds a session on the PC, so no agent can click it.
+
+On a stock PC the operator's Accept does not take the prompt away until a RustDesk login has actually succeeded: Rig tries the saved password
+once, and if the PC refuses it, or none is kept, the prompt stays up and the agent is told the person there must Allow it. Their Allow then
+joins the agent over the connection they allowed; their Dismiss, or a prompt that lapses, is told too."""
 from __future__ import annotations
 
 import asyncio
@@ -12,11 +16,11 @@ import hmac
 import secrets
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
 
-from core.sdk.base import event_log
+from core.sdk.base import event_log, now_ms
 from core.sdk.host import scoped, TASKS
 from core.sdk.model import SeatId
 
@@ -26,6 +30,9 @@ if TYPE_CHECKING:
 _LOG = event_log(__name__)
 OPEN_EVERY_S = 2.0
 SHOWS = 3
+# The operator's ask stops waiting a moment before the Accept's then runs and marks the operator's yes on the prompt, so a prompt is taken away only once
+# the ask has not waited for this many looks in a row.
+SETTLE_LOOKS = 3
 
 
 @dataclass
@@ -39,14 +46,46 @@ class Prompt:
     nonce: str = field(default_factory=lambda: secrets.token_hex(16))
     task: asyncio.Task[None] | None = None
     offered: asyncio.Future[str] | None = None
+    # Named as the consent states (CONSENT.md): the operator said yes while the prompt is up, and how Rig's saved password fares; until a login
+    # succeeds the prompt stays up, and the person's answer joins the agent or is told to it.
+    operator_said: bool = False
+    password: Literal["trying", "refused", "none"] | None = None
+    # When the person dismissed it after the operator's yes: denied by the person, which a password login still under way does not override.
+    denied_ms: int | None = None
 
 
 def start(desks: Desks, pc: str, ask: str, seat: SeatId, agent: str, graph: str, title: str) -> None:
     """Shows the agent's request on the PC too, where Rig can take the PC's answer for the operator's (a Rig with PluginHost.confirm_answered)."""
     if not hasattr(desks.host, "confirm_answered") or desks.held_on(pc) is not None:
         return
+    desks.unshown.pop(pc, None)
     prompt = desks.prompts[ask] = Prompt(pc, ask, seat, agent, graph, title)
     prompt.task = TASKS.spawn(f"rigdesk-prompt-{ask}", _prompting(desks, prompt))
+
+
+def operator_said(desks: Desks, ask: str) -> Prompt | None:
+    """The operator accepted the ask: its prompt, kept up while Rig tries the saved password and until a login succeeds; None when none is up."""
+    prompt = desks.prompts.get(ask)
+    if prompt is None or prompt.task is None or prompt.task.done():
+        return None
+    prompt.operator_said, prompt.password = True, "trying"
+    return prompt
+
+
+def denied_by_person(prompt: Prompt | None) -> int | None:
+    """When the person dismissed this prompt after the operator's yes; None while they have not."""
+    return None if prompt is None else prompt.denied_ms
+
+
+def waiting(desks: Desks, prompt: Prompt | None, pc: str, why: str, password: Literal["refused", "none"]) -> str:
+    """The operator accepted, but no login succeeded: what the agent is told while the person at the PC is asked, or why it is not asked."""
+    from .desks import DeskRefused  # noqa: PLC0415 (desks imports this module)
+    if prompt is None or desks.prompts.get(prompt.ask) is not prompt or prompt.task is None or prompt.task.done():
+        unshown = desks.unshown.get(pc)
+        raise DeskRefused(f"{why}, and the person at {pc} is not asked on the device: {unshown or 'no prompt for this request is up there'}")
+    prompt.password = password
+    return (f"The operator accepted, but you have not joined {pc}: {why}, so the person at {pc} must Allow your request on the device, where it shows now. "
+            "Nothing is joined until they do; your next input says when the session is up, or that they dismissed it or it lapsed.")
 
 
 def end(desks: Desks, ask: str) -> None:
@@ -83,7 +122,10 @@ async def _prompting(desks: Desks, prompt: Prompt) -> None:
                 break
         if said in ("allow", "deny"):
             await _settled(desks, prompt, said)
+        elif prompt.operator_said:
+            await _unjoined(desks, prompt, said)
         elif said not in (None, "lapsed"):
+            desks.unshown[prompt.pc] = said
             _LOG.warning("rigdesk_prompt_unshown", f"RigDesk {prompt.pc}: the request {prompt.ask} could not be shown on the PC: {said}", pc=prompt.pc)
     except asyncio.CancelledError:
         raise
@@ -97,10 +139,16 @@ async def _prompting(desks: Desks, prompt: Prompt) -> None:
 async def _while_open(desks: Desks, prompt: Prompt, shown: Awaitable[str]) -> str | None:
     """What the PC said, or None once the operator's ask no longer waits or an agent holds the PC: the prompt is then taken away."""
     task = scoped(f"rigdesk-prompt-shown-{prompt.ask}", shown)
+    unwaited = 0
     try:
         while not task.done():
             await asyncio.wait({task}, timeout=OPEN_EVERY_S)
-            if not task.done() and (desks.held_on(prompt.pc) is not None or await desks.host.confirming(prompt.seat, prompt.ask) is None):
+            if task.done():
+                break
+            if desks.held_on(prompt.pc) is not None:
+                return None
+            unwaited = 0 if prompt.operator_said or await desks.host.confirming(prompt.seat, prompt.ask) is not None else unwaited + 1
+            if unwaited >= SETTLE_LOOKS:
                 return None
         return task.result()
     finally:
@@ -135,6 +183,11 @@ async def _settled(desks: Desks, prompt: Prompt, said: str) -> None:
     desks.prompts.pop(prompt.ask, None)
     if desks.held_on(prompt.pc) is not None:
         _LOG.warning("rigdesk_prompt_held", f"RigDesk {prompt.pc}: the answer to {prompt.ask} on the PC was ignored, as an agent holds the PC", pc=prompt.pc)
+        if prompt.operator_said:
+            await _unjoined(desks, prompt, None)
+        return
+    if prompt.operator_said:
+        await _answered_after_accept(desks, prompt, said)
         return
     choice = "accept" if said == "allow" else "deny"
     if said == "allow":
@@ -150,3 +203,48 @@ async def _settled(desks: Desks, prompt: Prompt, said: str) -> None:
     words = (f"RigDesk: the person at {prompt.pc} {'allowed' if said == 'allow' else 'refused'} your desk/request on the PC itself, "
              "so they answered it rather than the operator.")
     await desks.tell_seat(prompt.pc, prompt.agent, prompt.seat, words, f"prompt:{prompt.ask}")
+
+
+async def _answered_after_accept(desks: Desks, prompt: Prompt, said: str) -> None:
+    """The person at a stock PC answered after the operator's Accept found no login: their Allow joins the agent over the connection they allowed."""
+    from .desks import DeskRefused  # noqa: PLC0415 (desks imports this module)
+    pc = prompt.pc
+    if said == "deny":
+        prompt.denied_ms = now_ms()
+        if prompt.password == "trying":
+            return  # the operator's Accept, still logging in, drops its login and tells the agent
+        words = (f"RigDesk {pc}: denied by the person at {_clock(prompt.denied_ms)}: they dismissed your request on the device, so you did not join {pc}, "
+                 "though the operator accepted it. desk/request asks again.")
+    else:
+        identity = await desks.host.roster.identity(prompt.seat)
+        if identity is None or identity.agent != prompt.agent:
+            _LOG.warning("rigdesk_prompt_gone", f"RigDesk {pc}: the person allowed {prompt.ask}, but {prompt.agent} no longer stands at its seat, so nobody joined", pc=pc)
+            return
+        try:
+            await desks.join_approved(pc, prompt.agent, prompt.graph, prompt.seat.node, prompt.title, prompt.ask)
+        except (DeskRefused, aiohttp.ClientError, TimeoutError, OSError) as failed:
+            mine = desks.held_by(prompt.agent, prompt.graph)
+            if mine is not None and mine.pc == pc:
+                return  # the operator's Accept logged in meanwhile, and said so
+            words = f"RigDesk: the person at {pc} allowed you on the device, but you did not join {pc}: {failed}. desk/request asks again."
+        else:
+            words = (f"RigDesk: the person at {pc} allowed you on the device, so you joined {pc} over the connection they allowed, with no password. "
+                     "Its session is yours until you desk/leave or the human ends the share. desk/<tool> acts there.")
+    await desks.tell_seat(pc, prompt.agent, prompt.seat, words, f"prompt:{prompt.ask}")
+
+
+async def _unjoined(desks: Desks, prompt: Prompt, said: str | None) -> None:
+    """The operator accepted and no login succeeded, and the device's prompt ended with no Allow: the agent is told it did not join, and why."""
+    pc, holder = prompt.pc, desks.held_on(prompt.pc)
+    if holder is not None and holder.agent == prompt.agent:
+        return
+    why = (f"{holder.title} joined {pc} while the person there was asked, so the prompt was taken away" if holder is not None else
+           "nobody answered the prompt on the device by " + _clock(now_ms()) if said in (None, "lapsed") else
+           f"the device could not ask the person there: {said}")
+    await desks.tell_seat(pc, prompt.agent, prompt.seat, f"RigDesk: you did not join {pc}, though the operator accepted it: {why}. desk/request asks again.",
+                          f"prompt:{prompt.ask}")
+
+
+def _clock(at_ms: int) -> str:
+    import time  # noqa: PLC0415
+    return time.strftime("%H:%M:%S", time.localtime(at_ms / 1000))

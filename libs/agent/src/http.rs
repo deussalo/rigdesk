@@ -294,6 +294,7 @@ impl Api {
             ("GET", "/health") => json_response(StatusCode::OK, &json!({"ok": true, "boot": self.boot, "os": std::env::consts::OS, "host": self.host.get(), "standing": self.shared.standing(), "down": self.shared.down(),
                                                                   "shell": self.lane.get().map(|lane| lane.switch()),
                                                                   "join": self.operator.get().map(|switch| crate::operator::said(switch.as_ref())),
+                                                                  "prompt": self.operator.get().is_some_and(|switch| switch.offers()),
                                                                   "invite_open": self.shared.invite_until().is_some()})),
             ("POST", "/claim") => self.claim(request).await,
             ("POST", "/mcp") => self.mcp(request).await,
@@ -314,6 +315,10 @@ impl Api {
             ("POST", "/join") => self.join(request).await,
             ("POST", "/offer") => self.offer(request).await,
             ("POST", "/offer/end") => self.offer_end(request).await,
+            ("POST", "/login") => {
+                drain(&mut request).await;
+                self.log_in().await
+            }
             ("GET", "/samples") => match self.collector.get() {
                 Some(collector) => {
                     let after = query_number(request.uri().query(), "after").unwrap_or(0) as u64;
@@ -618,6 +623,25 @@ impl Api {
         };
         let ask = Self::body_json(request).await.and_then(|body| body.get("ask").and_then(Value::as_str).map(str::to_owned)).unwrap_or_default();
         json_response(StatusCode::OK, &json!({"ended": switch.offer_end(&ask)}))
+    }
+
+    /// The operator accepted an agent's request in Rig: a RustDesk login to the PC, so the agent is told it joined only once
+    /// one has succeeded.
+    async fn log_in(self: Arc<Self>) -> Response<Body> {
+        let Some(switch) = self.operator.get().cloned() else {
+            return json_response(StatusCode::NOT_FOUND, &json!({"error": "this PC's RigDesk takes no sessions started from Rig", "code": "no_login"}));
+        };
+        match tokio::task::spawn_blocking(move || switch.log_in()).await {
+            Ok(Ok(())) => {
+                self.journal.record(&Entry::new("Rig", "login", "ok", json!({})));
+                json_response(StatusCode::OK, &json!({"logged_in": true}))
+            }
+            Ok(Err(no)) => {
+                self.journal.record(&Entry::new("Rig", "login", format!("refused: {}", no.code()), json!({"why": no.words()})));
+                json_response(StatusCode::CONFLICT, &json!({"logged_in": false, "code": no.code(), "error": no.words()}))
+            }
+            Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": format!("the login stopped: {e}"), "code": "login_failed"})),
+        }
     }
 
     async fn shell(self: Arc<Self>, request: Request<Incoming>) -> Response<Body> {
@@ -960,6 +984,12 @@ mod tests {
             shown.retain(|offer| offer.ask != ask);
             shown.len() != before
         }
+        fn offers(&self) -> bool {
+            true
+        }
+        fn log_in(&self) -> Result<(), crate::operator::NoLogin> {
+            Err(crate::operator::NoLogin::NoPassword)
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -974,9 +1004,14 @@ mod tests {
         assert_eq!(switch.0.lock().unwrap()[0].owner.title, "Helper");
         assert_eq!(post(port, "/offer/end", "", &json!({"ask": "desk-1"})).await["ended"], json!(true));
         assert_eq!(post(port, "/offer/end", "", &json!({"ask": "desk-1"})).await["ended"], json!(false));
+        assert_eq!(health(port).await["prompt"], json!(true), "Rig tells a bridge that shows prompts from one older than /offer");
+        let refused = post(port, "/login", "", &json!({})).await;
+        assert_eq!((refused["logged_in"].clone(), refused["code"].clone()), (json!(false), json!("no_password")), "{refused}");
         let plain = Api::new(Arc::new(Shared::new(Events::new(64))), Arc::new(NoDesk), Arc::new(Journal::memory()), "b", None);
         let plain = plain.serve(0).await.unwrap();
         assert_eq!(post(plain, "/offer", "", &json!({"agent": agent, "ask": "desk-1", "nonce": "0123456789abcdef"})).await["code"], json!("no_offer"));
+        assert_eq!(post(plain, "/login", "", &json!({})).await["code"], json!("no_login"));
+        assert_eq!(health(plain).await["prompt"], json!(false));
     }
 
     #[tokio::test(flavor = "multi_thread")]

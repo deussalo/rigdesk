@@ -24,6 +24,7 @@ use hbb_common::sha2::{Digest, Sha256};
 use hbb_common::tcp::FramedStream;
 use hbb_common::tokio::{self, sync::broadcast, sync::mpsc, sync::Notify};
 use hbb_common::{bail, log, ResultType};
+use rigdesk_agent::operator::NoLogin;
 
 /// RustDesk's direct-IP port.
 const DIRECT_PORT: u16 = 21118;
@@ -589,6 +590,19 @@ impl Link {
         }
     }
 
+    /// A login that has actually succeeded, on the connection the person allowed or with the saved password, made now
+    /// unless a session is up: Rig asks for it on the operator's Accept. A password the PC refuses is tried this once:
+    /// the link does not dial it again until something uses the PC.
+    pub fn log_in(&self, wait: Duration) -> Result<(), NoLogin> {
+        if !self.may_dial() {
+            return Err(NoLogin::NoPassword);
+        }
+        self.ensure(wait).map(|_| ()).map_err(|why| {
+            self.last_use_ms.store(0, Ordering::SeqCst);
+            NoLogin::Failed(why)
+        })
+    }
+
     /// Open the session if it is not, and wait for the login, up to `wait`.
     pub fn ensure(&self, wait: Duration) -> Result<(mpsc::UnboundedSender<Message>, Peer), String> {
         let asked = now_ms();
@@ -752,6 +766,59 @@ mod tests {
         assert!(!link.wanted(), "nothing dials a PC with no password");
         let Err(refused) = link.ensure(Duration::from_secs(5)) else { panic!("a session with no password and no Allow") };
         assert!(refused.contains("only the person at the PC lets an agent in"), "{refused}");
+    }
+
+    /// A stock PC on loopback that greets each dial and answers its login with `answer`, counting the logins it gets.
+    async fn answering_pc(answer: login_response::Union) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let logins = Arc::new(AtomicUsize::new(0));
+        let counted = logins.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, dialer)) = listener.accept().await {
+                let mut pc = FramedStream::from(socket, dialer);
+                pc.send(&message_of(Hash { salt: "s".into(), challenge: "c".into(), ..Default::default() })).await.unwrap();
+                while let Some(Ok(bytes)) = pc.next_timeout(5_000).await {
+                    if Message::parse_from_bytes(&bytes).ok().filter(Message::has_login_request).is_some() {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let mut msg = Message::new();
+                        msg.set_login_response(base::message_proto::LoginResponse { union: Some(answer.clone()), ..Default::default() });
+                        pc.send(&msg).await.unwrap();
+                    }
+                }
+            }
+        });
+        (addr, logins)
+    }
+
+    async fn logged_in_with(addr: &str, password: &str) -> (Arc<Link>, Result<(), NoLogin>) {
+        let shared = Arc::new(rigdesk_agent::Shared::new(rigdesk_agent::Events::new(8)));
+        let link = Link::new(Route::direct(addr), password.into(), "Rig agent".into(), shared);
+        tokio::spawn(link.clone().run());
+        let trying = link.clone();
+        let said = tokio::task::spawn_blocking(move || trying.log_in(Duration::from_secs(10))).await.unwrap();
+        (link, said)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rigs_accept_logs_in_once_with_the_saved_password_and_says_what_the_pc_answered() {
+        let (_, none) = logged_in_with("127.0.0.1:9", "").await;
+        assert_eq!(none, Err(NoLogin::NoPassword), "no password and no Allow: nothing is dialed");
+
+        let (addr, logins) = answering_pc(login_response::Union::Error("Wrong Password".into())).await;
+        let (link, refused) = logged_in_with(&addr, "stale").await;
+        let Err(NoLogin::Failed(why)) = refused else { panic!("a refused password logged in: {refused:?}") };
+        assert!(why.contains("Wrong Password"), "{why}");
+        assert!(!link.wanted(), "a refused password is not dialed again on its own");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(logins.load(Ordering::SeqCst), 1, "the saved password was tried more than once");
+
+        let mut pi = PeerInfo::new();
+        pi.hostname = "front".into();
+        let (addr, _) = answering_pc(login_response::Union::PeerInfo(pi)).await;
+        let (link, ok) = logged_in_with(&addr, "good").await;
+        assert_eq!(ok, Ok(()));
+        assert_eq!(link.state.lock().unwrap().peer.as_ref().map(|peer| peer.hostname.as_str()), Some("front"));
     }
 
     #[tokio::test]
