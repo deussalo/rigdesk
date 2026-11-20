@@ -519,7 +519,8 @@ async def _ask_on_phone(desks: Desks, call: Call, given: RequestInput, tap: prom
         prompts.start(desks, given.pc, asked, seat, agent, graph, title, then, yes="person")
     return {"pc": given.pc, "kind": given.kind, "ask": asked, "state": state,
             "said": (f"Nothing is joined yet: the person at {given.pc} is asked on the phone, and only they can let you in; the operator can only cancel. {how} "
-                     "Your next input says when the session is up, or that they denied it, it lapsed or it was cancelled.")}
+                     f"Your next input says when the session is up, or that they denied it or it lapsed. A decision cancel means the operator withdrew "
+                     f"this request in Rig, so you did not join {given.pc}.")}
 
 
 async def _request_confirmed(host: PluginHost, asked: Confirmed) -> str:

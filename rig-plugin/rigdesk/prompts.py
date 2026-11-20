@@ -17,7 +17,8 @@ offer, marked accepted, so its knock names the ask under Rig's signature and the
 the phone's link down the bridge's knock asks instead, and the agent and Rig's log are told why.
 
 On a phone only its person says yes (who decides: the prompt's yes). An agent's desk/request raises no Accept in Rig, only a status card whose
-one choice is Cancel; Cancel, or Dismiss, takes the notification away and the agent is told, and the card is withdrawn when the request joins, is denied, fails or lapses. An agent
+one choice is Cancel; Cancel takes the notification away, and core's decision, cancel, is the agent's one message. The card is withdrawn when the
+request joins, is denied, fails or lapses. An agent
 assigned the phone asks the same way with no card: its desk/join(pc), when Rig cannot log in (sharing is off), sends the phone this request, as the
 standing grant stands in for the operator's yes but not the person's. Either way the person's Accept joins the agent; their Deny, a failure and
 the last lapse are told to it. An unanswered notification is shown again until then."""
@@ -232,9 +233,6 @@ async def _prompting(desks: Desks, prompt: Prompt) -> None:
             if said != "lapsed":
                 break
         if said == "cancelled":
-            words = (f"RigDesk: your request for {prompt.pc} ended in Rig before the person answered: the operator cancelled or dismissed it, so its "
-                     f"notification on the phone is taken away and you did not join {prompt.pc}. desk/request asks again.")
-            await desks.tell_seat(prompt.pc, prompt.agent, prompt.seat, words, f"prompt:{prompt.ask}")
             return
         if said in ("allow", "deny"):
             await _settled(desks, prompt, said)
