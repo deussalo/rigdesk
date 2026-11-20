@@ -10,7 +10,7 @@ use std::time::Duration;
 /// the projection stops though the listener stays up. Never anywhere else, where no-tap does not apply.
 fn sharing() -> bool {
     #[cfg(target_os = "android")]
-    return scrap::android::is_capture_allowed() == Some(true);
+    return scrap::is_capture_allowed() == Some(true);
     #[cfg(not(target_os = "android"))]
     return false;
 }
