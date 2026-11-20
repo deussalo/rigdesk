@@ -3251,10 +3251,28 @@ pub mod server_side {
         crate::ui_cm_interface::close(conn_id);
     }
 
-    /// RigDesk: this device's RustDesk ID, which Rig Assistant's hello names so Rig links the phone to its stock entry.
+    /// RigDesk: points the config at `app_dir`, the directory Flutter recorded, unless something set it already, and
+    /// answers whether the config's directory is known. Rig Assistant's hello can come before the service or Flutter
+    /// starts (Android binds the default assistant into a process of its own), and a config read then loads an empty one
+    /// and keeps it for the process's life: a fresh ID, no password, which the next write of the config saves over the
+    /// device's own.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_rigConfigAt(env: JNIEnv, _class: JClass, app_dir: JString) -> jboolean {
+        let mut env = env;
+        let mut dir = config::APP_DIR.write().unwrap();
+        if dir.is_empty() {
+            *dir = env.get_string(&app_dir).map(String::from).unwrap_or_default();
+        }
+        jboolean::from(!dir.is_empty())
+    }
+
+    /// RigDesk: this device's RustDesk ID, which Rig Assistant's hello names so Rig links the phone to its stock entry;
+    /// empty while the config's directory is unknown, so the read never loads a config from nowhere.
     #[no_mangle]
     pub unsafe extern "system" fn Java_ffi_FFI_rigOwnId(env: JNIEnv, _class: JClass) -> jstring {
-        env.new_string(hbb_common::config::Config::get_id()).unwrap_or_default().into_raw()
+        let located = !config::APP_DIR.read().unwrap().is_empty();
+        let id = if located { config::Config::get_id() } else { String::new() };
+        env.new_string(id).unwrap_or_default().into_raw()
     }
 
     /// RigDesk: whether this phone listens for Rig's knock now (its direct server is up).
