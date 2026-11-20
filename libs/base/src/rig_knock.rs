@@ -204,11 +204,49 @@ pub fn listed_as(peer_id: String, name: String, authorized: bool, proved: bool) 
     authorized.then(|| (NEUTRAL_PEER_ID.to_owned(), NEUTRAL_NAME.to_owned()))
 }
 
-/// Whether a proved knock gets in with no tap on this phone's own say: Rig vouched that the operator assigned the phone to
-/// its agent, the person turned on [`ASSIGNED_NO_TAP`], and no other Rig agent is in now, which the person would then be
-/// asked to hand over. Anything else asks the person.
-pub fn admits_assigned(vouch: &Vouch, no_tap: bool, another_in: bool) -> bool {
-    *vouch == Vouch::Assigned && no_tap && !another_in
+/// The phone's own state a no-tap admit is decided on, read when the knock comes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoTapHere {
+    /// The person turned on [`ASSIGNED_NO_TAP`].
+    pub setting_on: bool,
+    /// Screen sharing runs: Android's capture is granted, so its privacy chip shows. Capture can stop while the listener
+    /// stays up, and then nothing tells the person an agent is in.
+    pub sharing: bool,
+    /// The approve mode takes clicks: under "accept via password only" nothing gets in with no password but the person's
+    /// own Accept.
+    pub click_approves: bool,
+}
+
+/// Whether a proved knock may get in with no tap on this phone's own say: Rig vouched that the operator assigned the phone
+/// to its agent, the person turned on [`ASSIGNED_NO_TAP`], sharing runs and the approve mode takes clicks. Err says why
+/// the person is asked instead. No other Rig agent may be in either, which [`reserve`] decides as it takes the slot.
+pub fn admits_assigned(vouch: &Vouch, here: NoTapHere) -> Result<(), &'static str> {
+    match () {
+        _ if *vouch != Vouch::Assigned => Err("the knock is not vouched assigned"),
+        _ if !here.setting_on => Err("the person's no-tap setting is off"),
+        _ if !here.sharing => Err("screen sharing is off"),
+        _ if !here.click_approves => Err("the approve mode is password only"),
+        _ => Ok(()),
+    }
+}
+
+/// Takes the one Rig agent slot for connection `conn` before its login is sent, so two knocks at once cannot both get in
+/// as assigned: false while another connection's Rig agent is in or on its way in.
+pub fn reserve(conn: i32, by: JoinedBy) -> bool {
+    let Some(name) = PROVED.lock().unwrap().get(&conn).cloned() else {
+        return false;
+    };
+    let mut joined = JOINED.lock().unwrap();
+    if joined.keys().any(|other| *other != conn) {
+        return false;
+    }
+    joined.insert(conn, Joined { name, by });
+    true
+}
+
+/// The slot [`reserve`] took for `conn` goes: its login did not get in.
+pub fn release(conn: i32) {
+    JOINED.lock().unwrap().remove(&conn);
 }
 
 /// Whether any Rig agent's session is in on this device now.
@@ -401,12 +439,32 @@ mod tests {
     }
 
     #[test]
-    fn only_an_assigned_knock_gets_in_with_no_tap_and_only_while_the_person_allows_it_and_no_other_agent_is_in() {
-        assert!(admits_assigned(&Vouch::Assigned, true, false));
-        assert!(!admits_assigned(&Vouch::Assigned, false, false), "the person's setting is off, as it is by default");
-        assert!(!admits_assigned(&Vouch::Assigned, true, true), "another agent is in: the person is asked");
-        assert!(!admits_assigned(&Vouch::Nothing, true, false), "a plain knock asks the person");
-        assert!(!admits_assigned(&Vouch::Accepted("desk_1".into()), true, false), "an accepted ask goes by one_tap alone");
+    fn only_an_assigned_knock_gets_in_with_no_tap_and_only_while_the_person_allows_it_sharing_runs_and_clicks_approve() {
+        let here = NoTapHere { setting_on: true, sharing: true, click_approves: true };
+        assert_eq!(admits_assigned(&Vouch::Assigned, here), Ok(()));
+        let off = NoTapHere { setting_on: false, ..here };
+        assert_eq!(admits_assigned(&Vouch::Assigned, off), Err("the person's no-tap setting is off"), "off, as it is by default");
+        let stopped = NoTapHere { sharing: false, ..here };
+        assert_eq!(admits_assigned(&Vouch::Assigned, stopped), Err("screen sharing is off"), "capture stopped, the listener up");
+        let password = NoTapHere { click_approves: false, ..here };
+        assert_eq!(admits_assigned(&Vouch::Assigned, password), Err("the approve mode is password only"));
+        assert!(admits_assigned(&Vouch::Nothing, here).is_err(), "a plain knock asks the person");
+        assert!(admits_assigned(&Vouch::Accepted("desk_1".into()), here).is_err(), "an accepted ask goes by one_tap alone");
+    }
+
+    #[test]
+    fn one_rig_agent_slot_is_taken_before_the_login_so_two_assigned_knocks_cannot_both_get_in() {
+        let (first, second) = (9101, 9102);
+        mark_proved(first, "Builder (Rig agent)");
+        mark_proved(second, "Other (Rig agent)");
+        assert!(reserve(first, JoinedBy::Assigned));
+        assert!(!reserve(second, JoinedBy::Assigned), "the first knock's slot is taken while its login is under way");
+        assert!(anyone_in());
+        release(first);
+        assert!(reserve(second, JoinedBy::Assigned), "a released slot is free again");
+        assert!(!reserve(9103, JoinedBy::Assigned), "an unproved connection takes no slot");
+        left(second);
+        left(first);
     }
 
     #[test]

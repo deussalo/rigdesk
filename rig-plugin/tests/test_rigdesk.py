@@ -1368,6 +1368,8 @@ class _StockBridge:
     with a good saved password), and mint and claim."""
     def __init__(self, password: str | None) -> None:
         self.password, self.allowed, self.posted, self.login_s = password, False, [], 0.0
+        # The next /offer fails with this status, once: a bridge that took the knock but could not send it.
+        self.offer_fails: int | None = None
 
     async def took(self, request) -> object:
         from aiohttp import web
@@ -1388,6 +1390,9 @@ class _StockBridge:
             return web.json_response({"grant": GRANT, "secret": SECRET})
         if request.path == "/claim":
             return web.json_response({"session": "s", "standing": {"holder": "agent"}})
+        if request.path == "/offer" and self.offer_fails is not None:
+            status, self.offer_fails = self.offer_fails, None
+            return web.json_response({"code": "unreachable", "error": "the knock reached no phone"}, status=status)
         return web.json_response({"shown": True} if request.path == "/offer" else {"ended": True})
 
     def paths(self) -> list[str]:
@@ -1739,6 +1744,100 @@ def test_an_assigned_agents_desk_join_on_a_phone_whose_person_allows_no_tap_knoc
         assert "is asked on the phone" in unset["answer"]["said"], unset["answer"]
         assert all("assigned" not in body for body in unset["offers"]) and unset["offers"][0]["accepted"] is True, unset["offers"]
         assert unset["held"] is not None
+
+    asyncio.run(run())
+
+
+def test_an_assigned_knock_the_bridge_could_not_send_falls_back_to_the_notification() -> None:
+    """Q3: the assigned knock goes first, but only the phone's own answer (allow, deny, its person not answering in time) ends the request
+    there; a bridge answering the /offer with an error reached no one, so the person is asked by notification instead."""
+    from rigdesk import JoinInput, _join, prompts
+    seat = SeatId(GraphName("g"), NodeId("n"))
+
+    async def caller_title() -> str:
+        return "Builder"
+    call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1", seat=seat)), graph="g", node="n",
+                           kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"), refused=lambda code, words, *_: {"refused": code, "said": words})
+
+    async def run() -> None:
+        told: list = []
+        with tempfile.TemporaryDirectory() as state:
+            bridge, assistant = _StockBridge("down"), _Assistant(no_tap=True)
+            bridge.offer_fails = 503
+            assistant.offer()
+            desks, runner = await _stock_desks(state, bridge, _Asks(), told, login_id=MOTO_ID)
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                await desks.assign("phone", "agent:a1")
+                desks._one_taps = await desks.one_taps()
+                await _join(desks, call, JoinInput(pc="phone"))  # type: ignore[arg-type]
+                await _until(lambda: assistant.shown)
+                offers = [body for path, body in bridge.posted if path == "/offer"]
+                assert [body.get("assigned") for body in offers] == [True], offers
+                assert len(assistant.shown) == 1, assistant.shown
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+
+    asyncio.run(run())
+
+
+def test_unassigning_a_phone_ends_the_assigned_agents_request_there_and_a_yes_after_the_grant_went_neither_vouches_nor_joins() -> None:
+    """An assigned agent's desk/join on a phone waits on its person. The operator's unassign ends that request now: its notification goes
+    and the agent is told. A grant gone by any other way leaves no knock vouched assigned and no join on the person's yes."""
+    from rigdesk import JoinInput, _join, prompts
+    from rigdesk.desks import Grants
+    seat = SeatId(GraphName("g"), NodeId("n"))
+
+    async def caller_title() -> str:
+        return "Builder"
+    call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1", seat=seat)), graph="g", node="n",
+                           kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"), refused=lambda code, words, *_: {"refused": code, "said": words})
+
+    async def round(unassign: bool) -> dict:
+        told: list = []
+        with tempfile.TemporaryDirectory() as state:
+            bridge, assistant = _StockBridge("down"), _Assistant(no_tap=False)
+            assistant.offer()
+            desks, runner = await _stock_desks(state, bridge, _Asks(), told, login_id=MOTO_ID)
+            every, prompts.OPEN_EVERY_S = prompts.OPEN_EVERY_S, 0.01
+            try:
+                await desks.assign("phone", "agent:a1")
+                desks._one_taps = await desks.one_taps()
+                ask = (await _join(desks, call, JoinInput(pc="phone")))["ask"]  # type: ignore[arg-type]
+                await _until(lambda: assistant.shown)
+                if unassign:
+                    assert await desks.unassign("phone", "agent:a1")
+                    await _until(lambda: told)
+                    await _until(lambda: assistant.ended)
+                else:
+                    await desks._save_grants(Grants(pcs={}, shell=desks._grants.shell))
+                    shown = assistant.shown[0]
+                    assert await prompts.phone_said(desks.host, _said(ask, shown["nonce"], "ready")) == "taken"  # type: ignore[arg-type]
+                    await _until(lambda: "/offer" in bridge.paths())
+                    knocked = next(body for path, body in bridge.posted if path == "/offer")
+                    bridge.allowed = True
+                    await desks._event(desks._pcs["phone"], {"type": "offer", "ask": ask, "nonce": knocked["nonce"], "answer": "allow"})
+                    await _until(lambda: told)
+                held, open_ = desks.held_on("phone"), dict(desks.prompts)
+            finally:
+                prompts.OPEN_EVERY_S = every
+                await prompts.end_all(desks)
+                await desks._http.close()
+                await runner.cleanup()
+        return {"told": told, "held": held, "open": open_, "ended": assistant.ended, "offers": [body for path, body in bridge.posted if path == "/offer"]}
+
+    async def run() -> None:
+        gone = await round(unassign=True)
+        assert gone["open"] == {} and len(gone["ended"]) == 1 and gone["held"] is None, gone
+        assert len(gone["told"]) == 1 and "the operator unassigned phone from you" in gone["told"][0][1], gone["told"]
+
+        later = await round(unassign=False)
+        assert all("assigned" not in body for body in later["offers"]), later["offers"]
+        assert later["held"] is None, later["held"]
+        assert len(later["told"]) == 1 and "unassigned phone from you meanwhile" in later["told"][0][1], later["told"]
 
     asyncio.run(run())
 

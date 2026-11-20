@@ -214,6 +214,18 @@ def end(desks: Desks, ask: str) -> None:
         prompt.task.cancel()
 
 
+async def unassigned(desks: Desks, pc: str) -> None:
+    """The operator took a grant to pc away: every assigned agent's request there that it no longer covers ends now, its notification and knock
+    with it, and the agent is told why."""
+    gone = [prompt for prompt in desks.prompts.values()
+            if prompt.pc == pc and prompt.yes == "grant" and pc not in desks.assigned_pcs(prompt.agent, prompt.graph)]
+    for prompt in gone:
+        end(desks, prompt.ask)
+        words = (f"RigDesk: your desk/join for {pc} ended before the person there answered: the operator unassigned {pc} from you, so its request on "
+                 f"{pc} is taken away and you did not join {pc}. desk/request asks the operator to let you join it.")
+        await desks.tell_seat(pc, prompt.agent, prompt.seat, words, f"prompt:{prompt.ask}")
+
+
 async def end_all(desks: Desks) -> None:
     tasks = [prompt.task for prompt in desks.prompts.values() if prompt.task is not None]
     desks.prompts.clear()
@@ -290,7 +302,8 @@ async def _shown(desks: Desks, prompt: Prompt) -> str:
     if prompt.yes == "grant" and tap is not None and tap.no_tap and not prompt.knocked_assigned:
         prompt.knocked_assigned = True
         said = await _offered(desks, prompt)
-        if not said.startswith(("refused:", "lapsed:")):
+        # Only the phone's own answer stands: its yes, its no, or its person not answering it in time. Anything else reached no one.
+        if said in ("allow", "deny", "lapsed"):
             return said
         _LOG.info("rigdesk_no_tap_unreached", f"RigDesk {prompt.pc}: the no-tap knock for {prompt.ask} did not reach the phone ({said}), so it is asked by notification",
                   pc=prompt.pc)
@@ -365,7 +378,7 @@ async def _offered(desks: Desks, prompt: Prompt) -> str:
     body = {"agent": {"id": prompt.agent, "title": prompt.title, "graph": prompt.graph}, "ask": prompt.ask, "nonce": prompt.nonce}
     if prompt.accepted:
         body["accepted"] = True
-    elif prompt.yes == "grant":
+    elif prompt.yes == "grant" and prompt.pc in desks.assigned_pcs(prompt.agent, prompt.graph):
         body["assigned"] = True
     async with desks.http.post(f"{url}/offer", json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as answer:
         said: dict[str, Any] = await answer.json(content_type=None) if answer.content_type == "application/json" else {}
@@ -424,6 +437,11 @@ async def _answered_after_accept(desks: Desks, prompt: Prompt, said: str) -> Non
         identity = await desks.host.roster.identity(prompt.seat)
         if identity is None or identity.agent != prompt.agent:
             _LOG.warning("rigdesk_prompt_gone", f"RigDesk {pc}: the person allowed {prompt.ask}, but {prompt.agent} no longer stands at its seat, so nobody joined", pc=pc)
+            return
+        if prompt.yes == "grant" and pc not in desks.assigned_pcs(prompt.agent, prompt.graph):
+            words = (f"RigDesk: the person at {pc} allowed you on the device, but the operator unassigned {pc} from you meanwhile, so you did not join {pc}. "
+                     "desk/request asks the operator to let you join it.")
+            await desks.tell_seat(pc, prompt.agent, prompt.seat, words, f"prompt:{prompt.ask}")
             return
         try:
             await desks.join_approved(pc, prompt.agent, prompt.graph, prompt.seat.node, prompt.title, prompt.ask, via="assigned" if prompt.yes == "grant" else "link")

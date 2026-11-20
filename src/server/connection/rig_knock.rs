@@ -6,6 +6,15 @@ use base::{
 use hbb_common::password_security::{approve_mode, ApproveMode};
 use std::time::Duration;
 
+/// Whether screen sharing runs: on Android, whether the person granted capture (MainService.isReady), which ends when
+/// the projection stops though the listener stays up. Never anywhere else, where no-tap does not apply.
+fn sharing() -> bool {
+    #[cfg(target_os = "android")]
+    return scrap::android::is_capture_allowed() == Some(true);
+    #[cfg(not(target_os = "android"))]
+    return false;
+}
+
 impl Connection {
     /// RigDesk Android: every connection's greeting carries its own nonce, which a knock's proof must cover.
     pub(super) fn rig_knock_hello(&mut self, greeting: &mut Message) {
@@ -72,12 +81,18 @@ impl Connection {
             hbb_common::log::info!("Rig agent {} knocked for {ask}, which no Accept here stands for: the person is asked", proved.agent_id);
         }
         if proved.vouch == rig_knock::Vouch::Assigned {
-            let no_tap = hbb_common::config::LocalConfig::get_option(rig_knock::ASSIGNED_NO_TAP) == "Y";
-            if rig_knock::admits_assigned(&proved.vouch, no_tap, rig_knock::anyone_in()) {
-                return self.rig_knock_assigned(proved).await;
+            let here = rig_knock::NoTapHere {
+                setting_on: hbb_common::config::LocalConfig::get_option(rig_knock::ASSIGNED_NO_TAP) == "Y",
+                sharing: sharing(),
+                click_approves: approve_mode() != ApproveMode::Password,
+            };
+            rig_knock::mark_proved(self.inner.id, &proved.name);
+            let admitted = rig_knock::admits_assigned(&proved.vouch, here)
+                .and_then(|()| rig_knock::reserve(self.inner.id, rig_knock::JoinedBy::Assigned).then_some(()).ok_or("another Rig agent is in"));
+            match admitted {
+                Ok(()) => return self.rig_knock_assigned(proved).await,
+                Err(why) => hbb_common::log::info!("Rig agent {} knocked as assigned this phone, but {why}: the person is asked", proved.agent_id),
             }
-            let why = if no_tap { "another Rig agent is in" } else { "the person's no-tap setting is off" };
-            hbb_common::log::info!("Rig agent {} knocked as assigned this phone, but {why}: the person is asked", proved.agent_id);
         }
         hbb_common::log::info!("Rig agent {} asks to join", proved.agent_id);
         rig_knock::mark_proved(self.inner.id, &proved.name);
@@ -89,13 +104,13 @@ impl Connection {
 
     /// The operator assigned this phone to the agent, and the person's own setting lets such an agent in with no tap while
     /// sharing runs: in, as the person is then told, and never around a 2FA requirement.
+    /// Its Rig agent slot is reserved already (`rig_knock::reserve`), and goes if the login does not get in.
     async fn rig_knock_assigned(&mut self, proved: rig_knock::Proved) -> bool {
         hbb_common::log::info!("Rig agent {} joins as assigned this phone, with no tap as the person's setting allows", proved.agent_id);
-        rig_knock::mark_proved(self.inner.id, &proved.name);
         self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
         let kept = self.send_logon_response_and_keep_alive().await;
-        if self.authorized {
-            rig_knock::joined(self.inner.id, rig_knock::JoinedBy::Assigned);
+        if !self.authorized {
+            rig_knock::release(self.inner.id);
         }
         if !kept {
             return false;
