@@ -1769,7 +1769,7 @@ async def _phone_requested(assistant: _Assistant, answer_with, lapse_s: int | No
 def test_a_phones_desk_request_files_a_card_rig_can_only_cancel_and_only_the_person_on_the_phone_lets_the_agent_in() -> None:
     """On a phone in Rig Assistant only its person says yes: desk/request files a status card whose one choice is Cancel, the safe choice, so no
     answer in Rig runs its then, and asks the phone as one notification. Their Accept joins the agent; their Deny, a failure and the last lapse are
-    told to it; each takes the card away. The operator's Cancel takes the notification away, and the agent hears it from Rig, not RigDesk."""
+    told to it; each takes the card away. The operator's Cancel, or core's Dismiss, which tells the agent nothing, takes the notification away and RigDesk tells the agent."""
     from rigdesk import REQUEST_CONFIRMED, prompts
 
     async def allow(asked: SimpleNamespace) -> None:
@@ -1829,7 +1829,8 @@ def test_a_phones_desk_request_files_a_card_rig_can_only_cancel_and_only_the_per
 
         assistant = _Assistant()
         seen = await _phone_requested(assistant, cancel)
-        assert assistant.ended == [seen["answer"]["ask"]] and seen["told"] == [] and seen["card"].withdrawn == [], (assistant.ended, seen["told"])
+        assert assistant.ended == [seen["answer"]["ask"]] and seen["card"].withdrawn == [], (assistant.ended, seen["card"].withdrawn)
+        assert len(seen["told"]) == 1 and "cancelled or dismissed it" in seen["told"][0][1] and "you did not join phone" in seen["told"][0][1], seen["told"]
         assert "/offer" not in seen["bridge"].paths() and seen["held"] is None
 
         assistant = _Assistant()
