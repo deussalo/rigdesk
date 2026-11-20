@@ -1,9 +1,10 @@
+# head cf1f441ab0
 # THROWAWAY (one-tap emulator proof): android.yml's build for x86_64, debug-signed, without hwcodec (as upstream's x86_64 build), plus the Linux bridge.
 name: one-tap-emulator-build
 
 on:
   push:
-    branches: [rig/rigdesk/one-tap-proof]
+    branches: [rig/rigdesk/one-tap-d2-proof]
     paths: [.github/workflows/one-tap-emulator-build.yml]
 
 permissions:
