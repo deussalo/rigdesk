@@ -500,6 +500,11 @@ impl Shared {
         }
     }
 
+    /// Whether an agent holds the session now.
+    pub fn claimed(&self) -> bool {
+        self.state.lock().unwrap().session.is_some()
+    }
+
     pub fn standing(&self) -> Standing {
         let mut state = self.state.lock().unwrap();
         self.settle(&mut state);

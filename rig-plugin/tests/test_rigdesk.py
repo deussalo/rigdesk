@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from core.base import now_ms
 from core.model import GraphName, NodeId, SeatId
-from rigdesk.desks import DeskPc, DeskRefused, Desks, Held, PcLink, RedirectRefused, pc_of_link, token_session, words_of
+from rigdesk.desks import PERSON_ENDED, DeskPc, DeskRefused, Desks, Held, PcLink, RedirectRefused, pc_of_link, token_session, words_of
 from rigdesk.health import Sample
 
 PCS = {"deus": DeskPc(url="https://deus.tail1234.ts.net", token_file="/dev/null", client="acme")}
@@ -31,6 +31,8 @@ def test_the_agent_hears_only_of_a_holder_change_that_lets_it_carry_on_and_not_o
     assert "resumed you" in resumed and "handed input back to you" in handed and all("Carry on there by yourself" in said for said in (resumed, handed))
     assert words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the agent left", "at_ms": 0}) is None
     assert "session there ended" in str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": "the human ended the share", "at_ms": 0}))
+    closed = str(words_of("deus", {"type": "revoked", "agent_id": "a", "reason": PERSON_ENDED, "at_ms": 0}))
+    assert "the person at deus ended it" in closed and "Nothing reconnects by itself" in closed, closed
 
 
 def test_a_rigdesk_pc_says_whether_the_operator_can_start_a_session_there() -> None:
@@ -221,6 +223,8 @@ def test_a_session_that_ends_by_itself_sends_the_agent_nothing_and_its_next_desk
         held = desks._sessions["deus"] = Held("deus", "a1", "g", "n", "A", "s", now_ms() - 6 * 60_000, "assigned")
         if cause == "person":
             await desks._event(PcLink("deus", PCS["deus"]), {"type": "revoked", "agent_id": "a1", "reason": "the person at the PC ended the session", "at_ms": now_ms()})
+        elif cause == "closed":
+            await desks._event(PcLink("deus", PCS["deus"]), {"type": "revoked", "agent_id": "a1", "reason": PERSON_ENDED, "at_ms": now_ms()})
         elif cause == "restart":
             desks._boots["deus"] = "boot-1"
             await desks._rebooted("deus", "boot-2")
@@ -235,7 +239,7 @@ def test_a_session_that_ends_by_itself_sends_the_agent_nothing_and_its_next_desk
             desks = Desks(SimpleNamespace(state_dir=Path(state), admit=admit, seat_of=seat_of, report=lambda *_: None, forget=lambda *_: None))  # type: ignore[arg-type]
             desks.leave = leave  # type: ignore[method-assign]
             assert (await _next_call(desks)).startswith("you hold no RigDesk session")
-            for cause, why in (("person", "the person at the PC ended the session"), ("restart", "RigDesk restarted there"),
+            for cause, why in (("person", "the person at the PC ended the session"), ("closed", "the person at deus ended it"), ("restart", "RigDesk restarted there"),
                                ("idle", "you left deus after 5 minutes without a desk call"), ("unassigned", "took away your standing access to deus")):
                 await ended_by(cause)
                 said = await _next_call(desks)
@@ -923,6 +927,7 @@ def test_connecting_to_a_pc_not_ours_still_waits_for_the_operators_accept() -> N
             adhoc.answers = answers
         desks.connect_dropped(answer["ask"])
         assert answer["joined"] is False and answer["state"] == "open" and len(asked) == 1, answer
+        assert asked[0][4].operator_only, "desk/connect's ask is the operator's alone"
         assert "--id-server" not in dialed.read_text(), dialed.read_text()
 
     _with_invite_tools(body)
@@ -1717,6 +1722,39 @@ def test_a_real_server_gives_the_operator_rigs_pairing_key_and_refuses_a_missing
         finally:
             server.terminate()
             server.wait(20)
+
+
+def test_every_access_grant_rigdesk_asks_for_is_the_operators_alone() -> None:
+    """Join, Always allow, an invite where an agent may run commands, and desk/connect each give an agent a PC: no agent answers them for him."""
+    from rigdesk import RequestInput, _ask_invite, _request
+
+    asked: list = []
+
+    async def confirm(*given: object) -> str:
+        asked.append(given)
+        return "resolved"
+
+    async def caller_title() -> str:
+        return "Builder"
+
+    async def switch(_pc: str) -> dict:
+        return {"open": True}
+
+    entries = [{"name": "phone", "stock": {"peer": "p"}, "held_by": None}, {"name": "deus", "stock": None, "held_by": None}]
+    desks = SimpleNamespace(host=SimpleNamespace(confirm=confirm), entries=lambda: entries, join_switch=switch, assigned_pcs=lambda *_: (),
+                            held_by=lambda *_: None, device_unasked=lambda _pc: "it is unshown here", unshown={})
+    call = SimpleNamespace(contract=SimpleNamespace(place=SimpleNamespace(agent="a1", seat=SeatId(GraphName("g"), NodeId("n")))), graph="g", node="n",
+                           kernel=SimpleNamespace(caller_title=caller_title, activation_id="act-1"), refused=lambda code, words, *_: {"refused": code, "said": words})
+
+    async def run() -> None:
+        for pc, kind in (("phone", "join"), ("phone", "assign"), ("deus", "join"), ("deus", "assign")):
+            answer = await _request(desks, call, RequestInput(pc=pc, why="to fix the printer", kind=kind))  # type: ignore[arg-type]
+            assert "refused" not in answer, (pc, kind, answer)
+        await _ask_invite(desks, call, "deus", "rigdesk://deus/x#y")  # type: ignore[arg-type]
+        thens = [given[4] for given in asked]
+        assert len(thens) == 5 and all(then.operator_only for then in thens), thens
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

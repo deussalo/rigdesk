@@ -189,7 +189,7 @@ async def _ask_invite(desks: Desks, call: Call, pc: str, link: str) -> Answer:
               "leaves, or the person at the PC ends it from the tray. Deny claims nothing; the invite lapses on the PC after 15 minutes.")[:2000]
     # The link is useless without Rig's own bearer for that PC, so keeping it in the ask gives nobody anything they lacked.
     then: JsonObject = {"pc": pc, "agent": agent, "graph": graph, "link": link}
-    state = await desks.host.confirm(call.contract.place.seat, asked, Titled(asks, reason), call.kernel.activation_id, Then(provision=INVITE_CONFIRMED.name, given=then))
+    state = await desks.host.confirm(call.contract.place.seat, asked, Titled(asks, reason), call.kernel.activation_id, Then(provision=INVITE_CONFIRMED.name, given=then, operator_only=True))
     return {"pc": pc, "joined": False, "ask": asked, "state": state,
             "said": (f"Nothing is claimed yet: an agent may run commands on {pc}, so the operator is asked to accept this invite, and the decision arrives "
                      "as your next input. The invite lapses on the PC after 15 minutes either way.")}
@@ -240,7 +240,7 @@ async def _ask_connect(desks: Desks, call: Call, given: ConnectInput, outside: C
     then = {"agent": agent, "graph": graph, "id": outside.target, "ask": asked}
     desks.connect_asked(asked, given.id, given.password.get_secret_value(), agent, seat, (CONNECT_CONFIRMED.name, then))
     try:
-        state = await desks.host.confirm(seat, asked, Titled(asks, reason), call.kernel.activation_id, Then(provision=CONNECT_CONFIRMED.name, given=then))
+        state = await desks.host.confirm(seat, asked, Titled(asks, reason), call.kernel.activation_id, Then(provision=CONNECT_CONFIRMED.name, given=then, operator_only=True))
     except BaseException:
         desks.connect_dropped(asked)
         raise
@@ -460,10 +460,10 @@ async def _request(desks: Desks, call: Call, given: RequestInput) -> Answer:
     reason = Titled(asks, lets)
     if entry["stock"]:
         state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                         Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind, "ask": asked}))
+                                         Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": given.kind, "ask": asked}, operator_only=True))
     else:
         state = await desks.host.confirm(seat, asked, reason, call.kernel.activation_id,
-                                         Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": "join", "ask": asked}),
+                                         Then(provision=REQUEST_CONFIRMED.name, given={"pc": given.pc, "agent": agent, "graph": graph, "kind": "join", "ask": asked}, operator_only=True),
                                          RIGDESK_CHOICES)
     if unasked is not None:
         desks.unshown[given.pc] = unasked

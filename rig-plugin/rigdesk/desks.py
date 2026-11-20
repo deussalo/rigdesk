@@ -64,6 +64,7 @@ def _call_limit_s(tool: str, arguments: dict[str, Any]) -> float:
     return CALL_LIMIT_S + (asked if isinstance(asked, int) and 0 < asked <= SHELL_LIMIT_S else 60 if tool == "shell" else 0)
 FILES_KEPT = 300
 PAUSE_PROMISED = "you will be notified when they have been inactive"
+PERSON_ENDED = "the person at the PC ended it"  # rigdesk-bridge's link::PERSON_ENDED, said as the person at the PC closes the session there
 STOP_FRESH_MS = 60_000  # a Stop replayed after Rig was away is not acted on: the turn it meant is long gone
 REMOTE_LOG_BYTES = 4 * 1024 * 1024
 HEALTH_EVERY_S = 30.0
@@ -468,6 +469,9 @@ def words_of(pc: str, event: dict[str, Any]) -> str | None:
         why = str(event.get("reason") or "the share ended")
         if why == "the agent left":
             return None
+        if why == PERSON_ENDED:
+            return (f"RigDesk {pc}: your session there ended at {at}: the person at {pc} ended it. Nothing reconnects by itself; desk calls there are "
+                    "refused until you join it again.")
         return f"RigDesk {pc}: your session there ended at {at} ({why}). Desk calls there are refused until you join it again."
     if kind == "dropped":
         count = int(event.get("messages") or 0)

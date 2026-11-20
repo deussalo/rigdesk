@@ -150,6 +150,9 @@ Known limits against a RigDesk PC:
 * `desk/request(pc, why, kind)` — asks the operator, with Accept/Deny, about a stock PC: `join` (the default) joins
   the caller to it now for one session, as a share link would; `assign` gives it a standing grant. Refused at once for
   an unknown PC, or one already assigned to the caller.
+  This ask, like `desk/connect`'s and an invite's, is the operator's alone (`Then.operator_only`): Rig offers it to no
+  agent the caller's requests go to, here or on a linked machine, and refuses an agent's answer to it. Only the
+  operator answers it, or the person at the PC through its own prompt.
   On a RigDesk PC, Accept has Rig's bearer ask the PC for the session (`POST /join`), with no share link.
   The PC admits it only while its own switch is on (`-AgentJoin`, and the PIN-locked pause), no other agent holds its
   session and the caller is not blocked there. The person at the PC is notified and can end the session from the tray.
@@ -175,9 +178,12 @@ Known limits against a RigDesk PC:
   them, as a notification with Allow) logs in to it with no password, so the PC shows RustDesk's own prompt, and on
   Allow that very connection carries the agent's session: no password is used, and a stock PC needs none kept in Rig
   (leave out `password_file`, and only the person's Allow lets an agent in). An allowed connection no agent claims within
-  30 s, as when the operator answered first, is hung up. With no password kept, the agent's next desk call says the allowed
-  connection ended (the person disconnects, or ten idle minutes), and its next `desk/request` asks again; with one kept,
-  the agent keeps its hold and its next action dials in with the password, as unattended access. How the answer is bound: it counts only when it comes on that PC's own `/events` stream under Rig's bearer,
+  30 s, as when the operator answered first, is hung up. When the person closes a session there, allowed or logged in
+  with the password, the agent's hold ends: its next desk call says the person at that PC ended it, and nothing dials
+  the PC again, neither the saved password nor a desk call nor a viewer, until an agent joins it anew. An allowed
+  connection that ends otherwise (ten idle minutes) ends the hold too with no password kept, and its next `desk/request`
+  asks again; with one kept, the agent keeps its hold and its next action dials in with the password, as unattended
+  access. How the answer is bound: it counts only when it comes on that PC's own `/events` stream under Rig's bearer,
   names that request and carries the 128-bit nonce Rig made for it, which goes to the PC alone and never to the agent;
   and only while no agent holds a session on that PC, since one could click Accept there. No prompt is shown while one does.
   RigDesk on Android takes passwords only, so it shows Allow only for a knock signed with Rig's pairing key over that connection's
