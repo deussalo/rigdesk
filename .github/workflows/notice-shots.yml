@@ -1,0 +1,54 @@
+# Scratch, not for merge: the honest notice's shots on a Windows desktop, from the head's own build (windows run
+# 44680547356), with no rebuild of RigDesk; only rigdesk-bridge is built, for the B knock.
+name: notice-shots
+on:
+  push:
+    branches: [rig/rigdesk/desktop-honest-notice-shots]
+permissions:
+  actions: read
+  contents: read
+env:
+  RUST_VERSION: "1.75"
+jobs:
+  shots:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+      - name: The head's Windows build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 44680547356 -R ${{ github.repository }} -n rigdesk-windows-x64 -D rigdesk
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: stock-windows
+      - name: rigdesk-bridge
+        run: cargo build --release -p rigdesk-bridge --locked
+      - name: Install, as the install smoke does
+        timeout-minutes: 15
+        shell: powershell
+        run: .\.github\smoke\install.ps1
+      - name: Notice shots, killed after 10 minutes
+        timeout-minutes: 12
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "notice-shots"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $p = Start-Process powershell -PassThru -NoNewWindow -RedirectStandardOutput "$out\script.out.log" -RedirectStandardError "$out\script.err.log" `
+            -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".github\smoke\notice-shots.ps1"
+          $null = $p.Handle
+          $done = $p.WaitForExit(600000)
+          Get-Content "$out\script.out.log", "$out\script.err.log" -ErrorAction SilentlyContinue
+          if (-not $done) { taskkill /T /F /PID $p.Id; Write-Host "::error::notice shots hung past 10 minutes; script.out.log shows the last step"; exit 1 }
+          exit $p.ExitCode
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: notice-shots
+          path: ${{ runner.temp }}/notice-shots
+          if-no-files-found: warn
