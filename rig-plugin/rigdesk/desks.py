@@ -1694,12 +1694,12 @@ class Desks:
             return _object(await answer.json(content_type=None)).get("invite_open") is True
 
     async def _join_operator(self, pc: str, agent: str, graph: str, node: str, title: str, ask: str, via: Literal["link", "assigned"] = "link") -> Held:
-        """Rig's bearer asks a RigDesk PC for its session for this agent, with no share link; the PC's own switch admits it."""
+        """Rig's bearer asks a RigDesk PC for its session for this agent, with no share link; the PC's own switch admits it, and its notice
+        says how the agent got in: the person's Allow on the PC, a standing grant (Always allow, or an assigned PC), or the operator's Join once."""
         link = self._link(pc)
-        body = {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ask}
-        if ask in self.person_answered:
-            self.person_answered.discard(ask)
-            body["answered_by"] = "person"
+        how = "person" if ask in self.person_answered else "standing_grant" if via == "assigned" else "accept"
+        self.person_answered.discard(ask)
+        body = {"agent": {"id": agent, "title": title, "graph": graph}, "ask": ask, "how": how}
         async with self._client().post(f"{link.spec.url}/join", json=body, headers=self._headers(link), timeout=aiohttp.ClientTimeout(total=15)) as answer:
             said = _object(await answer.json(content_type=None)) if answer.content_type == "application/json" else {}
             if answer.status == 404 and said.get("code") != "no_join":

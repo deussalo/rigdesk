@@ -125,6 +125,47 @@ pub fn said(switch: &dyn Switch) -> Value {
     }
 }
 
+/// How an operator-started session was let in, as the PC's notice says it and the journal keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinedBy {
+    /// The operator's Join once in Rig, on a PC whose enrollment turned on sessions from Rig (`-AgentJoin on`).
+    RigAccept,
+    /// A standing grant: the operator's Always allow, or the PC assigned to the agent in Rig.
+    StandingGrant,
+    /// The person at the PC allowed the agent's request on the PC's own prompt.
+    PersonAllowed,
+}
+
+impl JoinedBy {
+    /// The `how` of a `/join` body, and of the tray's session line.
+    pub fn code(self) -> &'static str {
+        match self {
+            JoinedBy::RigAccept => "accept",
+            JoinedBy::StandingGrant => "standing_grant",
+            JoinedBy::PersonAllowed => "person",
+        }
+    }
+
+    pub fn parse(code: &str) -> Option<JoinedBy> {
+        [JoinedBy::RigAccept, JoinedBy::StandingGrant, JoinedBy::PersonAllowed].into_iter().find(|how| how.code() == code)
+    }
+
+    /// The journal's `by` of the join.
+    pub fn by(self) -> &'static str {
+        match self {
+            JoinedBy::RigAccept => "Rig, operator-approved",
+            JoinedBy::StandingGrant => "Rig, standing grant",
+            JoinedBy::PersonAllowed => "Rig, allowed by the person at the PC",
+        }
+    }
+}
+
+/// How a `/join` body says the session was let in.
+pub fn joined_by(body: &Value) -> Result<JoinedBy, String> {
+    let how = body.get("how").and_then(Value::as_str).unwrap_or("");
+    JoinedBy::parse(how).ok_or_else(|| format!("join wants how: accept, standing_grant or person, not {how:?}; Rig's rigdesk plugin is older than this PC's RigDesk"))
+}
+
 /// The joining agent and the operator's ask, from a `/join` body.
 pub fn request(body: &Value) -> Result<(Owner, String), String> {
     let agent = body.get("agent").ok_or("join wants agent: {id, title, graph}")?;
@@ -137,28 +178,33 @@ pub fn request(body: &Value) -> Result<(Owner, String), String> {
     Ok((owner, ask))
 }
 
-const PERSON_ALLOWED: &str = "\tperson";
-
-/// The session as the PC's tray reads it over IPC: "<agent id>\n<title>", the id marked when the person at the PC allowed it.
-pub fn session_line(agent_id: &str, title: &str, person_allowed: bool) -> String {
-    format!("{agent_id}{}\n{title}", if person_allowed { PERSON_ALLOWED } else { "" })
+/// The session as the PC's tray reads it over IPC: "<agent id>\t<how>\n<title>".
+pub fn session_line(agent_id: &str, title: &str, how: JoinedBy) -> String {
+    format!("{agent_id}\t{}\n{title}", how.code())
 }
 
-/// A `session_line`'s agent id, title, and whether the person at the PC allowed the session.
-pub fn parse_session(text: &str) -> Option<(&str, &str, bool)> {
-    let (id, title) = text.split_once('\n')?;
-    Some(match id.strip_suffix(PERSON_ALLOWED) {
-        Some(id) => (id, title, true),
-        None => (id, title, false),
-    })
+/// A `session_line`'s agent id, title, and how the session was let in.
+pub fn parse_session(text: &str) -> Option<(&str, &str, JoinedBy)> {
+    let (head, title) = text.split_once('\n')?;
+    let (id, how) = head.split_once('\t')?;
+    Some((id, title, JoinedBy::parse(how)?))
 }
 
-/// The title and text of the notification that a session started from Rig has begun.
-pub fn words(title: &str, person_allowed: bool) -> (String, String) {
-    let allowed = if person_allowed { "The person at this PC allowed it." } else { "The operator approved it in Rig." };
+/// What the tray's end entry says.
+pub fn disconnect(title: &str) -> String {
+    format!("Disconnect {title}")
+}
+
+/// The title and text of the notification that a session started from Rig has begun; the title is also the tray's line.
+pub fn words(title: &str, how: JoinedBy) -> (String, String) {
+    let joined = match how {
+        JoinedBy::RigAccept => "your Rig Accept, let in by this PC's -AgentJoin",
+        JoinedBy::StandingGrant => "Always allow in Rig, let in by -AgentJoin",
+        JoinedBy::PersonAllowed => "your Allow",
+    };
     (
-        format!("Rig agent {title} is using this computer"),
-        format!("{allowed} Your own mouse and keyboard still go first, and every action is logged. End it from the RigDesk tray icon."),
+        format!("Rig agent {title} joined: {joined}"),
+        format!("Your own mouse and keyboard still go first, and every action is logged. Disconnect is in the tray: {} on the RigDesk icon.", disconnect(title)),
     )
 }
 
@@ -167,18 +213,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_notification_says_who_allowed_the_session() {
-        assert!(words("Helper", false).1.starts_with("The operator approved it in Rig."));
-        let (summary, body) = words("Helper", true);
-        assert_eq!(summary, "Rig agent Helper is using this computer");
-        assert!(body.starts_with("The person at this PC allowed it."));
-        assert!(!body.contains("operator"));
+    fn the_notification_says_how_the_agent_got_in_and_where_disconnect_is() {
+        assert_eq!(words("Helper", JoinedBy::RigAccept).0, "Rig agent Helper joined: your Rig Accept, let in by this PC's -AgentJoin");
+        assert_eq!(words("Helper", JoinedBy::StandingGrant).0, "Rig agent Helper joined: Always allow in Rig, let in by -AgentJoin");
+        let (summary, body) = words("Helper", JoinedBy::PersonAllowed);
+        assert_eq!(summary, "Rig agent Helper joined: your Allow");
+        assert!(body.contains("Disconnect is in the tray: Disconnect Helper"), "{body}");
+        assert!(!body.contains("Dismiss"));
     }
 
     #[test]
-    fn the_tray_reads_who_allowed_the_session() {
-        assert_eq!(parse_session(&session_line("a1", "Helper", false)), Some(("a1", "Helper", false)));
-        assert_eq!(parse_session(&session_line("a1", "Helper", true)), Some(("a1", "Helper", true)));
+    fn the_tray_reads_how_the_session_was_let_in() {
+        for how in [JoinedBy::RigAccept, JoinedBy::StandingGrant, JoinedBy::PersonAllowed] {
+            assert_eq!(parse_session(&session_line("a1", "Helper\twith tab", how)), Some(("a1", "Helper\twith tab", how)));
+        }
         assert_eq!(parse_session(""), None);
+        assert_eq!(parse_session("a1\n"), None, "a line with no how is no session");
+    }
+
+    #[test]
+    fn a_join_says_how_or_is_refused() {
+        assert_eq!(joined_by(&json!({"how": "standing_grant"})), Ok(JoinedBy::StandingGrant));
+        assert_eq!(joined_by(&json!({"how": "person"})), Ok(JoinedBy::PersonAllowed));
+        assert!(joined_by(&json!({"answered_by": "person"})).unwrap_err().contains("older than this PC"));
+        assert!(joined_by(&json!({"how": "always"})).is_err());
     }
 }

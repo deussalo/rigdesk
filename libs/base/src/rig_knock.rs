@@ -93,6 +93,11 @@ pub struct Proved {
     pub name: String,
 }
 
+/// What a RigDesk desktop answers a knock, before its person sees anything: it is never paired with Rig, so it could
+/// show only a Dismiss, and it takes Rig's agents through Rig's own join, whose notice says how the agent got in.
+pub const DESKTOP_REFUSAL: &str = "This PC runs RigDesk, which asks its person only about Rig's own join: \
+set it up in Rig's settings as a RigDesk PC, with its install line, and desk/request reaches it with no knock";
+
 pub fn fresh_nonce() -> Vec<u8> {
     let mut nonce = vec![0u8; NONCE_BYTES];
     thread_rng().fill_bytes(&mut nonce);
